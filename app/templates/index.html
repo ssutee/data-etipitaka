@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+
+{% load static %}
+{% load staticfiles %}
+
+{% block body %}
+<div class="container">
+    <h1>E-Tipitaka User Data</h1>    
+    <br/>    
+    <p>Welcome anonymous user!
+      You need to <a href="/login">Login</a>
+      before you can use this application.</p>
+    <p>If you don't have an account, please <a href="/signup/">Register now!</a></p>    
+</div>
+{% endblock %}

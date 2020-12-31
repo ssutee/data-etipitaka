@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+
+{% load static %}
+{% load staticfiles %}
+
+{% block body %}
+<div class="container">
+    <h1>Validate your e-mail</h1>    
+    <br/>    
+    <p>
+    <span class="label label-success">Your registration was successful!</span>
+    </p>
+    <p>
+    Please check your inbox for an e-mail containing instructions on validating your e-mail address.
+    </p>
+    <p>
+    If you do not receive an e-mail within 5-10 minutes, please try <a href="/signup/">registering your account</a> again.
+    </p>
+</div>
+{% endblock %}

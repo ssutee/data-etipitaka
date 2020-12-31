@@ -1,0 +1,48 @@
+<div>
+<form class="form-horizontal" id="signup" role="form" method="post" action="/login/">{% csrf_token %}
+  {% if confirm_email %}
+  <div class="form-group row">
+    <div class="col-sm-offset-2 col-sm-10">
+      <span class="label label-success">Your email has been validated. You can login now.</span>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="form-group row">
+    <label for="username" class="col-sm-2 control-label">Username</label>
+    <div class="col-sm-6">
+      <input required name="username" type="text" class="form-control" id="username" placeholder="Username">
+    </div>
+  </div>
+
+  <div class="form-group row">
+    <label for="password1" class="col-sm-2 control-label">Password</label>
+    <div class="col-sm-6">
+      <input required name="password" type="password" class="form-control" id="password" placeholder="Password">
+    </div>
+  </div>
+
+  {% if invalid_login %}
+  <div class="form-group row">
+    <div class="col-sm-offset-2 col-sm-10">
+        Sorry, unrecognized username or password. <a href="/password_reset/">Have you forgotten your password?</a>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if disabled_account %}
+  <div class="form-group row">
+    <div class="col-sm-offset-2 col-sm-10">
+        Sorry, your account has been blocked.
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="form-group row">
+    <div class="col-sm-offset-2 col-sm-10">
+      <button type="submit" class="btn btn-default">Login</button>
+    </div>
+  </div>
+</form>
+</div>
+

@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+
+{% load static %}
+{% load staticfiles %}
+
+{% block body %}
+<div class="container">
+    <h1>Login</h1>    
+    <br/>        
+    {% include "forms/login_form.html" %}
+</div>
+{% endblock %}

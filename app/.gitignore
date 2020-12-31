@@ -1,0 +1,10 @@
+*.db
+*.sqlite3
+local_settings.py
+*.pyc
+*.pyo
+~*
+*.swp
+static/
+media/
+.well-known/

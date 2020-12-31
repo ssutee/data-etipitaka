@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+
+{% load static %}
+{% load staticfiles %}
+
+{% block body %}
+<div ng-controller="UserDataController" class="container" data-ng-init="init()">
+    <script type="text/ng-template" id="uploadModalContent.html">
+        <div class="modal-header">
+            <h3>Upload data file</h3>
+        </div>
+        <div class="modal-body">
+           <button class="btn btn-default" type="file" 
+                   ngf-max-size="2MB"
+                   ngf-select="uploadFiles($file, $invalidFiles, '{{csrf_token}}')" 
+                   ngf-accept="'.js,.etz,.json'">Select File</button> &nbsp;
+            <span class="label label-success" ng-show="progress==100&&success"> Upload completed </span>
+            <span class="label label-danger" ng-show="progress==100&&fileExists"> File already exists </span>
+            <br/><br/>
+            File: {{f.name}} 
+            <div class="progress" ng-show="progress>0">
+              <div class="progress-bar" role="progressbar" aria-valuenow="<[progress]>" aria-valuemin="0" aria-valuemax="100" style="width: <[progress]>%;">
+                <[progress]>%
+              </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" type="button" ng-click="close()">Close</button>
+        </div>
+    </script>    
+
+    <h1>E-Tipitaka User Data</h1>    
+    <br/>    
+    <div class="container">
+        <!-- Nav tabs -->
+        <ul class="nav nav-tabs" role="tablist">
+            <li role="presentation" class="active">
+                <a href="#ios" aria-controls="ios" role="tab" data-toggle="tab">iOS</a>
+            </li>
+            <li role="presentation">
+                <a href="#android" aria-controls="android" role="tab" data-toggle="tab">Android</a>
+            </li>
+            <li role="presentation">
+                <a href="#pc" aria-controls="pc" role="tab" data-toggle="tab">PC</a>
+            </li>
+            <li role="presentation">
+                <a href="#share" aria-controls="share" role="tab" data-toggle="tab">Share</a>
+            </li>                
+        </ul>
+        <!-- Tab panes -->
+        <div class="tab-content">
+            <div role="tabpanel" class="tab-pane active" id="ios">
+                <table class="table table-striped table-hover">
+                    {% include "fragments/table_header.html" %}
+                    <tbody>
+                        <tr ng-repeat="item in $root.items | filter: ios | orderBy: '-pk' track by $index">
+                            {% include "fragments/table_body.html" %}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div role="tabpanel" class="tab-pane" id="android">
+                <table class="table table-striped table-hover">
+                    {% include "fragments/table_header.html" %}
+                    <tbody>
+                        <tr ng-repeat="item in $root.items | filter: android | orderBy: '-pk' track by $index">
+                            {% include "fragments/table_body.html" %}
+                        </tr>
+                    </tbody>
+                </table>                
+            </div>
+            <div role="tabpanel" class="tab-pane" id="pc">
+                <table class="table table-striped table-hover">
+                    {% include "fragments/table_header.html" %}
+                    <tbody>
+                        <tr ng-repeat="item in $root.items | filter: pc | orderBy: '-pk' track by $index">
+                            {% include "fragments/table_body.html" %}
+                        </tr>                        
+                    </tbody>
+                </table>                
+            </div>
+            <div role="tabpanel" class="tab-pane" id="share">
+                <b>Select user</b>
+                <div class="row">
+                    <div class="checkbox-list">
+                        <div ng-repeat="item in $root.sharingList">
+                            <input type="checkbox" ng-model="$root.sharing[item.pk]" ng-change="changeSharing(item.pk, '{{csrf_token}}')" /> <[item.username]>
+                        </div>
+                    </div>                  
+                </div>
+            </div>            
+        </div>
+    </div>
+</div>
+{% endblock %}
