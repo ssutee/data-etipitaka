@@ -198,7 +198,7 @@ def user_data_action(request, pk):
         except UserData.DoesNotExist:
             raise NotFound()
 
-    raise Http404('Unsupport operation')
+    raise Http404('Unsupport operation')  # pragma: no cover
 
 @api_view(['GET'])
 @authentication_classes((TokenAuthentication, SessionAuthentication,))

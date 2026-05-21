@@ -1,0 +1,12 @@
+[run]
+omit =
+    */migrations/*
+    */management/*
+    */tests/*
+    */apps.py
+    */__init__.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError

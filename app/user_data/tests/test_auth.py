@@ -100,6 +100,15 @@ def test_verify_email_rejects_bad_token(api):
     assert resp.status_code == 400
 
 
+def test_verify_email_rejects_token_for_deleted_user(api):
+    # A validly-signed token whose user no longer exists must be rejected.
+    user = User.objects.create_user('gone', 'gone@example.com', 'pw12345678')
+    token = _signer().sign(str(user.pk))
+    user.delete()
+    resp = api.post('/rest-auth/registration/verify-email/', {'key': token})
+    assert resp.status_code == 400
+
+
 def test_confirm_email_link_activates_and_redirects(api):
     user = User(username='pending', email='p@example.com', is_active=False)
     user.set_password('pw12345678')

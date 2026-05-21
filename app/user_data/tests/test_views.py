@@ -83,6 +83,13 @@ def test_download_user_data_allowed_with_sharing(auth_alice, alice, bob, tmp_pat
     assert resp.status_code == 200
 
 
+def test_download_user_data_missing_syncdata_is_404(auth_alice, alice, bob):
+    # Sharing is granted, but the owner has no syncdata with that name.
+    Sharing.objects.create(owner=bob, follower=alice)
+    resp = auth_alice.get('/user/%d/missing.json/' % bob.pk)
+    assert resp.status_code == 404
+
+
 # --- download_sync_data ---
 
 def test_download_sync_data_404(auth_alice, alice):
@@ -120,6 +127,26 @@ def test_upload_sync_data_no_file_returns_failure(auth_alice, alice):
     assert resp.json()['success'] is False
 
 
+def test_upload_sync_data_replaces_existing_file_on_disk(auth_alice, alice, tmp_path, settings):
+    # An existing SyncData row with the same name+platform whose file is on
+    # disk must have that file removed before the replacement is stored.
+    settings.MEDIA_ROOT = str(tmp_path)
+    old = make_syncdata(alice, name='s.json', platform='ios')
+    _write_media(settings.MEDIA_ROOT, old.file.name, b'OLD')
+    upload = SimpleUploadedFile('s.json', b'{"v":2}', content_type='application/json')
+    resp = auth_alice.post('/sync_data/', {
+        'platform': 'ios', 'timestamp': '2020-01-01T00:00:00+00:00', 'file': upload,
+    }, format='multipart')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is True
+    # The old row (and its on-disk file) is gone; a single fresh row remains.
+    assert SyncData.objects.filter(user=alice, name='s.json').count() == 1
+    assert not SyncData.objects.filter(pk=old.pk).exists()
+    new = SyncData.objects.get(user=alice, name='s.json')
+    with open(new.file.path, 'rb') as handle:
+        assert handle.read() == b'{"v":2}'
+
+
 # --- upload_view ---
 
 def test_upload_view_creates_userdata(auth_alice, alice, tmp_path, settings):
@@ -138,6 +165,45 @@ def test_upload_view_detects_existing_file(auth_alice, alice, tmp_path, settings
     resp = auth_alice.post('/upload/', {'title': 't', 'file': upload}, format='multipart')
     assert resp.status_code == 200
     assert resp.json().get('file_exists') is True
+
+
+def test_upload_view_detects_pc_platform(auth_alice, alice, tmp_path, settings):
+    settings.MEDIA_ROOT = str(tmp_path)
+    upload = SimpleUploadedFile('d.etz', b'zzz', content_type='application/octet-stream')
+    resp = auth_alice.post('/upload/', {'title': 't', 'file': upload}, format='multipart')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is True
+    assert UserData.objects.get(user=alice).platform == 'pc'
+
+
+def test_upload_view_detects_android_platform(auth_alice, alice, tmp_path, settings):
+    settings.MEDIA_ROOT = str(tmp_path)
+    upload = SimpleUploadedFile('d.js', b'zzz', content_type='application/javascript')
+    resp = auth_alice.post('/upload/', {'title': 't', 'file': upload}, format='multipart')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is True
+    assert UserData.objects.get(user=alice).platform == 'android'
+
+
+def test_upload_view_removes_previously_deleted_file(auth_alice, alice, tmp_path, settings):
+    # A soft-deleted UserData row with the same path: its file on disk is
+    # removed before the fresh upload is stored.
+    settings.MEDIA_ROOT = str(tmp_path)
+    old = make_userdata(alice, deleted=True, name='d.json')
+    _write_media(settings.MEDIA_ROOT, old.file.name, b'OLD')
+    upload = SimpleUploadedFile('d.json', b'{"v":1}', content_type='application/json')
+    resp = auth_alice.post('/upload/', {'title': 't', 'file': upload}, format='multipart')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is True
+    # A fresh (non-deleted) row was created alongside the old deleted one.
+    assert UserData.objects.filter(user=alice, deleted=False).count() == 1
+
+
+def test_upload_view_invalid_form_returns_failure(auth_alice, alice):
+    # No file field -> UploadFileForm is invalid.
+    resp = auth_alice.post('/upload/', {'title': 't'}, format='multipart')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is False
 
 
 # --- user_data_action: GET / DELETE / soft-delete ---
@@ -166,6 +232,26 @@ def test_user_data_action_delete_soft_deletes(auth_alice, alice, tmp_path, setti
     assert resp.status_code == 200
     ud.refresh_from_db()
     assert ud.deleted is True
+
+
+def test_user_data_action_delete_missing_returns_failure(auth_alice, alice):
+    resp = auth_alice.delete('/user_data/99999/')
+    assert resp.status_code == 200
+    assert resp.json()['success'] is False
+
+
+def test_user_data_action_get_missing_is_404(auth_alice, alice):
+    resp = auth_alice.get('/user_data/99999/')
+    assert resp.status_code == 404
+
+
+def test_user_data_action_get_etz_content_type(auth_alice, alice, tmp_path, settings):
+    settings.MEDIA_ROOT = str(tmp_path)
+    ud = make_userdata(alice, name='d.etz')
+    _write_media(settings.MEDIA_ROOT, ud.file.name, b'zzz')
+    resp = auth_alice.get('/user_data/%d/' % ud.pk)
+    assert resp.status_code == 200
+    assert resp['Content-Type'] == 'application/etipitaka'
 
 
 # --- user_data_list ---
@@ -219,6 +305,33 @@ def test_login_view_post_valid(api, alice):
 def test_login_view_post_invalid(api, alice):
     resp = api.post('/login/', {'username': 'alice', 'password': 'wrong'})
     assert resp.status_code == 200
+
+
+def test_user_data_view_authenticated_renders(api, alice):
+    api.force_login(alice)
+    resp = api.get('/user_data/')
+    assert resp.status_code == 200
+
+
+def test_login_view_post_disabled_account(api, monkeypatch):
+    # The default ModelBackend returns None for inactive users, so the
+    # disabled-account branch is only reachable when authenticate() yields an
+    # inactive user. Patch authenticate to exercise that branch.
+    from django.contrib.auth.models import User
+    from user_data import views as views_module
+    user = User(username='pending', email='p@example.com', is_active=False)
+    user.set_password('pw12345678')
+    user.save()
+    monkeypatch.setattr(views_module, 'authenticate', lambda **kw: user)
+    resp = api.post('/login/', {'username': 'pending', 'password': 'pw12345678'})
+    assert resp.status_code == 200
+    assert resp.context['disabled_account'] is True
+
+
+def test_login_view_get_with_email_param(api):
+    resp = api.get('/login/?email=confirm')
+    assert resp.status_code == 200
+    assert resp.context['confirm_email'] is True
 
 
 def _write_media(media_root, rel_name, content):
