@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "detail": "Not found."
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 404
+}

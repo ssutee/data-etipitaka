@@ -1,0 +1,18 @@
+{
+  "body": {
+    "json": {
+      "items": [
+        {
+          "pk": 1002,
+          "username": "bob"
+        }
+      ]
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

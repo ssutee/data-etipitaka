@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "items": "[{\"model\": \"user_data.userdata\", \"pk\": 3002, \"fields\": {\"user\": 1001, \"platform\": \"ios\", \"file\": \"alice/ios/data_alice.json\", \"deleted\": true, \"created_at\": \"<TIMESTAMP>\"}}]"
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

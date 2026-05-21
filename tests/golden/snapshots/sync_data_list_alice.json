@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "items": "[{\"model\": \"user_data.syncdata\", \"pk\": 2002, \"fields\": {\"user\": 1001, \"name\": \"sync_alice.json\", \"checksum\": \"seedchecksum\", \"platform\": \"ios\", \"file\": \"alice/ios/sync_alice.json\", \"created_at\": \"<TIMESTAMP>\"}}]"
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

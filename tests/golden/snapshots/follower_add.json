@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "success": true
+    }
+  },
+  "headers": {
+    "allow": "POST, OPTIONS, DELETE",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

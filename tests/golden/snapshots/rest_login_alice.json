@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "key": "a1ce000000000000000000000000000000000001"
+    }
+  },
+  "headers": {
+    "allow": "POST, OPTIONS",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

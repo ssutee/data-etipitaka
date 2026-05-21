@@ -1,0 +1,14 @@
+{
+  "body": {
+    "json": {
+      "detail": "Authentication credentials were not provided."
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked",
+    "www-authenticate": "Token"
+  },
+  "status": 401
+}

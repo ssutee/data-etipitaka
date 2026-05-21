@@ -1,0 +1,18 @@
+{
+  "body": {
+    "json": {
+      "checksums": [
+        {
+          "sync_golden.json": "5cb47443dcbb106ade5968ed60030a13"
+        }
+      ],
+      "success": true
+    }
+  },
+  "headers": {
+    "allow": "POST, OPTIONS",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

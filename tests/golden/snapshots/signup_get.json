@@ -1,0 +1,10 @@
+{
+  "body": {
+    "html_sha256": "4832e1806c5f4a84e907332c67669e6a265d57bca322688804b75c7b5f72a029"
+  },
+  "headers": {
+    "content-type": "text/html; charset=utf-8",
+    "transfer-encoding": "chunked"
+  },
+  "status": 200
+}

@@ -1,0 +1,11 @@
+{
+  "body": {
+    "body_sha256": "578902e95b61df8947a82008bea46d594bfcbfdf2885df91c25edd31c3c7f2aa"
+  },
+  "headers": {
+    "allow": "OPTIONS, GET",
+    "content-disposition": "attachment; filename=\"sync_alice.json\"",
+    "content-type": "application/etipitaka"
+  },
+  "status": 200
+}

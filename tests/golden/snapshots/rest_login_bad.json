@@ -1,0 +1,15 @@
+{
+  "body": {
+    "json": {
+      "non_field_errors": [
+        "Unable to log in with provided credentials."
+      ]
+    }
+  },
+  "headers": {
+    "allow": "POST, OPTIONS",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked"
+  },
+  "status": 400
+}
