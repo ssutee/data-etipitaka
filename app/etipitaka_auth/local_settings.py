@@ -3,6 +3,8 @@ DEBUG = False
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = 'https'
 HTTPS = True
 
+CSRF_TRUSTED_ORIGINS = ['https://data.etipitaka.com']
+
 EMAIL_USE_TLS = True
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_HOST_USER = 'etipitaka@gmail.com'
