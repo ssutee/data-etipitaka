@@ -3,6 +3,14 @@ import pytest
 import requests
 
 
+def pytest_collection_modifyitems(items):
+    # Golden snapshot cases assume the pristine seed dataset. Behavioral tests
+    # mutate the shared database (registration creates a user, which would
+    # pollute sharing_list). Force the golden module to run first so it sees
+    # the clean seed; behavioral runs afterward where its writes harm nothing.
+    items.sort(key=lambda item: 0 if "test_golden" in item.nodeid else 1)
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--record", action="store_true", default=False,
