@@ -5,7 +5,34 @@
 - HTML pages are checked for status + key content, not byte-identity: a
   SHA-256 of rendered HTML is too brittle across a Django major-version jump.
 """
+import re
 import uuid
+
+import requests
+
+
+# --- web login through nginx (CSRF) ---
+
+def test_web_login_through_nginx_succeeds(base_url):
+    # Full browser-style login: GET sets the csrftoken cookie, the POST sends
+    # the form token plus an Origin header. Regression test for the nginx
+    # Host-header / Django CSRF Origin-check mismatch (port-stripped Host).
+    # Uses an isolated session so the resulting login cookie does not leak
+    # into other tests on the shared session.
+    session = requests.Session()
+    try:
+        page = session.get(base_url + "/login/", timeout=30)
+        assert page.status_code == 200
+        match = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', page.text)
+        assert match, "csrfmiddlewaretoken not found in the login form"
+        resp = session.post(base_url + "/login/", data={
+            "csrfmiddlewaretoken": match.group(1),
+            "username": "alice", "password": "alicepass123",
+        }, headers={"Origin": base_url, "Referer": base_url + "/login/"},
+           allow_redirects=False, timeout=30)
+        assert resp.status_code == 302, "browser login failed (got %s)" % resp.status_code
+    finally:
+        session.close()
 
 
 # --- registration / email verification ---
