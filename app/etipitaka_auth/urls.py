@@ -2,7 +2,8 @@ from django.contrib import admin
 from django.urls import include, path, re_path
 from django.views.generic import TemplateView
 
-from user_data import views
+from user_data import views, auth_views
+from user_data.auth_urls import rest_auth_patterns
 
 urlpatterns = [
     path('', views.index_view),
@@ -21,6 +22,9 @@ urlpatterns = [
     path('login/', views.login_view),
     path('signup/', TemplateView.as_view(template_name="signup.html")),
     path('signup/validate/', TemplateView.as_view(template_name="validate.html")),
+    re_path(r'^account/confirm-email/(?P<key>[^/]+)/$',
+            auth_views.account_confirm_email, name='account_confirm_email'),
+    path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('admin/', admin.site.urls),
     path('', include('django.contrib.auth.urls')),
 ]
