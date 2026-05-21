@@ -6,8 +6,6 @@ from django.contrib.auth.models import User
 from django.core import serializers
 from django.db.models import Q
 
-from allauth.account.decorators import verified_email_required
-
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
@@ -214,7 +212,7 @@ def user_data_view(request):
     return render(request, 'user_data.html', {})
 
 def index_view(request):
-    if request.user.is_authenticated():
+    if request.user.is_authenticated:
         return HttpResponseRedirect('/user_data/')
     return render(request, 'index.html', {})
 
