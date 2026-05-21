@@ -40,11 +40,12 @@ class GoldenCase(object):
 
 
 GOLDEN_CASES = [
-    # --- public pages ---
-    GoldenCase("index_anon", "GET", "/"),
-    GoldenCase("login_get", "GET", "/login/"),
-    GoldenCase("signup_get", "GET", "/signup/"),
-    GoldenCase("validate_get", "GET", "/signup/validate/"),
+    # HTML pages (index, login, signup, validate, the CSRF-failure page) are
+    # NOT golden cases: a SHA-256 of rendered HTML is too brittle across a
+    # Django major-version jump. They are covered by content assertions in
+    # test_behavioral.py instead.
+
+    # --- redirects / status-only ---
     GoldenCase("user_data_view_anon", "GET", "/user_data/"),
 
     # --- auth required, unauthenticated ---
@@ -66,10 +67,6 @@ GOLDEN_CASES = [
     GoldenCase("download_user_data_denied", "GET", "/user/9999/sync_alice.json/", token=ALICE_TOKEN),
     GoldenCase("user_data_action_get", "GET", "/user_data/3001/", token=ALICE_TOKEN),
     GoldenCase("user_data_action_get_deleted", "GET", "/user_data/3002/", token=ALICE_TOKEN),
-
-    # --- login form posts ---
-    GoldenCase("login_post_invalid", "POST", "/login/",
-               data={"username": "alice", "password": "wrongpass"}),
 
     # --- rest-auth login (token key is the fixed seed value -> deterministic) ---
     GoldenCase("rest_login_alice", "POST", "/rest-auth/login/",
