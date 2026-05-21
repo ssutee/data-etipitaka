@@ -3,3 +3,4 @@
 ~*
 *.swp
 static/
+tests/golden/.venv/
