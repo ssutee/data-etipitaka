@@ -3,16 +3,15 @@
     "json": {
       "items": [
         {
-          "pk": 1002,
+          "pk": "<PK>",
           "username": "bob"
         }
       ]
     }
   },
   "headers": {
-    "allow": "OPTIONS, GET",
-    "content-type": "application/json",
-    "transfer-encoding": "chunked"
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
   },
   "status": 200
 }

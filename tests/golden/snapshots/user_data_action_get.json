@@ -3,7 +3,7 @@
     "body_sha256": "261cc4453269ec0912d2dafa71d5dbe9c2a326d2f495ec38379ffa1edb1fd8d2"
   },
   "headers": {
-    "allow": "GET, OPTIONS, DELETE",
+    "allow": "DELETE, GET, OPTIONS",
     "content-disposition": "attachment; filename=\"data_alice.json\"",
     "content-type": "text/json"
   },

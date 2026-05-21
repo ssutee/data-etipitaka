@@ -4,8 +4,7 @@
   },
   "headers": {
     "content-type": "text/html; charset=utf-8",
-    "location": "/login/?next=/user_data/",
-    "transfer-encoding": "chunked"
+    "location": "/login/?next=/user_data/"
   },
   "status": 302
 }

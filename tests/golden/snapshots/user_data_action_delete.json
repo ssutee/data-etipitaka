@@ -1,14 +1,13 @@
 {
   "body": {
     "json": {
-      "pk": "3001",
+      "pk": "<PK>",
       "success": true
     }
   },
   "headers": {
-    "allow": "GET, OPTIONS, DELETE",
-    "content-type": "application/json",
-    "transfer-encoding": "chunked"
+    "allow": "DELETE, GET, OPTIONS",
+    "content-type": "application/json"
   },
   "status": 200
 }

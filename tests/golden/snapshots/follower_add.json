@@ -5,9 +5,8 @@
     }
   },
   "headers": {
-    "allow": "POST, OPTIONS, DELETE",
-    "content-type": "application/json",
-    "transfer-encoding": "chunked"
+    "allow": "DELETE, OPTIONS, POST",
+    "content-type": "application/json"
   },
   "status": 200
 }

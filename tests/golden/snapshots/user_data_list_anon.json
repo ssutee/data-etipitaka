@@ -5,9 +5,8 @@
     }
   },
   "headers": {
-    "allow": "OPTIONS, GET",
+    "allow": "GET, OPTIONS",
     "content-type": "application/json",
-    "transfer-encoding": "chunked",
     "www-authenticate": "Token"
   },
   "status": 401

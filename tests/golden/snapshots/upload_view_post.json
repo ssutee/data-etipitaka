@@ -1,14 +1,13 @@
 {
   "body": {
     "json": {
-      "pk": 1,
+      "pk": "<PK>",
       "success": true
     }
   },
   "headers": {
-    "allow": "POST, OPTIONS",
-    "content-type": "application/json",
-    "transfer-encoding": "chunked"
+    "allow": "OPTIONS, POST",
+    "content-type": "application/json"
   },
   "status": 200
 }
