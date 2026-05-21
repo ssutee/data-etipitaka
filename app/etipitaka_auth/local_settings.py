@@ -11,7 +11,7 @@ EMAIL_PORT = 587
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql_psycopg2',
+        'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'etipitaka_data',
         'USER': 'etipitaka',
         'PASSWORD': 'u2-*^We#9aP',
