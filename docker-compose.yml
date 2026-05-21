@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     command: gunicorn etipitaka_auth.wsgi:application --bind 0.0.0.0:8000
     volumes:
+      - ./app:/home/app/web
       - static_volume:/home/app/web/static
       - media_volume:/home/app/web/media
     expose:
