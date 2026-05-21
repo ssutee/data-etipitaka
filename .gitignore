@@ -3,6 +3,7 @@
 ~*
 *.swp
 static/
+media/
 tests/golden/.venv/
 .coverage
 graphify-out/

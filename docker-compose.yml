@@ -7,7 +7,7 @@ services:
     volumes:
       - ./app:/home/app/web
       - static_volume:/home/app/web/static
-      - media_volume:/home/app/web/media
+      - ./media:/home/app/web/media
     expose:
       - 8000
     env_file:
@@ -30,7 +30,7 @@ services:
     build: ./nginx
     volumes:
       - static_volume:/home/app/web/static
-      - media_volume:/home/app/web/media
+      - ./media:/home/app/web/media
     ports:
       - 1338:80
     depends_on:
@@ -39,4 +39,3 @@ services:
 volumes:
   postgres_data:
   static_volume:
-  media_volume:
