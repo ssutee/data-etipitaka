@@ -1,4 +1,4 @@
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from django.contrib.auth import authenticate, login
 from django.http import HttpResponseRedirect, JsonResponse, HttpResponse, Http404
 from django.contrib.auth.decorators import login_required
@@ -31,7 +31,7 @@ def sync_data_list(request):
 @authentication_classes((TokenAuthentication, SessionAuthentication,))
 @permission_classes((IsAuthenticated,))
 def user(request, pk):
-    user = User.objects.get(pk=pk)
+    user = get_object_or_404(User, pk=pk)
     items = serializers.serialize('json', user.syncdata_set.all())
     return JsonResponse({'items':items})
 
@@ -65,7 +65,7 @@ def follower(request, pk):
         request.user.sharing_owners.filter(follower__pk=int(pk)).delete()
         return JsonResponse({'success': True})
     elif request.method == 'POST' and request.user.sharing_owners.filter(follower__pk=int(pk)).count() == 0:
-        follower = User.objects.get(pk=int(pk))
+        follower = get_object_or_404(User, pk=int(pk))
         s = Sharing(owner=request.user, follower=follower)
         s.save()
         return JsonResponse({'success': True})
@@ -78,8 +78,8 @@ def follower(request, pk):
 def download_user_data(request, pk, name):
     if Sharing.objects.filter(follower__pk=request.user.pk, owner__pk=int(pk)).count() == 0:
         raise NotFound()
+    user = get_object_or_404(User, pk=pk)
     try:
-        user = User.objects.get(pk=pk)
         sync_data = user.syncdata_set.get(name=name)
         response = HttpResponse(sync_data.file, content_type='application/etipitaka')
         response['Content-Disposition'] = 'attachment; filename="%s"' % (sync_data.file.name.split('/')[-1])

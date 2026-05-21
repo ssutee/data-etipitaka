@@ -19,10 +19,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # See https://docs.djangoproject.com/en/1.9/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'm%*35ow_mc!8)8nmm$kma8i7w5k$1xt8^a4pl&@655j%-we*70'
+# Production supplies DJANGO_SECRET_KEY via the environment; the literal
+# below is an insecure placeholder for local development and CI only.
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY') or 'django-insecure-dev-key-not-for-production'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', '') == 'True'
 
 FILE_SERVER = 'data.etipitaka.com'
 
@@ -56,7 +58,10 @@ MIDDLEWARE = [
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework.authentication.TokenAuthentication',
-   )
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/min',
+    },
 }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
@@ -160,3 +165,6 @@ except ImportError:
 import sys
 if 'pytest' in sys.modules or 'test' in sys.argv:
     EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+    # Disable login throttling under tests — the in-process throttle cache
+    # would otherwise accumulate across test cases and trip false 429s.
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'] = None

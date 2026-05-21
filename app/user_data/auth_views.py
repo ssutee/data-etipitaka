@@ -7,12 +7,19 @@ from django.template.loader import render_to_string
 
 from rest_framework import status
 from rest_framework.authtoken.models import Token
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.decorators import (api_view, authentication_classes,
+                                       permission_classes, throttle_classes)
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 
 from .serializers import RegisterSerializer, LoginSerializer
+
+
+class LoginRateThrottle(AnonRateThrottle):
+    """Throttles the token-login endpoint by client IP (rate: settings 'login')."""
+    scope = 'login'
 
 
 def _signer():
@@ -48,6 +55,7 @@ def _activate_from_token(token):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
+@throttle_classes([LoginRateThrottle])
 def rest_login(request):
     serializer = LoginSerializer(data=request.data)
     if not serializer.is_valid():
