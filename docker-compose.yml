@@ -5,6 +5,7 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
+    platform: linux/amd64
     command: gunicorn etipitaka_auth.wsgi:application --bind 0.0.0.0:8000
     volumes:
       - static_volume:/home/app/web/static

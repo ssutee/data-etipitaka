@@ -26,7 +26,7 @@ DEBUG = True
 
 FILE_SERVER = 'data.etipitaka.com'
 
-ALLOWED_HOSTS = ['data.etipitaka.com','128.199.181.198']
+ALLOWED_HOSTS = ['data.etipitaka.com','128.199.181.198','localhost','127.0.0.1']
 
 
 # Application definition
