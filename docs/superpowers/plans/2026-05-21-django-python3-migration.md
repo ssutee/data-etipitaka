@@ -21,6 +21,12 @@
 5. **`signup_form.html` posts to URL name `rest_register`** — the rebuilt registration endpoint must keep that exact `name=`.
 6. **The real database config lives in `local_settings.py`** — `settings.py` declares sqlite3 but `local_settings.py` overrides it with Postgres.
 
+## Corrections discovered during execution (Task 1.10)
+
+7. **Postgres must be bumped 12 → 16** — Django 5.2 hard-requires PostgreSQL 14+ and refuses to connect to PG12 (`NotSupportedError`). `docker-compose.yml` `db` service is now `postgres:16-alpine`. This is mandatory, not the deferred follow-up the spec originally assumed. Consequences: any task that resets the DB must also wipe the `postgres_data` volume (a PG16 server cannot start on a PG12 data dir); production cutover needs a one-time PG12→PG16 data upgrade — see Task 5.3.
+8. **`django.contrib.messages` is required in `INSTALLED_APPS`** — Django's admin fails the `admin.E406` system check without it. It was dropped in the Phase 1 settings rewrite (Task 1.5) and has been added back.
+   (Both corrections 7 and 8 were committed during Task 1.10 as `fix: bump Postgres to 16 and add messages app for Django 5.2`.)
+
 ## File structure
 
 **Phase 0 — golden harness** (all new):
@@ -945,9 +951,10 @@ git commit -m "refactor: load static (staticfiles tag lib removed in Django 3.0)
 
 ```bash
 docker compose down
+docker volume rm data-etipitaka_postgres_data data-etipitaka_media_volume
 docker compose up -d --build
 ```
-Expected: all three containers start.
+Expected: all three containers start. The `postgres_data` volume MUST be removed — the `db` service is now `postgres:16-alpine` and a PG16 server cannot start on the old PG12 data directory. The Phase 0 golden seed is re-created by `seed_golden` in Step 3, so wiping the volume loses nothing needed here.
 
 - [ ] **Step 2: Confirm no model drift**
 
@@ -2143,7 +2150,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:12.0-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_DB: etipitaka_data
           POSTGRES_USER: etipitaka
@@ -2249,22 +2256,77 @@ git add CLAUDE.md
 git commit -m "docs: update CLAUDE.md for the Django 5.2 stack"
 ```
 
-> **Gate:** CI green on both jobs. Migration complete.
+### Task 5.3: Production PostgreSQL 12 → 16 upgrade runbook
+
+Django 5.2 requires PostgreSQL 14+. Production currently runs PG12. A PG16 server will not start on a PG12 data directory, so the production database must be upgraded as part of cutover. This task produces the runbook; the actual upgrade is run by whoever operates production, during the maintenance window.
+
+**Files:**
+- Create: `docs/runbooks/postgres-12-to-16-upgrade.md`
+
+- [ ] **Step 1: Write `docs/runbooks/postgres-12-to-16-upgrade.md`** documenting the dump/restore upgrade path (simplest and safest for a database this small):
+
+```markdown
+# Production PostgreSQL 12 → 16 upgrade
+
+Required before the Django 5.2 release can be deployed — Django 5.2 refuses
+to connect to PostgreSQL < 14.
+
+## Preconditions
+- Maintenance window (the app is offline during the upgrade).
+- Verified, restorable backup of the PG12 database.
+
+## Procedure (dump / restore)
+
+1. Stop the application containers (leave `db` running):
+   `docker compose stop web nginx`
+
+2. Dump the PG12 database:
+   `docker compose exec db pg_dump -U etipitaka -Fc etipitaka_data > etipitaka_data.dump`
+
+3. Stop and remove the PG12 container and its volume:
+   `docker compose stop db`
+   `docker compose rm -f db`
+   `docker volume rm data-etipitaka_postgres_data`
+
+4. Pull the new image and start a fresh PG16 instance:
+   `docker compose up -d db`
+   (compose now pins `postgres:16-alpine`; the empty volume initialises a PG16 cluster.)
+
+5. Restore the dump into PG16:
+   `cat etipitaka_data.dump | docker compose exec -T db pg_restore -U etipitaka -d etipitaka_data --clean --if-exists`
+
+6. Start the app and run migrations:
+   `docker compose up -d web nginx`
+   `docker compose exec web python manage.py migrate --noinput`
+
+7. Smoke-test, then delete `etipitaka_data.dump`.
+
+## Rollback
+If restore fails, recreate the PG12 container (temporarily repin `postgres:12.0-alpine`)
+and restore the dump there; the application stays on the old release until resolved.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add docs/runbooks/postgres-12-to-16-upgrade.md
+git commit -m "docs: production Postgres 12 to 16 upgrade runbook"
+```
+
+> **Gate:** CI green on both jobs; production upgrade runbook written. Migration complete.
 
 ---
 
 ## Final verification checklist
 
-- [ ] `docker compose up -d --build` starts all three containers
+- [ ] `docker compose up -d --build` starts all three containers (db on `postgres:16-alpine`)
 - [ ] `docker compose exec web python manage.py makemigrations --check --dry-run` → `No changes detected`
 - [ ] `pytest tests/golden` green against the new app (matches the Phase 0 baseline)
 - [ ] `pytest tests/golden/test_behavioral.py` green
 - [ ] `docker compose exec web python -m pytest` green, coverage ≥ 90%
 - [ ] CI workflow green on both jobs
-- [ ] Production cutover: deploy against the existing Postgres DB (schema unchanged); old `allauth`/`socialaccount` tables remain as harmless orphans
+- [ ] Production cutover: PG12→PG16 upgrade per `docs/runbooks/postgres-12-to-16-upgrade.md`, then deploy; old `allauth`/`socialaccount` tables remain as harmless orphans
 
 ## Out of scope (follow-up tasks)
-
-- Bumping Postgres 12 → 16 (12 is past EOL)
 - Dropping the orphaned `allauth_*` / `socialaccount_*` tables via a cleanup migration
 - Moving `SECRET_KEY` / email credentials out of source into environment variables

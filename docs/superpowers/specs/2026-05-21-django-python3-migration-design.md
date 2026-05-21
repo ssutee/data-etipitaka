@@ -42,7 +42,7 @@ The work is gated by a cross-stack **golden test harness**: every endpoint's cur
 
 - `app/Dockerfile` base image `frolvlad/alpine-python2` → `python:3.13-slim`. `psycopg[binary]` ships wheels, so the compile/build stage (`gcc`, `postgresql-dev`, `musl-dev`) is removed.
 - `docker-compose.yml`: `platform: linux/amd64` removed (Python 3 images are multi-arch).
-- `nginx` stays at `1.27-alpine`. Postgres stays `12.0` (see Out of Scope).
+- `nginx` stays at `1.27-alpine`. **Postgres is bumped `12.0` → `16-alpine`** — Django 5.2 hard-requires PostgreSQL 14+ and refuses to connect to PG12, so this is a mandatory part of the migration, not optional.
 
 ### Repo layout
 
@@ -141,7 +141,7 @@ The current 7804-object fixture includes `account.emailaddress`, `socialaccount.
 
 Two data paths:
 
-1. **Production DB (existing data):** keep the Postgres database as-is. The new app runs `migrate` → no-ops, because the schema is unchanged. The old `allauth` / `socialaccount` tables become harmless orphans (an optional cleanup migration can drop them later). No re-load, no data loss.
+1. **Production DB (existing data):** the Django *schema* is unchanged, but the Postgres *server* must move from 12 to 16 (Django 5.2 requires PG14+). A PG16 server will not start on a PG12 data directory, so production cutover requires a one-time PG12→PG16 data upgrade (`pg_upgrade` or dump/restore — see the production upgrade task in the implementation plan). Once on PG16, the new app runs `migrate` → no-ops (schema unchanged). The old `allauth` / `socialaccount` tables become harmless orphans (an optional cleanup migration can drop them later). No application-data loss — but the DB upgrade is a required, non-trivial cutover step.
 2. **Fresh / CI / test environments:** generate a filtered `app/seed.json` keeping only `auth.user`, `authtoken.token`, `user_data.*`. `init.sh` loads `seed.json` instead of `dump.json`.
 
 ### Verified-email state
@@ -207,7 +207,7 @@ Six phases, each its own commit(s). Each phase gates the next.
 
 ## Out of scope
 
-- Bumping Postgres past version 12 (currently EOL — recommended as a separate follow-up task)
+- (Postgres 12→16 is now IN scope — Django 5.2 requires PG14+. See the implementation plan's production upgrade task.)
 - Refactoring or feature changes to the 12 data views — behavior is preserved exactly
 - Re-architecting URL paths — paths are kept identical so the iOS client needs no change
 
