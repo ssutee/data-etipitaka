@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: etipitaka_data
+          POSTGRES_USER: etipitaka
+          POSTGRES_PASSWORD: testpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SQL_ENGINE: django.db.backends.postgresql
+      SQL_DATABASE: etipitaka_data
+      SQL_USER: etipitaka
+      SQL_PASSWORD: testpass
+      SQL_HOST: localhost
+      SQL_PORT: 5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: pip install -r app/requirements-dev.txt
+      - name: Run unit tests with coverage
+        working-directory: app
+        run: python -m pytest
+
+  golden-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: |
+          cp .env.ci .env
+          cp .env.db.ci .env.db
+          docker compose up -d --build
+      - name: Wait for the app
+        run: |
+          docker compose exec -T web python manage.py migrate --noinput
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:1338/ >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo "app did not come up"; docker compose logs; exit 1
+      - name: Seed and run the golden harness
+        run: |
+          docker compose exec -T web python manage.py seed_golden
+          pip install -r tests/golden/requirements.txt
+          python -m pytest tests/golden -v --base-url http://localhost:1338
