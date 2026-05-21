@@ -10,6 +10,7 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.exceptions import NotFound
 
 from .forms import UploadFileForm
 from .models import UserData, SyncData, Sharing
@@ -76,8 +77,8 @@ def follower(request, pk):
 @permission_classes((IsAuthenticated,))
 def download_user_data(request, pk, name):
     if Sharing.objects.filter(follower__pk=request.user.pk, owner__pk=int(pk)).count() == 0:
-        raise Http404('Access deny')        
-    try:        
+        raise NotFound()
+    try:
         user = User.objects.get(pk=pk)
         sync_data = user.syncdata_set.get(name=name)
         response = HttpResponse(sync_data.file, content_type='application/etipitaka')
@@ -85,7 +86,7 @@ def download_user_data(request, pk, name):
         response['Content-Length'] = sync_data.file.size
         return response
     except SyncData.DoesNotExist:
-        raise Http404('Not found')
+        raise NotFound()
 
 @api_view(['POST'])
 @authentication_classes((TokenAuthentication, SessionAuthentication,))
@@ -132,7 +133,7 @@ def download_sync_data(request, name):
         response['Content-Length'] = sync_data.file.size
         return response
     except SyncData.DoesNotExist:
-        raise Http404('Not found')
+        raise NotFound()
 
 @api_view(['POST'])
 @authentication_classes((TokenAuthentication, SessionAuthentication,))
@@ -177,16 +178,16 @@ def user_data_action(request, pk):
                 os.remove(user_data.file.path)
             user_data.deleted = True
             user_data.save()
-            return JsonResponse({'success': True, 'pk': pk})
+            return JsonResponse({'success': True, 'pk': str(pk)})
         except UserData.DoesNotExist:
             return JsonResponse({'success': False})
     elif request.method == 'GET':
         try:
             user_data = request.user.userdata_set.get(pk=pk)
-            
+
             if user_data.deleted:
-                raise Http404('Not found')    
-            
+                raise NotFound()
+
             if user_data.file.name.endswith('.etz'):
                 response = HttpResponse(user_data.file, content_type='application/etipitaka')
             else:
@@ -195,7 +196,7 @@ def user_data_action(request, pk):
             response['Content-Length'] = user_data.file.size
             return response
         except UserData.DoesNotExist:
-            raise Http404('Not found')
+            raise NotFound()
 
     raise Http404('Unsupport operation')
 
