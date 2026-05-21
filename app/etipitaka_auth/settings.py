@@ -36,25 +36,18 @@ INSTALLED_APPS = [
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
-    'django.contrib.sites',
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework.authtoken',
-    'rest_auth',
-    'allauth',
-    'allauth.account',
-    'allauth.socialaccount',
-    'rest_auth.registration',
     'user_data',
 ]
 
-MIDDLEWARE_CLASSES = [
+MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.auth.middleware.SessionAuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -62,8 +55,10 @@ MIDDLEWARE_CLASSES = [
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework.authentication.TokenAuthentication',
-   )  
+   )
 }
+
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
 ROOT_URLCONF = 'etipitaka_auth.urls'
 
@@ -82,14 +77,6 @@ TEMPLATES = [
         },
     },
 ]
-
-AUTHENTICATION_BACKENDS = (
-    # Needed to login by username in Django admin, regardless of `allauth`
-    'django.contrib.auth.backends.ModelBackend',
-
-    # `allauth` specific authentication methods, such as login by e-mail
-    'allauth.account.auth_backends.AuthenticationBackend',
-)
 
 WSGI_APPLICATION = 'etipitaka_auth.wsgi.application'
 
@@ -143,18 +130,15 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
-SITE_ID = 1
-
 DEFAULT_FROM_EMAIL = 'E-Tipitaka Administrator'
 
-REST_SESSION_LOGIN = True
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-ACCOUNT_EMAIL_REQUIRED = True
-ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
-ACCOUNT_EMAIL_VERIFICATION = 'optional'
-ACCOUNT_CONFIRM_EMAIL_ON_GET = True
 
-ACCOUNT_EMAIL_CONFIRMATION_ANONYMOUS_REDIRECT_URL = '/login/?email=confirm'
+# Email verification (DRF-native rebuild)
+EMAIL_VERIFICATION_SALT = 'user-data.email-verify'
+EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24 * 3  # 3 days
+EMAIL_VERIFICATION_URL = '/account/confirm-email/'
+
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 
@@ -166,6 +150,6 @@ STATIC_ROOT = os.path.join(BASE_DIR, "static")
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
 try:
-    from local_settings import *
+    from .local_settings import *
 except ImportError:
     pass
