@@ -16,7 +16,7 @@ Production is a single server (the `128.199.181.198` / `data.etipitaka.com` drop
 |---|---|
 | Production hosting | Plain server (droplet), Docker Compose, SSH access |
 | Build location | On the server (`docker compose up -d --build`) — no registry |
-| Deploy trigger | Push to `master` → tests → **manual approval** (GitHub Environment) → deploy |
+| Deploy trigger | Manual `workflow_dispatch` run → tests → deploy. (Push/PR run tests only.) GitHub Environment approval was not usable — see Section 2. |
 | Deploy mechanism | Raw `ssh` from CI runs a committed `deploy.sh` on the server |
 | GitHub CLI | `gh` 2.92 installed, authenticated as `ssutee` (`repo`+`workflow` scopes) — used to script repo/secrets/environment setup |
 | Compose on prod | Production runs Docker Compose **v1** (`docker-compose`); `deploy.sh` auto-detects v1 vs v2 |
@@ -44,11 +44,12 @@ push to master ──► unit-tests ─┐
 - **`golden-harness`** — existing (golden + behavioral suites, Dockerised).
 - **`deploy`** — new:
   - `needs: [unit-tests, golden-harness]` — runs only if both pass.
-  - `if: github.event_name == 'push' && github.ref == 'refs/heads/master'` — never on pull requests or other branches.
-  - `environment: production` — binds the job to a GitHub Environment with a required-reviewer protection rule. The job parks at "Waiting" until a reviewer clicks **Approve** in the Actions UI.
+  - `if: github.event_name == 'workflow_dispatch'` — runs only on a manual run, never on push or pull requests.
   - Steps: configure the SSH key, then `ssh` to the server to run the deploy.
 
-Pull requests run both test jobs and never deploy. A push to `master` runs the tests, waits for approval, then deploys.
+The workflow's triggers are `push`, `pull_request`, and `workflow_dispatch`. On a push or PR, the two test jobs run and `deploy` is skipped. Clicking **Run workflow** in the Actions UI (a `workflow_dispatch` event) runs the test jobs and then `deploy` — the manual click is the deploy gate, and `needs` guarantees deploy never runs on untested code.
+
+> **Why not a GitHub Environment approval gate?** The originally-designed gate was `environment: production` with a required-reviewer rule. GitHub does not allow environment protection rules on **private** repos on the free plan (HTTP 422). Since the repo is private and contains committed credentials, it cannot be made public. The `workflow_dispatch` manual run is the free, private-repo-compatible equivalent.
 
 ## Section 3 — SSH deploy mechanics and `deploy.sh`
 
@@ -153,7 +154,7 @@ After the cutover, the server runs the migrated stack on PG16, and routine pushe
 
 `DEPLOY_PATH` (`/srv/data-etipitaka`) is a plain repo **variable**, not a secret — it is not sensitive.
 
-**GitHub Environment** — `production`, with a required-reviewer protection rule (the manual approval gate from Section 2). Created via `gh api`.
+**Deploy gate** — no GitHub Environment (protection rules need a paid plan on private repos). The gate is the manual `workflow_dispatch` run; see Section 2.
 
 **Server-side** (not stored in GitHub):
 - the CI deploy *public* key, in the deploy user's `~/.ssh/authorized_keys`
@@ -171,7 +172,7 @@ The existing CI test jobs use the committed, non-secret `.env.ci` / `.env.db.ci`
 ## Success criteria
 
 1. The repository is on GitHub; `master` is pushed; CI runs there.
-2. A push to `master` runs both test jobs; on success the `deploy` job waits for manual approval.
+2. A push to `master` runs both test jobs; the `deploy` job is skipped. A manual `workflow_dispatch` run runs the tests and then `deploy`.
 3. Approving the deploy SSHes into the server, pulls `master`, runs `deploy.sh`, and the health check passes.
 4. A failed test job, or a failed health check, fails the pipeline and blocks/aborts the deploy.
 5. The first production cutover (PG12→16 + migrated stack) is performed manually per the runbook; routine deploys are automatic thereafter.

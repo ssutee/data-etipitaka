@@ -95,14 +95,22 @@ git commit -m "feat: server-side deploy script"
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Append the `deploy` job.** Add this job to the `jobs:` mapping in `.github/workflows/ci.yml`, after the existing `golden-harness` job (same indentation as `unit-tests` / `golden-harness`):
+- [ ] **Step 1a: Add the `workflow_dispatch` trigger.** In `.github/workflows/ci.yml`, the `on:` block becomes:
+
+```yaml
+on:
+  push:
+  pull_request:
+  workflow_dispatch:   # manual "Run workflow" — the production deploy gate
+```
+
+- [ ] **Step 1b: Append the `deploy` job** to the `jobs:` mapping, after the existing `golden-harness` job (same indentation as `unit-tests` / `golden-harness`):
 
 ```yaml
   deploy:
     needs: [unit-tests, golden-harness]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Deploy to production over SSH
         env:
@@ -134,7 +142,9 @@ git add .github/workflows/ci.yml
 git commit -m "ci: add manual-approval production deploy job"
 ```
 
-> The `deploy` job will not run successfully until Tasks 3–5 are done (repo on GitHub, secrets, the `production` environment, server prep). That is expected — committing it now is harmless; it only triggers on a push to `master` on GitHub.
+> The `deploy` job will not run successfully until Tasks 3–5 are done (repo on GitHub, secrets, server prep). That is expected — committing it now is harmless; it only runs on a manual `workflow_dispatch` run.
+>
+> **Gate mechanism note:** the originally-designed gate was a GitHub Environment with a required reviewer. GitHub blocks environment protection rules on private repos on the free plan, so the gate is the manual `workflow_dispatch` run instead: push/PR run tests only; clicking **Run workflow** runs tests + deploy (`deploy` still `needs` the test jobs).
 
 ---
 
@@ -177,7 +187,7 @@ Expected: name `data-etipitaka`, visibility `PRIVATE`, default branch `master`.
 
 ---
 
-## Task 4 [operator]: Deploy keypair, GitHub Secrets, repo variable, Environment
+## Task 4 [operator]: Deploy keypair, GitHub Secrets, repo variable
 
 Runs on the developer machine. You need the production server's IP/hostname and the SSH username CI will log in as.
 
@@ -204,23 +214,15 @@ gh variable set DEPLOY_PATH --repo ssutee/data-etipitaka --body "/srv/data-etipi
 ```
 (Use the actual path where the repo will live on the server — must match Task 5.)
 
-- [ ] **Step 4: Create the `production` Environment with a required reviewer**
-
-```bash
-gh api -X PUT repos/ssutee/data-etipitaka/environments/production \
-  -F "reviewers[][type]=User" \
-  -F "reviewers[][id]=$(gh api user --jq .id)"
-```
-Expected: a JSON response describing the `production` environment. This makes the `deploy` job pause for a one-click approval in the Actions UI.
+- [ ] **Step 4: (No GitHub Environment.)** Environment protection rules require a paid plan on private repos, so no environment is created. The deploy gate is the manual `workflow_dispatch` run (Task 2). Nothing to do in this step.
 
 - [ ] **Step 5: Verify**
 
 ```bash
 gh secret list --repo ssutee/data-etipitaka
 gh variable list --repo ssutee/data-etipitaka
-gh api repos/ssutee/data-etipitaka/environments --jq '.environments[].name'
 ```
-Expected: secrets `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER`; variable `DEPLOY_PATH`; environment `production`.
+Expected: secrets `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER`; variable `DEPLOY_PATH`.
 
 ---
 
@@ -312,25 +314,23 @@ cd /srv/data-etipitaka && git pull --ff-only origin master
 
 ---
 
-## Task 7 [operator]: Verify the auto-deploy pipeline end-to-end
+## Task 7 [operator]: Verify the pipeline end-to-end
 
-- [ ] **Step 1: Make a trivial change on `master`** (e.g. a one-line edit to `README.md`), commit, and push:
-```bash
-git commit -am "chore: trigger deploy pipeline test"
-git push origin master
-```
-
-- [ ] **Step 2: Watch the run**
+- [ ] **Step 1: Confirm push runs tests only.** Push any commit to `master` (or open a PR) and check the CI run: `unit-tests` and `golden-harness` run and pass; `deploy` is **skipped** (its `if` is `workflow_dispatch`-only).
 ```bash
 gh run watch --repo ssutee/data-etipitaka
 ```
-Expected: `unit-tests` and `golden-harness` run and pass; `deploy` then shows status **Waiting** (pending approval).
 
-- [ ] **Step 3: Approve the deployment.** In the GitHub Actions UI (or `gh`), approve the `production` environment deployment. The `deploy` job then runs.
+- [ ] **Step 2: Trigger a manual deploy.** In the GitHub Actions UI, open the **CI** workflow and click **Run workflow** (on `master`). Or via CLI:
+```bash
+gh workflow run ci.yml --repo ssutee/data-etipitaka --ref master
+```
+
+- [ ] **Step 3: Watch the manual run** — `gh run watch --repo ssutee/data-etipitaka`. Expected: `unit-tests` and `golden-harness` run and pass, then `deploy` runs.
 
 - [ ] **Step 4: Confirm the deploy succeeded** — the `deploy` job is green, its log shows `[deploy] health check passed`, and the production site is up.
 
-- [ ] **Step 5: Confirm the gate works** — open a pull request with any change; verify `unit-tests` and `golden-harness` run but `deploy` does **not** appear/run for the PR.
+- [ ] **Step 5: Confirm the gate** — on the push/PR run from Step 1, `deploy` must show as skipped; it runs **only** on the manual `workflow_dispatch` run from Step 2.
 
 ---
 
