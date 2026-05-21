@@ -19,7 +19,7 @@ The work is gated by a cross-stack **golden test harness**: every endpoint's cur
 | Target Python | 3.13 |
 | Strategy | Big-bang rewrite to 5.2 (codebase small enough); existing migration history kept |
 | Auth stack | Drop `allauth` + `django-rest-auth`; reimplement endpoints DRF-native |
-| Email verification | Reimplemented in DRF (stateless signed token) |
+| Email verification | Reimplemented in DRF (stateless signed token), **mandatory** — deliberate behavior change from the current `ACCOUNT_EMAIL_VERIFICATION='optional'` |
 | Test approach | External HTTP golden harness (stack-agnostic) + Django unit tests on the new stack |
 | CI | GitHub Actions workflow running both suites — in scope |
 
@@ -103,10 +103,15 @@ Email-verification tokens are time- and secret-based — they cannot be byte-mat
 
 - `urls.py`: string view references (`'user_data.views.index_view'`) were removed in Django 1.10 — import the view callables and switch `url()` → `path()` / `re_path()`
 - `views.py:217`: `request.user.is_authenticated()` → `request.user.is_authenticated` (property, no call)
-- `models.py`: every `ForeignKey` needs an explicit `on_delete=` → `models.SET_NULL` (matches the existing `null=True`)
-- migrations `0001`–`0004`: patched in place to add `on_delete` (existing history kept per the big-bang decision)
+- `models.py`: every `ForeignKey` needs an explicit `on_delete=` → `models.CASCADE` (Django 1.9's implicit default — preserves current delete behavior; the spec's earlier `SET_NULL` would have changed behavior)
+- migrations `0001`–`0004`: **no patching needed** — Django 1.9's migration generator already wrote `on_delete=CASCADE` into every `ForeignKey` (verified during planning)
 - `settings.py`: `MIDDLEWARE_CLASSES` → `MIDDLEWARE`; remove allauth / rest_auth entries from `INSTALLED_APPS` and `AUTHENTICATION_BACKENDS`; `django.core.urlresolvers` → `django.urls` if referenced
 - `views.py:9`: remove the unused `verified_email_required` import
+- templates: `{% load staticfiles %}` (template tag library removed in Django 3.0) → `{% load static %}`
+
+### Registration behavior change
+
+Current `ACCOUNT_EMAIL_VERIFICATION='optional'` means signup creates an *active* account today. Per explicit user decision during planning, the rebuild makes verification **mandatory**: `/rest-auth/registration/` creates `User(is_active=False)`; the account cannot log in until the emailed token is verified. This is the one intentional behavior change in the migration — the iOS client's post-signup flow must handle a "not yet verified" state. All other endpoints preserve behavior exactly.
 
 ### DRF-native auth rebuild
 
