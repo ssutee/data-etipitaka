@@ -156,3 +156,7 @@ try:
     from .local_settings import *
 except ImportError:
     pass
+
+import sys
+if 'pytest' in sys.modules or 'test' in sys.argv:
+    EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
