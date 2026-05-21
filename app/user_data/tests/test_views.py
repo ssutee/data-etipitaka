@@ -198,8 +198,11 @@ def test_index_view_anonymous_renders(api):
     assert resp.status_code == 200
 
 
-def test_index_view_authenticated_redirects(auth_alice):
-    resp = auth_alice.get('/')
+def test_index_view_authenticated_redirects(api, alice):
+    # index_view is a plain Django view (session auth), not a DRF @api_view,
+    # so it needs a real session login rather than the token-header fixture.
+    api.force_login(alice)
+    resp = api.get('/')
     assert resp.status_code == 302
     assert resp['Location'] == '/user_data/'
 
