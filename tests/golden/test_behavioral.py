@@ -103,3 +103,19 @@ def test_login_post_without_csrf_is_forbidden(http, base_url):
                      data={"username": "alice", "password": "wrongpass"},
                      timeout=30)
     assert resp.status_code == 403
+
+
+def test_password_reset_pages_use_project_templates(http, base_url):
+    # The four password-reset pages must render the project's base.html, not
+    # Django admin's fallback registration/* templates.
+    pages = [
+        ("/password_reset/", "Reset your password"),
+        ("/password_reset/done/", "Check your email"),
+        ("/reset/done/", "Password reset complete"),
+        ("/reset/baduid/badtoken/", "Set a new password"),
+    ]
+    for path, marker in pages:
+        resp = http.get(base_url + path, timeout=30)
+        assert resp.status_code == 200, "%s -> %s" % (path, resp.status_code)
+        assert marker in resp.text, "%s missing project marker %r" % (path, marker)
+        assert "Django site admin" not in resp.text, "%s still admin-styled" % path
