@@ -26,6 +26,7 @@
 7. **Postgres must be bumped 12 → 16** — Django 5.2 hard-requires PostgreSQL 14+ and refuses to connect to PG12 (`NotSupportedError`). `docker-compose.yml` `db` service is now `postgres:16-alpine`. This is mandatory, not the deferred follow-up the spec originally assumed. Consequences: any task that resets the DB must also wipe the `postgres_data` volume (a PG16 server cannot start on a PG12 data dir); production cutover needs a one-time PG12→PG16 data upgrade — see Task 5.3.
 8. **`django.contrib.messages` is required in `INSTALLED_APPS`** — Django's admin fails the `admin.E406` system check without it. It was dropped in the Phase 1 settings rewrite (Task 1.5) and has been added back.
    (Both corrections 7 and 8 were committed during Task 1.10 as `fix: bump Postgres to 16 and add messages app for Django 5.2`.)
+9. **`EMAIL_BACKEND` defaults to the console backend** — `rest_register` sends a verification email via `send_mail`. The original `smtp` backend would make the live dev/CI server attempt real SMTP delivery (and Phase 3's behavioral registration test would too). `settings.py` now defaults `EMAIL_BACKEND` to `django.core.mail.backends.console.EmailBackend`; production overrides it via deployment config. (Task-suite runs still force the `locmem` backend per Task 4.1.) Committed before Task 2.6.
 
 ## File structure
 

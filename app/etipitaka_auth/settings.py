@@ -133,7 +133,9 @@ STATIC_URL = '/static/'
 
 DEFAULT_FROM_EMAIL = 'E-Tipitaka Administrator'
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# Console backend by default — verification emails print to the container log.
+# Production overrides this with an SMTP backend via deployment config.
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
 # Email verification (DRF-native rebuild)
 EMAIL_VERIFICATION_SALT = 'user-data.email-verify'
