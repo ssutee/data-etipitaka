@@ -1,0 +1,92 @@
+"""Golden endpoint case table.
+
+Each GoldenCase issues one HTTP request. Tokens are the fixed keys created by
+the seed_golden management command. Mutation cases (POST/DELETE) each act on a
+dedicated seed row so a single run stays deterministic.
+"""
+import io
+import json
+
+ALICE_TOKEN = "a1ce000000000000000000000000000000000001"
+BOB_TOKEN = "b0b0000000000000000000000000000000000002"
+
+UPLOAD_BODY = json.dumps({"seed": "upload_payload", "version": 1})
+
+
+class GoldenCase(object):
+    def __init__(self, case_id, method, path, token=None, data=None,
+                 files=None, allow_redirects=False):
+        self.id = case_id
+        self.method = method
+        self.path = path
+        self.token = token
+        self.data = data
+        self.files = files
+        self.allow_redirects = allow_redirects
+
+    def execute(self, http, base_url):
+        headers = {}
+        if self.token:
+            headers["Authorization"] = "Token " + self.token
+        files = None
+        if self.files:
+            files = {k: (fn, io.BytesIO(content), ct)
+                     for k, (fn, content, ct) in self.files.items()}
+        return http.request(
+            self.method, base_url + self.path,
+            headers=headers, data=self.data, files=files,
+            allow_redirects=self.allow_redirects, timeout=30,
+        )
+
+
+GOLDEN_CASES = [
+    # --- public pages ---
+    GoldenCase("index_anon", "GET", "/"),
+    GoldenCase("login_get", "GET", "/login/"),
+    GoldenCase("signup_get", "GET", "/signup/"),
+    GoldenCase("validate_get", "GET", "/signup/validate/"),
+    GoldenCase("user_data_view_anon", "GET", "/user_data/"),
+
+    # --- auth required, unauthenticated ---
+    GoldenCase("sync_data_list_anon", "GET", "/sync_data_list/"),
+    GoldenCase("user_data_list_anon", "GET", "/user_data_list/"),
+
+    # --- authenticated reads ---
+    GoldenCase("sync_data_list_alice", "GET", "/sync_data_list/", token=ALICE_TOKEN),
+    GoldenCase("user_list_alice", "GET", "/user_list/", token=ALICE_TOKEN),
+    GoldenCase("sharing_list_alice", "GET", "/sharing_list/", token=ALICE_TOKEN),
+    GoldenCase("user_view_bob_by_alice", "GET", "/user/1002/", token=ALICE_TOKEN),
+    GoldenCase("user_data_list_alice", "GET", "/user_data_list/", token=ALICE_TOKEN),
+    GoldenCase("user_data_list_alice_deleted", "GET", "/user_data_list/?deleted=1", token=ALICE_TOKEN),
+
+    # --- file downloads (body stored as md5 by normalizer) ---
+    GoldenCase("download_sync_data_alice", "GET", "/sync_data/sync_alice.json/", token=ALICE_TOKEN),
+    GoldenCase("download_sync_data_404", "GET", "/sync_data/nope.json/", token=ALICE_TOKEN),
+    GoldenCase("download_user_data_shared", "GET", "/user/1002/sync_alice.json/", token=ALICE_TOKEN),
+    GoldenCase("download_user_data_denied", "GET", "/user/9999/sync_alice.json/", token=ALICE_TOKEN),
+    GoldenCase("user_data_action_get", "GET", "/user_data/3001/", token=ALICE_TOKEN),
+    GoldenCase("user_data_action_get_deleted", "GET", "/user_data/3002/", token=ALICE_TOKEN),
+
+    # --- login form posts ---
+    GoldenCase("login_post_invalid", "POST", "/login/",
+               data={"username": "alice", "password": "wrongpass"}),
+
+    # --- rest-auth login (token key is the fixed seed value -> deterministic) ---
+    GoldenCase("rest_login_alice", "POST", "/rest-auth/login/",
+               data={"username": "alice", "password": "alicepass123"}),
+    GoldenCase("rest_login_bad", "POST", "/rest-auth/login/",
+               data={"username": "alice", "password": "wrongpass"}),
+
+    # --- mutations (each on its own dedicated row / target) ---
+    GoldenCase("follower_add", "POST", "/follower/1002/", token=ALICE_TOKEN),
+    GoldenCase("follower_remove", "DELETE", "/follower/1002/", token=ALICE_TOKEN),
+    GoldenCase("user_data_action_delete", "DELETE", "/user_data/3001/", token=ALICE_TOKEN),
+    GoldenCase("upload_view_post", "POST", "/upload/", token=ALICE_TOKEN,
+               data={"title": "golden"},
+               files={"file": ("upload_payload.json",
+                               UPLOAD_BODY.encode("utf-8"), "application/json")}),
+    GoldenCase("upload_sync_data_post", "POST", "/sync_data/", token=ALICE_TOKEN,
+               data={"platform": "ios", "timestamp": "2020-01-05T00:00:00+00:00"},
+               files={"file": ("sync_golden.json",
+                               UPLOAD_BODY.encode("utf-8"), "application/json")}),
+]
