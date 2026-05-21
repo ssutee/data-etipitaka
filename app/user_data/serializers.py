@@ -1,5 +1,7 @@
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 
@@ -22,6 +24,11 @@ class RegisterSerializer(serializers.Serializer):
     def validate(self, attrs):
         if attrs['password1'] != attrs['password2']:
             raise serializers.ValidationError({"password": "The two password fields didn't match."})
+        # Enforce AUTH_PASSWORD_VALIDATORS, as the old allauth signup did.
+        try:
+            validate_password(attrs['password1'])
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)})
         return attrs
 
     def create(self, validated_data):

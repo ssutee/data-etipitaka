@@ -22,6 +22,15 @@ def test_register_rejects_password_mismatch():
     assert "password" in s.errors
 
 
+def test_register_rejects_weak_password():
+    # AUTH_PASSWORD_VALIDATORS must be enforced (e.g. the all-numeric and
+    # minimum-length validators), as the old allauth signup did.
+    s = RegisterSerializer(data={"email": "n@example.com", "username": "newbie",
+                                 "password1": "12345678", "password2": "12345678"})
+    assert not s.is_valid()
+    assert "password" in s.errors
+
+
 def test_login_rejects_inactive_user():
     u = User(username="ghost", email="g@example.com", is_active=False)
     u.set_password("pw12345678")
