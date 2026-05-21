@@ -4,3 +4,5 @@
 *.swp
 static/
 tests/golden/.venv/
+.coverage
+graphify-out/
