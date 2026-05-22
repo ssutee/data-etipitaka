@@ -76,25 +76,27 @@ def test_index_page_renders(http, base_url):
     resp = http.get(base_url + "/", timeout=30)
     assert resp.status_code == 200
     assert "text/html" in resp.headers.get("Content-Type", "")
-    assert "E-Tipitaka User Data" in resp.text
+    assert "ข้อมูลผู้ใช้ E-Tipitaka" in resp.text
+    assert 'lang="th"' in resp.text
 
 
 def test_login_page_renders(http, base_url):
     resp = http.get(base_url + "/login/", timeout=30)
     assert resp.status_code == 200
-    assert "<h1>Login</h1>" in resp.text
+    assert "<h1>เข้าสู่ระบบ</h1>" in resp.text
 
 
 def test_signup_page_renders(http, base_url):
     resp = http.get(base_url + "/signup/", timeout=30)
     assert resp.status_code == 200
-    assert "<h1>Registration</h1>" in resp.text
+    assert "<h1>สมัครสมาชิก</h1>" in resp.text
 
 
 def test_validate_page_renders(http, base_url):
     resp = http.get(base_url + "/signup/validate/", timeout=30)
     assert resp.status_code == 200
-    assert "Validate your e-mail" in resp.text
+    assert "ยืนยันอีเมลของคุณ" in resp.text
+    assert 'lang="th"' in resp.text
 
 
 def test_login_post_without_csrf_is_forbidden(http, base_url):
@@ -109,10 +111,10 @@ def test_password_reset_pages_use_project_templates(http, base_url):
     # The four password-reset pages must render the project's base.html, not
     # Django admin's fallback registration/* templates.
     pages = [
-        ("/password_reset/", "Reset your password"),
-        ("/password_reset/done/", "Check your email"),
-        ("/reset/done/", "Password reset complete"),
-        ("/reset/baduid/badtoken/", "Set a new password"),
+        ("/password_reset/", "รีเซ็ตรหัสผ่านของคุณ"),
+        ("/password_reset/done/", "ตรวจสอบอีเมลของคุณ"),
+        ("/reset/done/", "รีเซ็ตรหัสผ่านเสร็จสมบูรณ์"),
+        ("/reset/baduid/badtoken/", "ตั้งรหัสผ่านใหม่"),
     ]
     for path, marker in pages:
         resp = http.get(base_url + path, timeout=30)

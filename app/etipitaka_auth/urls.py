@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.urls import include, path, re_path
 from django.views.generic import TemplateView
+from django.views.i18n import set_language
 
 from user_data import views, auth_views
 from user_data.auth_urls import rest_auth_patterns
@@ -25,6 +26,7 @@ urlpatterns = [
     re_path(r'^account/confirm-email/(?P<key>[^/]+)/$',
             auth_views.account_confirm_email, name='account_confirm_email'),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
+    path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),
     path('', include('django.contrib.auth.urls')),
 ]

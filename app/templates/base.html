@@ -1,11 +1,12 @@
-{% load static %}
+{% load static i18n %}
+{% get_current_language as CURRENT_LANG %}
 <!DOCTYPE html>
-<html lang="en" ng-app="EtipitakaUserDataApp">
+<html lang="{{ CURRENT_LANG }}" ng-app="EtipitakaUserDataApp">
   <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}E-Tipitaka User Data{% endblock %}</title>
+    <title>{% block title %}{% trans "E-Tipitaka User Data" %}{% endblock %}</title>
 
     <!-- Bootstrap -->
     <link href="{% static "bootstrap/dist/css/bootstrap.min.css" %}" rel="stylesheet">
@@ -13,7 +14,7 @@
     <link href="{% static "angular-bootstrap/ui-bootstrap-csp.css" %}" rel="stylesheet">
     <link href="{% static "css-spinners/css/spinners.css" %}" rel="stylesheet">
     {% block style %}{% endblock %}
-    
+
     <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
     <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
     <!--[if lt IE 9]>
@@ -30,43 +31,59 @@
     <!-- Brand and toggle get grouped for better mobile display -->
     <div class="navbar-header">
       <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target=".navbar-collapse">
-        <span class="sr-only">Toggle navigation</span>
+        <span class="sr-only">{% trans "Toggle navigation" %}</span>
         <span class="icon-bar"></span>
         <span class="icon-bar"></span>
         <span class="icon-bar"></span>
       </button>
-      <a class="navbar-brand" href="/">Home</a>
+      <a class="navbar-brand" href="/">{% trans "Home" %}</a>
     </div>
 
     <!-- Collect the nav links, forms, and other content for toggling -->
     <div class="collapse navbar-collapse" id="navbar-main">
-      {% if user.is_authenticated %}      
+      <form class="navbar-form navbar-left" action="{% url 'set_language' %}" method="post">
+        {% csrf_token %}
+        <input name="next" type="hidden" value="{{ request.path }}">
+        {% if CURRENT_LANG == 'th' %}
+        <button type="submit" name="language" value="en" class="btn btn-link">English</button>
+        {% else %}
+        <button type="submit" name="language" value="th" class="btn btn-link">ไทย</button>
+        {% endif %}
+      </form>
+      {% if user.is_authenticated %}
       <form class="navbar-form navbar-right" method="post" action="/account/logout/">
-        {% csrf_token %}            
-        <span ng-controller="UserDataController" class="btn btn-primary" ng-click="upload()">Upload</span>    
-        <button type="submit" class="btn btn-default">Logout</button>
+        {% csrf_token %}
+        <span ng-controller="UserDataController" class="btn btn-primary" ng-click="upload()">{% trans "Upload" %}</span>
+        <button type="submit" class="btn btn-default">{% trans "Logout" %}</button>
         &nbsp;&nbsp;
         <span class="glyphicon glyphicon-user" aria-hidden="true"></span>
         <span class="label label-info">{{user}}</span>
-      </form>      
+      </form>
       {% else %}
       <ul class="nav navbar-nav navbar-right">
-        <li><a href="/login/">Login</a></li>
-        <li><a href="/signup/">Register</a></li>
+        <li><a href="/login/">{% trans "Login" %}</a></li>
+        <li><a href="/signup/">{% trans "Register" %}</a></li>
       </ul>
       {% endif %}
     </div><!-- /.navbar-collapse -->
 
 
   </div><!-- /.container-fluid -->
-</nav>    
+</nav>
     {% block body %}{% endblock %}
+    <script>
+      window.i18n = {
+        confirmDelete: "{% filter escapejs %}{% trans 'Are you sure?' %}{% endfilter %}",
+        passwordTooShort: "{% filter escapejs %}{% trans 'password is too short' %}{% endfilter %}",
+        passwordsNotMatch: "{% filter escapejs %}{% trans 'passwords not match' %}{% endfilter %}"
+      };
+    </script>
     <script src="{% static "jquery/dist/jquery.min.js" %}"></script>
     <script src="{% static "bootstrap/dist/js/bootstrap.min.js" %}"></script>
     <script src="{% static "angular/angular.min.js" %}"></script>
     <script src="{% static "angular-bootstrap/ui-bootstrap.min.js" %}"></script>
-    <script src="{% static "angular-bootstrap/ui-bootstrap-tpls.min.js" %}"></script>    
-    <script src="{% static "ng-file-upload-shim/ng-file-upload-shim.min.js" %}"></script>    
+    <script src="{% static "angular-bootstrap/ui-bootstrap-tpls.min.js" %}"></script>
+    <script src="{% static "ng-file-upload-shim/ng-file-upload-shim.min.js" %}"></script>
     <script src="{% static "ng-file-upload/ng-file-upload.min.js" %}"></script>
     <script src="{% static "moment/moment.js" %}"></script>
     <script src="{% static "bootbox.js/bootbox.js" %}"></script>

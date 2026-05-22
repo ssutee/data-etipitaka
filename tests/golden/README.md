@@ -20,3 +20,18 @@ Cross-stack HTTP regression harness. Talks to the app over HTTP only — no Djan
     pytest tests/golden -v --base-url http://localhost:1338
 
 A failing test = a behavior regression.
+
+## Localization note
+
+The site is localized (Thai default, English via the `django_language`
+cookie). Some surfaces are no longer cross-stack equivalent with the old
+English-only stack and are intentionally same-stack:
+
+- `test_behavioral.py` HTML-content assertions check the Thai default copy.
+- Golden snapshots whose body carries a localized error message — the
+  `rest_login_bad` login error, and the DRF authentication / not-found error
+  cases (`sync_data_list_anon`, `user_data_list_anon`, `download_sync_data_404`,
+  `download_user_data_denied`, `user_data_action_get_deleted`).
+
+All other golden snapshots (JSON data, tokens, file downloads, status codes)
+are not localized and remain valid cross-stack regression checks.

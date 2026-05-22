@@ -1,21 +1,23 @@
 {% extends 'base.html' %}
 
-{% load static %}
+{% load static i18n %}
+
+{% block title %}{% trans "Registration" %}{% endblock %}
 
 {% block body %}
 <div ng-controller="RegisterController" class="container">
-    <h1>Registration</h1>    
-    <br/>    
+    <h1>{% trans "Registration" %}</h1>
+    <br/>
     <script type="text/ng-template" id="loadingModalContent.html">
         <div class="modal-body" style="text-align:center;">
             <div class="spinner-loader" style="text-align:center;">
-                Loading...
+                {% trans "Loading..." %}
             </div>
             <div style="text-align:center">
-                Loading...
+                {% trans "Loading..." %}
             </div>
         </div>
-    </script>    
+    </script>
     {% include "forms/signup_form.html" %}
 </div>
 {% endblock %}

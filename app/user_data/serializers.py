@@ -2,6 +2,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 
@@ -13,17 +14,17 @@ class RegisterSerializer(serializers.Serializer):
 
     def validate_username(self, value):
         if User.objects.filter(username=value).exists():
-            raise serializers.ValidationError("A user with that username already exists.")
+            raise serializers.ValidationError(_("A user with that username already exists."))
         return value
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("A user with that email already exists.")
+            raise serializers.ValidationError(_("A user with that email already exists."))
         return value
 
     def validate(self, attrs):
         if attrs['password1'] != attrs['password2']:
-            raise serializers.ValidationError({"password": "The two password fields didn't match."})
+            raise serializers.ValidationError({"password": _("The two password fields didn't match.")})
         # Enforce AUTH_PASSWORD_VALIDATORS, as the old allauth signup did.
         try:
             validate_password(attrs['password1'])
@@ -48,9 +49,9 @@ class LoginSerializer(serializers.Serializer):
         user = authenticate(username=attrs['username'], password=attrs['password'])
         if user is None:
             raise serializers.ValidationError(
-                {"non_field_errors": ["Unable to log in with provided credentials."]})
+                {"non_field_errors": [_("Unable to log in with provided credentials.")]})
         if not user.is_active:
             raise serializers.ValidationError(
-                {"non_field_errors": ["This account is not active. Please verify your email."]})
+                {"non_field_errors": [_("This account is not active. Please verify your email.")]})
         attrs['user'] = user
         return attrs

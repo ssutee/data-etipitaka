@@ -1,4 +1,4 @@
-Hello {{ username }},
+{# blocktrans intentionally NOT trimmed: blank lines are meaningful email formatting #}{% load i18n %}{% blocktrans %}Hello {{ username }},
 
 Please confirm your E-Tipitaka account email address by visiting the link below:
 
@@ -6,4 +6,4 @@ Please confirm your E-Tipitaka account email address by visiting the link below:
 
 This link expires in 3 days. If you did not create this account, ignore this email.
 
--- E-Tipitaka
+-- E-Tipitaka{% endblocktrans %}
