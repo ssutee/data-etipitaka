@@ -77,6 +77,7 @@ def test_index_page_renders(http, base_url):
     assert resp.status_code == 200
     assert "text/html" in resp.headers.get("Content-Type", "")
     assert "ข้อมูลผู้ใช้ E-Tipitaka" in resp.text
+    assert 'lang="th"' in resp.text
 
 
 def test_login_page_renders(http, base_url):
@@ -95,6 +96,7 @@ def test_validate_page_renders(http, base_url):
     resp = http.get(base_url + "/signup/validate/", timeout=30)
     assert resp.status_code == 200
     assert "ยืนยันอีเมลของคุณ" in resp.text
+    assert 'lang="th"' in resp.text
 
 
 def test_login_post_without_csrf_is_forbidden(http, base_url):
