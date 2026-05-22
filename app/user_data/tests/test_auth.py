@@ -125,3 +125,21 @@ def test_confirm_email_link_bad_token_redirects_invalid(api):
     resp = api.get('/account/confirm-email/garbage/')
     assert resp.status_code == 302
     assert resp['Location'] == '/login/?email=invalid'
+
+
+def test_browser_logout_redirects_home(client):
+    user = User.objects.create_user('logout-user', 'lo@example.com', 'pw12345678')
+    client.force_login(user)
+    resp = client.post('/logout/')
+    assert resp.status_code == 302
+    assert resp['Location'] == '/'
+
+
+def test_navbar_logout_form_points_to_logout_url(client):
+    user = User.objects.create_user('nav-user', 'nv@example.com', 'pw12345678')
+    client.force_login(user)
+    # index_view redirects authenticated users to /user_data/, which renders
+    # base.html with the authenticated navbar (containing the logout form).
+    resp = client.get('/user_data/')
+    assert resp.status_code == 200
+    assert 'action="/logout/"' in resp.content.decode()
