@@ -45,4 +45,13 @@ def test_setlang_view_sets_cookie_and_redirects(client):
     response = client.post('/i18n/setlang/',
                            {'language': 'en', 'next': '/login/'})
     assert response.status_code == 302
+    assert response['Location'] == '/login/'
     assert client.cookies[settings.LANGUAGE_COOKIE_NAME].value == 'en'
+    # The cookie must be honored by LanguageMiddleware on the next request.
+    page = client.get('/login/')
+    assert 'lang="en"' in page.content.decode()
+
+
+def test_default_page_language_is_thai(client):
+    page = client.get('/login/')
+    assert 'lang="th"' in page.content.decode()

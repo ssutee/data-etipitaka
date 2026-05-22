@@ -73,9 +73,9 @@
     {% block body %}{% endblock %}
     <script>
       window.i18n = {
-        confirmDelete: "{% trans 'Are you sure?' %}",
-        passwordTooShort: "{% trans 'password is too short' %}",
-        passwordsNotMatch: "{% trans 'passwords not match' %}"
+        confirmDelete: "{% filter escapejs %}{% trans 'Are you sure?' %}{% endfilter %}",
+        passwordTooShort: "{% filter escapejs %}{% trans 'password is too short' %}{% endfilter %}",
+        passwordsNotMatch: "{% filter escapejs %}{% trans 'passwords not match' %}{% endfilter %}"
       };
     </script>
     <script src="{% static "jquery/dist/jquery.min.js" %}"></script>
