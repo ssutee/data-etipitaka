@@ -1,4 +1,5 @@
+{% load i18n %}
 <td><[$index+1]></td>
 <td><a href="/user_data/<[item.pk]>/"><[item.fields.file]></a></td>
 <td><[formatDate(item.fields.created_at)]></td>
-<td><button ng-click="delete(item.pk, '{{csrf_token}}')" type="button" class="btn btn-danger btn-xs">Delete</button></td>
+<td><button ng-click="delete(item.pk, '{{csrf_token}}')" type="button" class="btn btn-danger btn-xs">{% trans "Delete" %}</button></td>
