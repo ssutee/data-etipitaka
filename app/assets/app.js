@@ -75,7 +75,7 @@ app.controller('UserDataController', function($scope, $rootScope, $uibModal, $ht
     };
 
     $scope.delete = function(pk, csrfToken) {
-        bootbox.confirm("Are you sure?", function(result) {
+        bootbox.confirm(window.i18n.confirmDelete, function(result) {
             if (result) {
                 doDelete(pk, csrfToken);
             }
@@ -147,9 +147,9 @@ app.controller('RegisterController', function($scope, $http, $uibModal, $timeout
                     doSignup(url);
                 }, 100);                
             } else if (checkMatchPassword()) {
-                $scope.error.password = 'password is too short';
+                $scope.error.password = window.i18n.passwordTooShort;
             } else {
-                $scope.error.password = 'passwords not match';
+                $scope.error.password = window.i18n.passwordsNotMatch;
             }            
         }
     };
