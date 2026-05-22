@@ -4,6 +4,7 @@ from django.core.mail import send_mail
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import HttpResponseRedirect
 from django.template.loader import render_to_string
+from django.utils.translation import gettext as _
 
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -32,7 +33,7 @@ def _send_verification_email(request, user):
         settings.EMAIL_VERIFICATION_URL + token + '/')
     body = render_to_string('email/verify_email.txt',
                             {'username': user.username, 'verify_url': verify_url})
-    send_mail('Confirm your E-Tipitaka account', body,
+    send_mail(_('Confirm your E-Tipitaka account'), body,
               settings.DEFAULT_FROM_EMAIL, [user.email])
 
 
@@ -70,7 +71,7 @@ def rest_login(request):
 @permission_classes([IsAuthenticated])
 def rest_logout(request):
     Token.objects.filter(user=request.user).delete()
-    return Response({'detail': 'Successfully logged out.'})
+    return Response({'detail': _('Successfully logged out.')})
 
 
 @api_view(['GET'])
@@ -90,7 +91,7 @@ def rest_register(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     user = serializer.save()
     _send_verification_email(request, user)
-    return Response({'detail': 'Verification e-mail sent.'},
+    return Response({'detail': _('Verification e-mail sent.')},
                     status=status.HTTP_201_CREATED)
 
 
@@ -100,7 +101,7 @@ def rest_register(request):
 def rest_verify_email(request):
     user = _activate_from_token(request.data.get('key', ''))
     if user is None:
-        return Response({'detail': 'Invalid or expired token.'},
+        return Response({'detail': _('Invalid or expired token.')},
                         status=status.HTTP_400_BAD_REQUEST)
     return Response({'detail': 'ok'})
 
