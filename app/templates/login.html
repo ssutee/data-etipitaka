@@ -1,11 +1,13 @@
 {% extends 'base.html' %}
 
-{% load static %}
+{% load static i18n %}
+
+{% block title %}{% trans "Login" %}{% endblock %}
 
 {% block body %}
 <div class="container">
-    <h1>Login</h1>    
-    <br/>        
+    <h1>{% trans "Login" %}</h1>
+    <br/>
     {% include "forms/login_form.html" %}
 </div>
 {% endblock %}

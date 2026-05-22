@@ -1,19 +1,21 @@
 {% extends 'base.html' %}
 
-{% load static %}
+{% load static i18n %}
+
+{% block title %}{% trans "Validate your e-mail" %}{% endblock %}
 
 {% block body %}
 <div class="container">
-    <h1>Validate your e-mail</h1>    
-    <br/>    
+    <h1>{% trans "Validate your e-mail" %}</h1>
+    <br/>
     <p>
-    <span class="label label-success">Your registration was successful!</span>
+    <span class="label label-success">{% trans "Your registration was successful!" %}</span>
     </p>
     <p>
-    Please check your inbox for an e-mail containing instructions on validating your e-mail address.
+    {% trans "Please check your inbox for an e-mail containing instructions on validating your e-mail address." %}
     </p>
     <p>
-    If you do not receive an e-mail within 5-10 minutes, please try <a href="/signup/">registering your account</a> again.
+    {% blocktrans %}If you do not receive an e-mail within 5-10 minutes, please try <a href="/signup/">registering your account</a> again.{% endblocktrans %}
     </p>
 </div>
 {% endblock %}
