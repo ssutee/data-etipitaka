@@ -1,0 +1,350 @@
+# Thai translation for E-Tipitaka User Data.
+# Copyright (C) 2026 THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 09:27+0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: th\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+#: templates/base.html:9 templates/index.html:7 templates/user_data.html:31
+msgid "E-Tipitaka User Data"
+msgstr "ข้อมูลผู้ใช้ E-Tipitaka"
+
+#: templates/base.html:34
+msgid "Toggle navigation"
+msgstr "สลับเมนูนำทาง"
+
+#: templates/base.html:39
+msgid "Home"
+msgstr "หน้าแรก"
+
+#: templates/base.html:56
+msgid "Upload"
+msgstr "อัปโหลด"
+
+#: templates/base.html:57
+msgid "Logout"
+msgstr "ออกจากระบบ"
+
+#: templates/base.html:64 templates/forms/login_form.html:44
+#: templates/login.html:5 templates/login.html:9
+msgid "Login"
+msgstr "เข้าสู่ระบบ"
+
+#: templates/base.html:65
+msgid "Register"
+msgstr "สมัครสมาชิก"
+
+#: templates/base.html:76
+msgid "Are you sure?"
+msgstr "ยืนยันการลบใช่หรือไม่?"
+
+#: templates/base.html:77
+msgid "password is too short"
+msgstr "รหัสผ่านสั้นเกินไป"
+
+#: templates/base.html:78
+msgid "passwords not match"
+msgstr "รหัสผ่านไม่ตรงกัน"
+
+#: templates/email/verify_email.txt:1
+#, python-format
+msgid ""
+"Hello %(username)s,\n"
+"\n"
+"Please confirm your E-Tipitaka account email address by visiting the link "
+"below:\n"
+"\n"
+"%(verify_url)s\n"
+"\n"
+"This link expires in 3 days. If you did not create this account, ignore this "
+"email.\n"
+"\n"
+"-- E-Tipitaka"
+msgstr ""
+"สวัสดี %(username)s\n"
+"\n"
+"โปรดยืนยันที่อยู่อีเมลของบัญชี E-Tipitaka ของคุณโดยเปิดลิงก์ด้านล่างนี้:\n"
+"\n"
+"%(verify_url)s\n"
+"\n"
+"ลิงก์นี้จะหมดอายุใน 3 วัน หากคุณไม่ได้สร้างบัญชีนี้ โปรดเพิกเฉยต่ออีเมลนี้\n"
+"\n"
+"-- E-Tipitaka"
+
+#: templates/forms/login_form.html:7
+msgid "Your email has been validated. You can login now."
+msgstr "ยืนยันอีเมลของคุณเรียบร้อยแล้ว คุณสามารถเข้าสู่ระบบได้ทันที"
+
+#: templates/forms/login_form.html:13 templates/forms/login_form.html:15
+#: templates/forms/signup_form.html:13 templates/forms/signup_form.html:15
+msgid "Username"
+msgstr "ชื่อผู้ใช้"
+
+#: templates/forms/login_form.html:20 templates/forms/login_form.html:22
+#: templates/forms/signup_form.html:21 templates/forms/signup_form.html:23
+msgid "Password"
+msgstr "รหัสผ่าน"
+
+#: templates/forms/login_form.html:29
+msgid ""
+"Sorry, unrecognized username or password. <a href=\"/password_reset/\">Have "
+"you forgotten your password?</a>"
+msgstr ""
+"ขออภัย ไม่พบชื่อผู้ใช้หรือรหัสผ่านนี้ <a href=\"/password_reset/\">คุณลืมรหัสผ่านหรือไม่?</a>"
+
+#: templates/forms/login_form.html:37
+msgid "Sorry, your account has been blocked."
+msgstr "ขออภัย บัญชีของคุณถูกระงับการใช้งาน"
+
+#: templates/forms/signup_form.html:5 templates/forms/signup_form.html:7
+#: templates/registration/password_reset_form.html:22
+#: templates/registration/password_reset_form.html:24
+msgid "Email"
+msgstr "อีเมล"
+
+#: templates/forms/signup_form.html:28 templates/forms/signup_form.html:30
+#: templates/registration/password_reset_confirm.html:31
+msgid "Repeat password"
+msgstr "ยืนยันรหัสผ่าน"
+
+#: templates/forms/signup_form.html:37
+msgid "Sign up"
+msgstr "สมัครสมาชิก"
+
+#: templates/fragments/table_body.html:5
+msgid "Delete"
+msgstr "ลบ"
+
+#: templates/fragments/table_header.html:5
+msgid "Filename"
+msgstr "ชื่อไฟล์"
+
+#: templates/fragments/table_header.html:6
+msgid "Created"
+msgstr "วันที่สร้าง"
+
+#: templates/fragments/table_header.html:7
+msgid "Action"
+msgstr "การจัดการ"
+
+#: templates/index.html:9
+msgid ""
+"Welcome anonymous user! You need to <a href=\"/login\">Login</a> before you "
+"can use this application."
+msgstr ""
+"ยินดีต้อนรับผู้ใช้ที่ยังไม่ได้เข้าสู่ระบบ! คุณต้อง<a href=\"/login\">เข้าสู่ระบบ</a>ก่อนจึงจะใช้งานแอปพลิเคชันนี้ได้"
+
+#: templates/index.html:12
+msgid ""
+"If you don't have an account, please <a href=\"/signup/\">Register now!</a>"
+msgstr ""
+"หากคุณยังไม่มีบัญชี โปรด<a href=\"/signup/\">สมัครสมาชิกเลย!</a>"
+
+#: templates/registration/password_reset_complete.html:5
+#: templates/registration/password_reset_complete.html:9
+msgid "Password reset complete"
+msgstr "รีเซ็ตรหัสผ่านเสร็จสมบูรณ์"
+
+#: templates/registration/password_reset_complete.html:12
+msgid "Your password has been changed."
+msgstr "เปลี่ยนรหัสผ่านของคุณเรียบร้อยแล้ว"
+
+#: templates/registration/password_reset_complete.html:14
+msgid "You can now <a href=\"/login/\">log in</a> with your new password."
+msgstr "ตอนนี้คุณสามารถ<a href=\"/login/\">เข้าสู่ระบบ</a>ด้วยรหัสผ่านใหม่ของคุณได้แล้ว"
+
+#: templates/registration/password_reset_confirm.html:5
+msgid "Set new password"
+msgstr "ตั้งรหัสผ่านใหม่"
+
+#: templates/registration/password_reset_confirm.html:9
+msgid "Set a new password"
+msgstr "ตั้งรหัสผ่านใหม่"
+
+#: templates/registration/password_reset_confirm.html:24
+msgid "New password"
+msgstr "รหัสผ่านใหม่"
+
+#: templates/registration/password_reset_confirm.html:39
+msgid "Change password"
+msgstr "เปลี่ยนรหัสผ่าน"
+
+#: templates/registration/password_reset_confirm.html:45
+msgid "This password reset link is invalid or has expired."
+msgstr "ลิงก์รีเซ็ตรหัสผ่านนี้ไม่ถูกต้องหรือหมดอายุแล้ว"
+
+#: templates/registration/password_reset_confirm.html:48
+msgid ""
+"It may have already been used. Please <a href=\"/password_reset/\">request a "
+"new reset link</a>."
+msgstr ""
+"ลิงก์นี้อาจถูกใช้ไปแล้ว โปรด<a href=\"/password_reset/\">ขอลิงก์รีเซ็ตใหม่</a>"
+
+#: templates/registration/password_reset_done.html:5
+msgid "Password reset sent"
+msgstr "ส่งคำขอรีเซ็ตรหัสผ่านแล้ว"
+
+#: templates/registration/password_reset_done.html:9
+msgid "Check your email"
+msgstr "ตรวจสอบอีเมลของคุณ"
+
+#: templates/registration/password_reset_done.html:12
+msgid "Password reset email sent."
+msgstr "ส่งอีเมลรีเซ็ตรหัสผ่านแล้ว"
+
+#: templates/registration/password_reset_done.html:15
+msgid ""
+"If an account exists for the email you entered, you will receive a message "
+"with instructions to reset your password shortly."
+msgstr ""
+"หากมีบัญชีสำหรับอีเมลที่คุณกรอก คุณจะได้รับข้อความพร้อมคำแนะนำในการรีเซ็ตรหัสผ่านในไม่ช้า"
+
+#: templates/registration/password_reset_done.html:18
+msgid ""
+"If you do not receive an email within a few minutes, check your spam folder "
+"or <a href=\"/password_reset/\">try again</a>."
+msgstr ""
+"หากคุณไม่ได้รับอีเมลภายในไม่กี่นาที โปรดตรวจสอบโฟลเดอร์สแปม หรือ<a href=\"/password_reset/\">ลองอีกครั้ง</a>"
+
+#: templates/registration/password_reset_done.html:21
+msgid "Back to login"
+msgstr "กลับไปหน้าเข้าสู่ระบบ"
+
+#: templates/registration/password_reset_form.html:5
+msgid "Reset password"
+msgstr "รีเซ็ตรหัสผ่าน"
+
+#: templates/registration/password_reset_form.html:9
+msgid "Reset your password"
+msgstr "รีเซ็ตรหัสผ่านของคุณ"
+
+#: templates/registration/password_reset_form.html:11
+msgid ""
+"Enter your account email address and we'll send you a link to reset your "
+"password."
+msgstr ""
+"กรอกที่อยู่อีเมลของบัญชีคุณ แล้วเราจะส่งลิงก์สำหรับรีเซ็ตรหัสผ่านให้คุณ"
+
+#: templates/registration/password_reset_form.html:16
+msgid "Please enter a valid email address."
+msgstr "โปรดกรอกที่อยู่อีเมลที่ถูกต้อง"
+
+#: templates/registration/password_reset_form.html:30
+msgid "Send reset link"
+msgstr "ส่งลิงก์รีเซ็ต"
+
+#: templates/signup.html:5 templates/signup.html:9
+msgid "Registration"
+msgstr "สมัครสมาชิก"
+
+#: templates/signup.html:14 templates/signup.html:17
+msgid "Loading..."
+msgstr "กำลังโหลด..."
+
+#: templates/user_data.html:9
+msgid "Upload data file"
+msgstr "อัปโหลดไฟล์ข้อมูล"
+
+#: templates/user_data.html:15
+msgid "Select File"
+msgstr "เลือกไฟล์"
+
+#: templates/user_data.html:16
+msgid "Upload completed"
+msgstr "อัปโหลดเสร็จสมบูรณ์"
+
+#: templates/user_data.html:17
+msgid "File already exists"
+msgstr "มีไฟล์นี้อยู่แล้ว"
+
+#: templates/user_data.html:19
+msgid "File:"
+msgstr "ไฟล์:"
+
+#: templates/user_data.html:27
+msgid "Close"
+msgstr "ปิด"
+
+#: templates/user_data.html:46
+msgid "Share"
+msgstr "แชร์"
+
+#: templates/user_data.html:82
+msgid "Select user"
+msgstr "เลือกผู้ใช้"
+
+#: templates/validate.html:5 templates/validate.html:9
+msgid "Validate your e-mail"
+msgstr "ยืนยันอีเมลของคุณ"
+
+#: templates/validate.html:12
+msgid "Your registration was successful!"
+msgstr "สมัครสมาชิกสำเร็จแล้ว!"
+
+#: templates/validate.html:15
+msgid ""
+"Please check your inbox for an e-mail containing instructions on validating "
+"your e-mail address."
+msgstr ""
+"โปรดตรวจสอบกล่องจดหมายของคุณเพื่อดูอีเมลที่มีคำแนะนำในการยืนยันที่อยู่อีเมลของคุณ"
+
+#: templates/validate.html:18
+msgid ""
+"If you do not receive an e-mail within 5-10 minutes, please try <a href=\"/"
+"signup/\">registering your account</a> again."
+msgstr ""
+"หากคุณไม่ได้รับอีเมลภายใน 5-10 นาที โปรด<a href=\"/signup/\">สมัครบัญชีของคุณ</a>อีกครั้ง"
+
+#: user_data/auth_views.py:36
+msgid "Confirm your E-Tipitaka account"
+msgstr "ยืนยันบัญชี E-Tipitaka ของคุณ"
+
+#: user_data/auth_views.py:74
+msgid "Successfully logged out."
+msgstr "ออกจากระบบเรียบร้อยแล้ว"
+
+#: user_data/auth_views.py:94
+msgid "Verification e-mail sent."
+msgstr "ส่งอีเมลยืนยันแล้ว"
+
+#: user_data/auth_views.py:104
+msgid "Invalid or expired token."
+msgstr "โทเค็นไม่ถูกต้องหรือหมดอายุ"
+
+#: user_data/forms.py:9
+msgid "Select a file"
+msgstr "เลือกไฟล์"
+
+#: user_data/forms.py:10
+msgid "max. 2 megabytes"
+msgstr "ขนาดสูงสุด 2 เมกะไบต์"
+
+#: user_data/serializers.py:17
+msgid "A user with that username already exists."
+msgstr "มีผู้ใช้ที่ใช้ชื่อผู้ใช้นี้อยู่แล้ว"
+
+#: user_data/serializers.py:22
+msgid "A user with that email already exists."
+msgstr "มีผู้ใช้ที่ใช้อีเมลนี้อยู่แล้ว"
+
+#: user_data/serializers.py:27
+msgid "The two password fields didn't match."
+msgstr "รหัสผ่านทั้งสองช่องไม่ตรงกัน"
+
+#: user_data/serializers.py:52
+msgid "Unable to log in with provided credentials."
+msgstr "ไม่สามารถเข้าสู่ระบบด้วยข้อมูลที่ให้มาได้"
+
+#: user_data/serializers.py:55
+msgid "This account is not active. Please verify your email."
+msgstr "บัญชีนี้ยังไม่เปิดใช้งาน โปรดยืนยันอีเมลของคุณ"
