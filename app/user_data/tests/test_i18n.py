@@ -39,3 +39,10 @@ def test_invalid_cookie_falls_back_to_thai():
     captured = _activated_language('xx')
     assert captured['active'] == 'th'
     assert captured['request_attr'] == 'th'
+
+
+def test_setlang_view_sets_cookie_and_redirects(client):
+    response = client.post('/i18n/setlang/',
+                           {'language': 'en', 'next': '/login/'})
+    assert response.status_code == 302
+    assert client.cookies[settings.LANGUAGE_COOKIE_NAME].value == 'en'
