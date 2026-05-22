@@ -38,3 +38,4 @@ def test_valid_english_cookie_selects_english():
 def test_invalid_cookie_falls_back_to_thai():
     captured = _activated_language('xx')
     assert captured['active'] == 'th'
+    assert captured['request_attr'] == 'th'
