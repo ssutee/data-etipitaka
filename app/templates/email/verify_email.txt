@@ -1,4 +1,4 @@
-{% load i18n %}{% blocktrans %}Hello {{ username }},
+{# blocktrans intentionally NOT trimmed: blank lines are meaningful email formatting #}{% load i18n %}{% blocktrans %}Hello {{ username }},
 
 Please confirm your E-Tipitaka account email address by visiting the link below:
 
