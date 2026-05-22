@@ -6,9 +6,9 @@
 <div class="container">
     <h1>{% trans "E-Tipitaka User Data" %}</h1>
     <br/>
-    <p>{% blocktrans %}Welcome anonymous user!
+    <p>{% blocktrans trimmed %}Welcome anonymous user!
       You need to <a href="/login">Login</a>
       before you can use this application.{% endblocktrans %}</p>
-    <p>{% blocktrans %}If you don't have an account, please <a href="/signup/">Register now!</a>{% endblocktrans %}</p>
+    <p>{% blocktrans trimmed %}If you don't have an account, please <a href="/signup/">Register now!</a>{% endblocktrans %}</p>
 </div>
 {% endblock %}
