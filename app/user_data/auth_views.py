@@ -62,7 +62,7 @@ def rest_login(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     user = serializer.validated_data['user']
-    token, _ = Token.objects.get_or_create(user=user)
+    token, _created = Token.objects.get_or_create(user=user)
     return Response({'key': token.key})
 
 
