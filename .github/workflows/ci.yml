@@ -48,6 +48,9 @@ jobs:
         run: |
           cp .env.ci .env
           cp .env.db.ci .env.db
+          # The ./media bind mount must be writable by the container's
+          # app user (uid 999); a fresh runner creates it root-owned.
+          mkdir -p media && sudo chown 999:999 media
           docker compose up -d --build
       - name: Wait for the app
         run: |
