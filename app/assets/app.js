@@ -129,11 +129,19 @@ app.controller('RegisterController', function($scope, $http, $uibModal, $timeout
             }, function(error) {
                 console.log(error);
                 modalInstance.close();
-                if (error.data.email) {
-                    $scope.error.email = error.data.email[0];
+                $scope.error = {};
+                var data = error.data;
+                if (data && typeof data === 'object') {
+                    if (data.email) { $scope.error.email = data.email[0]; }
+                    if (data.username) { $scope.error.username = data.username[0]; }
+                    if (data.password) { $scope.error.password = data.password[0]; }
+                    if (!$scope.error.password) {
+                        if (data.non_field_errors) { $scope.error.password = data.non_field_errors[0]; }
+                        else if (data.detail) { $scope.error.password = data.detail; }
+                    }
                 }
-                if (error.data.username) {
-                    $scope.error.username = error.data.username[0];
+                if (!$scope.error.email && !$scope.error.username && !$scope.error.password) {
+                    $scope.error.password = window.i18n.signupGenericError;
                 }
             });
     };

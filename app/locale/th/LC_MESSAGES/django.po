@@ -348,3 +348,7 @@ msgstr "ไม่สามารถเข้าสู่ระบบด้วย
 #: user_data/serializers.py:55
 msgid "This account is not active. Please verify your email."
 msgstr "บัญชีนี้ยังไม่เปิดใช้งาน โปรดยืนยันอีเมลของคุณ"
+
+#: templates/base.html
+msgid "Something went wrong. Please try again."
+msgstr "เกิดข้อผิดพลาด กรุณาลองอีกครั้ง"
