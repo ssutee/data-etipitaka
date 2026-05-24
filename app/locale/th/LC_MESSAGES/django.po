@@ -352,3 +352,20 @@ msgstr "บัญชีนี้ยังไม่เปิดใช้งาน
 #: templates/base.html
 msgid "Something went wrong. Please try again."
 msgstr "เกิดข้อผิดพลาด กรุณาลองอีกครั้ง"
+
+# django.contrib.auth password validators — override Django's English fallback
+# (Django's bundled th catalog does not translate these strings).
+msgid "This password is too common."
+msgstr "รหัสผ่านนี้คาดเดาง่ายเกินไป"
+
+msgid "This password is entirely numeric."
+msgstr "รหัสผ่านต้องไม่เป็นตัวเลขทั้งหมด"
+
+#, python-format
+msgid "The password is too similar to the %(verbose_name)s."
+msgstr "รหัสผ่านคล้ายกับ%(verbose_name)sมากเกินไป"
+
+#, python-format
+msgid "This password is too short. It must contain at least %d character."
+msgid_plural "This password is too short. It must contain at least %d characters."
+msgstr[0] "รหัสผ่านสั้นเกินไป ต้องมีอย่างน้อย %d ตัวอักษร"

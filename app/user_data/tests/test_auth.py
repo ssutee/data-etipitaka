@@ -143,3 +143,33 @@ def test_navbar_logout_form_points_to_logout_url(client):
     resp = client.get('/user_data/')
     assert resp.status_code == 200
     assert 'action="/logout/"' in resp.content.decode()
+
+
+def test_register_rejects_common_password_in_thai(api):
+    # CommonPasswordValidator raises "This password is too common."; our
+    # locale shadows Django's English fallback so the user sees Thai.
+    resp = api.post('/rest-auth/registration/', {
+        'email': 'cp@example.com', 'username': 'cp',
+        'password1': 'password', 'password2': 'password',
+    })
+    assert resp.status_code == 400
+    assert resp.json()['password'] == ['รหัสผ่านนี้คาดเดาง่ายเกินไป']
+
+
+def test_register_rejects_numeric_password_in_thai(api):
+    resp = api.post('/rest-auth/registration/', {
+        'email': 'np@example.com', 'username': 'np',
+        'password1': '14725836900', 'password2': '14725836900',
+    })
+    assert resp.status_code == 400
+    assert 'รหัสผ่านต้องไม่เป็นตัวเลขทั้งหมด' in resp.json()['password']
+
+
+def test_register_rejects_short_password_in_thai(api):
+    resp = api.post('/rest-auth/registration/', {
+        'email': 'sp@example.com', 'username': 'sp',
+        'password1': 'x7', 'password2': 'x7',
+    })
+    assert resp.status_code == 400
+    # MinimumLengthValidator is plural-form for default min_length=8.
+    assert any('รหัสผ่านสั้นเกินไป' in msg for msg in resp.json()['password'])
