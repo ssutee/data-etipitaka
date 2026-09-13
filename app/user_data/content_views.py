@@ -82,3 +82,21 @@ tags = _content_endpoint({}, ['name'], 'tags')
 history = _content_endpoint({'starred': 'starred'}, ['keywords'], 'history')
 
 lexicon = _content_endpoint({}, ['head'], 'lexicon')
+
+
+@api_view(['GET'])
+@authentication_classes((TokenAuthentication, SessionAuthentication))
+@permission_classes((IsAuthenticated,))
+def summary(request):
+    counts, platforms = {}, set()
+    for key, (db_filename, table) in DB_TABLES.items():
+        rows, _ = read_table(request.user, db_filename, table,
+                             limit=10 ** 9, offset=0)
+        per = {}
+        for row in rows:
+            p = row['platform']
+            per[p] = per.get(p, 0) + 1
+            platforms.add(p)
+        counts[key] = per
+    return JsonResponse({'username': request.user.username,
+                         'platforms': sorted(platforms), 'counts': counts})

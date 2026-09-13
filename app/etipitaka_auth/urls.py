@@ -31,6 +31,7 @@ urlpatterns = [
     path('api/content/tags/', content_views.tags),
     path('api/content/history/', content_views.history),
     path('api/content/lexicon/', content_views.lexicon),
+    path('api/content/summary/', content_views.summary),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),

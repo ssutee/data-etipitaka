@@ -95,3 +95,16 @@ def test_lexicon_head_search(media_tmp, auth_alice, alice):
                     [(1, 'ภว', 'ความมี, ความเป็น')])
     body = auth_alice.get('/api/content/lexicon/?q=ภว').json()
     assert body['count'] == 1 and body['items'][0]['translation'].startswith('ความ')
+
+
+def test_summary_counts_per_type_and_platform(media_tmp, auth_alice, alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(0, 1, 'a', 0, 1, 1, 1)], platform='ios')
+    make_content_db(alice, 'tag.sqlite', 'tag', TAG_SCHEMA,
+                    [('ขันธ์', '', '', '', 0, 1)], platform='ios')
+    body = auth_alice.get('/api/content/summary/').json()
+    assert body['username'] == 'alice'
+    assert body['platforms'] == ['ios']
+    assert body['counts']['bookmarks'] == {'ios': 1}
+    assert body['counts']['tags'] == {'ios': 1}
+    assert body['counts']['highlights'] == {}
