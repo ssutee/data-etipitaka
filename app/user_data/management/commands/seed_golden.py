@@ -19,12 +19,16 @@ class Command(BaseCommand):
     help = "Create the deterministic golden-test dataset (idempotent)."
 
     def handle(self, *args, **options):
-        # Wipe prior golden data. Keep superusers.
+        # Wipe prior golden data. Delete ALL users (including superusers) so the
+        # dataset is fully deterministic: sharing_list / user-list endpoints
+        # return exactly the seeded users, and a stray dev superuser can't leak
+        # into them. Re-create a dev admin afterwards with `createsuperuser` if
+        # you need Django admin locally; CI needs none.
         Sharing.objects.all().delete()
         SyncData.objects.all().delete()
         UserData.objects.all().delete()
         Token.objects.all().delete()
-        User.objects.filter(is_superuser=False).delete()
+        User.objects.all().delete()
 
         alice = self._user(1001, "alice", "alice@example.com", "alicepass123")
         bob = self._user(1002, "bob", "bob@example.com", "bobpass123")

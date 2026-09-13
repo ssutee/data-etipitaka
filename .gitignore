@@ -8,3 +8,5 @@ app/media/
 tests/golden/.venv/
 .coverage
 graphify-out/
+docker-compose.override.yml
+mcp_server/.venv/
