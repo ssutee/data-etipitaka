@@ -101,10 +101,10 @@ def test_summary_counts_per_type_and_platform(media_tmp, auth_alice, alice):
     make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
                     [(0, 1, 'a', 0, 1, 1, 1)], platform='ios')
     make_content_db(alice, 'tag.sqlite', 'tag', TAG_SCHEMA,
-                    [('ขันธ์', '', '', '', 0, 1)], platform='ios')
+                    [('ขันธ์', '', '', '', 0, 1)], platform='android')
     body = auth_alice.get('/api/content/summary/').json()
     assert body['username'] == 'alice'
-    assert body['platforms'] == ['ios']
+    assert body['platforms'] == ['android', 'ios']
     assert body['counts']['bookmarks'] == {'ios': 1}
-    assert body['counts']['tags'] == {'ios': 1}
+    assert body['counts']['tags'] == {'android': 1}
     assert body['counts']['highlights'] == {}
