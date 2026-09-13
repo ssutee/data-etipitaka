@@ -60,6 +60,11 @@ GOLDEN_CASES = [
     GoldenCase("user_data_list_alice", "GET", "/user_data_list/", token=ALICE_TOKEN),
     GoldenCase("user_data_list_alice_deleted", "GET", "/user_data_list/?deleted=1", token=ALICE_TOKEN),
 
+    # --- content API (same-stack; old stack lacks these routes) ---
+    GoldenCase("content_bookmarks_alice", "GET", "/api/content/bookmarks/", token=ALICE_TOKEN),
+    GoldenCase("content_bookmarks_anon", "GET", "/api/content/bookmarks/"),
+    GoldenCase("content_summary_alice", "GET", "/api/content/summary/", token=ALICE_TOKEN),
+
     # --- file downloads (body stored as md5 by normalizer) ---
     GoldenCase("download_sync_data_alice", "GET", "/sync_data/sync_alice.json/", token=ALICE_TOKEN),
     GoldenCase("download_sync_data_404", "GET", "/sync_data/nope.json/", token=ALICE_TOKEN),

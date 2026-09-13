@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import shutil
+import sqlite3
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -40,6 +41,12 @@ class Command(BaseCommand):
         self._userdata(3001, alice, "data_alice.json", "ios", False)
         self._userdata(3002, alice, "data_alice.json", "ios", True)
 
+        self._content_db(
+            2101, alice, 'bookmark.sqlite', 'bookmark',
+            "CREATE TABLE bookmark (created FLOAT, important INTEGER, note TEXT, "
+            "rank INTEGER, code INTEGER, volume INTEGER, page INTEGER)",
+            [(1457843335.0, 1, 'golden-note', 0, 1, 10, 101)])
+
         self.stdout.write("seed_golden: done")
 
     def _user(self, pk, username, email, password):
@@ -72,3 +79,23 @@ class Command(BaseCommand):
         row.file.name = rel
         row.save()
         UserData.objects.filter(pk=pk).update(created_at="2020-01-03T00:00:00+00:00")
+
+    def _content_db(self, pk, user, filename, table, schema_sql, rows, platform='ios'):
+        rel = '%s/%s/%s' % (user.username, platform, filename)
+        dest = os.path.join(settings.MEDIA_ROOT, rel)
+        parent = os.path.dirname(dest)
+        if not os.path.isdir(parent):
+            os.makedirs(parent)
+        if os.path.exists(dest):
+            os.remove(dest)
+        conn = sqlite3.connect(dest)
+        conn.execute(schema_sql)
+        conn.executemany('INSERT INTO %s VALUES (%s)'
+                         % (table, ','.join('?' * len(rows[0]))), rows)
+        conn.commit()
+        conn.close()
+        row = SyncData(pk=pk, user=user, name=filename, platform=platform,
+                       checksum='seedchecksum')
+        row.file.name = rel
+        row.save()
+        SyncData.objects.filter(pk=pk).update(created_at='2020-01-04T00:00:00+00:00')

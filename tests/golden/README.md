@@ -32,6 +32,12 @@ English-only stack and are intentionally same-stack:
   `rest_login_bad` login error, and the DRF authentication / not-found error
   cases (`sync_data_list_anon`, `user_data_list_anon`, `download_sync_data_404`,
   `download_user_data_denied`, `user_data_action_get_deleted`).
+- The `/api/content/*` snapshots (`content_bookmarks_alice`,
+  `content_bookmarks_anon`, `content_summary_alice`) are same-stack — these
+  routes did not exist on the old stack.
+- `sync_data_list_alice` was re-recorded (and is now same-stack): the golden
+  seed adds a `bookmark.sqlite` SyncData row for alice to back the content-API
+  snapshots, which the old stack's seed did not create.
 
 All other golden snapshots (JSON data, tokens, file downloads, status codes)
 are not localized and remain valid cross-stack regression checks.

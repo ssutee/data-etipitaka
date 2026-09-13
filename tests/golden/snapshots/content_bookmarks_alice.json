@@ -1,0 +1,26 @@
+{
+  "body": {
+    "json": {
+      "count": 1,
+      "items": [
+        {
+          "code": 1,
+          "created": "<TIMESTAMP>",
+          "important": 1,
+          "note": "golden-note",
+          "page": 101,
+          "platform": "ios",
+          "rank": 0,
+          "volume": 10
+        }
+      ],
+      "limit": 50,
+      "offset": 0
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

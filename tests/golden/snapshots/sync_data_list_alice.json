@@ -1,7 +1,7 @@
 {
   "body": {
     "json": {
-      "items": "[{\"model\": \"user_data.syncdata\", \"pk\": 2002, \"fields\": {\"user\": 1001, \"name\": \"sync_alice.json\", \"checksum\": \"seedchecksum\", \"platform\": \"ios\", \"file\": \"alice/ios/sync_alice.json\", \"created_at\": \"<TIMESTAMP>\"}}]"
+      "items": "[{\"model\": \"user_data.syncdata\", \"pk\": 2002, \"fields\": {\"user\": 1001, \"name\": \"sync_alice.json\", \"checksum\": \"seedchecksum\", \"platform\": \"ios\", \"file\": \"alice/ios/sync_alice.json\", \"created_at\": \"<TIMESTAMP>\"}}, {\"model\": \"user_data.syncdata\", \"pk\": 2101, \"fields\": {\"user\": 1001, \"name\": \"bookmark.sqlite\", \"checksum\": \"seedchecksum\", \"platform\": \"ios\", \"file\": \"alice/ios/bookmark.sqlite\", \"created_at\": \"<TIMESTAMP>\"}}]"
     }
   },
   "headers": {

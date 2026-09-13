@@ -1,0 +1,24 @@
+{
+  "body": {
+    "json": {
+      "counts": {
+        "bookmarks": {
+          "ios": 1
+        },
+        "highlights": {},
+        "history": {},
+        "lexicon": {},
+        "tags": {}
+      },
+      "platforms": [
+        "ios"
+      ],
+      "username": "alice"
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}
