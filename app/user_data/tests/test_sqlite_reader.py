@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from user_data.sqlite_reader import read_table
@@ -62,3 +64,45 @@ def test_own_data_only(media_tmp, alice, bob):
                     [(0, 1, 'bobmark', 0, 1, 1, 1)])
     rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark')
     assert (rows, total) == ([], 0)
+
+
+def test_platform_filter(media_tmp, alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(0, 0, 'ios-note', 0, 1, 1, 1)], platform='ios')
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(0, 0, 'android-note', 0, 1, 1, 1)], platform='android')
+    rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark', platform='android')
+    assert total == 1
+    assert rows[0]['note'] == 'android-note' and rows[0]['platform'] == 'android'
+
+
+def test_aggregates_across_platforms(media_tmp, alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(0, 0, 'a', 0, 1, 1, 1)], platform='ios')
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(0, 0, 'b', 0, 1, 1, 1)], platform='android')
+    rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark')
+    assert total == 2
+    assert {r['platform'] for r in rows} == {'ios', 'android'}
+
+
+def test_corrupt_db_skipped(media_tmp, alice):
+    from django.conf import settings
+    from user_data.models import SyncData
+    rel = 'alice/ios/bookmark.sqlite'
+    dest = os.path.join(settings.MEDIA_ROOT, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, 'wb') as f:
+        f.write(b'this is not a sqlite database')
+    sd = SyncData(user=alice, name='bookmark.sqlite', platform='ios')
+    sd.file.name = rel
+    sd.save()
+    rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark')
+    assert (rows, total) == ([], 0)
+
+
+def test_iso_fallback_on_non_numeric_created(media_tmp, alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA,
+                    [(None, 0, '', 0, 1, 1, 1)])
+    rows, _ = read_table(alice, 'bookmark.sqlite', 'bookmark')
+    assert rows[0]['created'] is None

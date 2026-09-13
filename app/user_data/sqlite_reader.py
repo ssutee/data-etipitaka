@@ -44,6 +44,12 @@ def read_table(user, db_filename, table, *, filters=None, search=None,
     Returns (rows, total). Rows are dicts tagged with 'platform'. Timestamp
     columns are normalized to ISO-8601. Missing files, missing tables and
     corrupt databases are skipped. Only the calling user's rows are ever read.
+
+    Identifier trust boundary: `table`, `filters` keys and `search` column
+    names are interpolated into SQL as identifiers and MUST be trusted,
+    server-defined strings (never raw user input). All *values* are bound
+    parameters. `limit`/`offset` are not clamped here; callers (e.g.
+    content_views) validate them.
     """
     qs = user.syncdata_set.filter(name=db_filename)
     if platform:
