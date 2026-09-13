@@ -64,3 +64,34 @@ def test_bookmarks_important_zero_filter(media_tmp, auth_alice, alice):
     body = auth_alice.get('/api/content/bookmarks/?important=0').json()
     assert body['count'] == 1
     assert body['items'][0]['note'] == 'not'
+
+
+TAG_SCHEMA = ("CREATE TABLE tag (name TEXT, history TEXT, note TEXT, "
+              "highlight TEXT, priority INTEGER, code INTEGER)")
+HISTORY_SCHEMA = ("CREATE TABLE history (keywords TEXT, created FLOAT, detail TEXT, "
+                  "code INTEGER, starred INTEGER, state INTEGER, read TEXT, "
+                  "skimmed TEXT, items TEXT, marked TEXT, type INTEGER, note TEXT, "
+                  "buddhawaj BOOLEAN, note_items TEXT, note_state INTEGER, priority INTEGER)")
+LEXICON_SCHEMA = "CREATE TABLE lexicon (type INTEGER, head TEXT, translation TEXT)"
+
+
+def test_tags_name_search(media_tmp, auth_alice, alice):
+    make_content_db(alice, 'tag.sqlite', 'tag', TAG_SCHEMA,
+                    [('ขันธ์', '', '', '', 0, 1), ('ธาตุ', '', '', '', 0, 1)])
+    assert auth_alice.get('/api/content/tags/?q=ขันธ์').json()['count'] == 1
+    assert auth_alice.get('/api/content/tags/').json()['count'] == 2
+
+
+def test_history_starred_filter(media_tmp, auth_alice, alice):
+    row = ('อานาปานสติ', 0.0, '', 1, 1, 0, '', '', '', '', 1, '', 1, '', 0, 0)
+    row2 = ('เวทนา', 0.0, '', 1, 0, 0, '', '', '', '', 1, '', 1, '', 0, 0)
+    make_content_db(alice, 'history.sqlite', 'history', HISTORY_SCHEMA, [row, row2])
+    assert auth_alice.get('/api/content/history/?starred=1').json()['count'] == 1
+    assert auth_alice.get('/api/content/history/?q=อานา').json()['count'] == 1
+
+
+def test_lexicon_head_search(media_tmp, auth_alice, alice):
+    make_content_db(alice, 'saved_lexicon.sqlite', 'lexicon', LEXICON_SCHEMA,
+                    [(1, 'ภว', 'ความมี, ความเป็น')])
+    body = auth_alice.get('/api/content/lexicon/?q=ภว').json()
+    assert body['count'] == 1 and body['items'][0]['translation'].startswith('ความ')

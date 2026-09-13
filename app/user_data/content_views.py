@@ -76,3 +76,9 @@ bookmarks = _content_endpoint(
 highlights = _content_endpoint(
     {'code': 'code', 'volume': 'volume', 'page': 'page'},
     ['selection', 'note'], 'highlights')
+
+tags = _content_endpoint({}, ['name'], 'tags')
+
+history = _content_endpoint({'starred': 'starred'}, ['keywords'], 'history')
+
+lexicon = _content_endpoint({}, ['head'], 'lexicon')
