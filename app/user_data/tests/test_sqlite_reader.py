@@ -33,6 +33,12 @@ def test_missing_file_and_missing_table_return_empty(media_tmp, alice):
     rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark')
     assert (rows, total) == ([], 0)
 
+    # missing-table: a real DB file that lacks the requested table
+    make_content_db(alice, 'bookmark.sqlite', 'other',
+                    'CREATE TABLE other (x INTEGER)', [(1,)])
+    rows, total = read_table(alice, 'bookmark.sqlite', 'bookmark')
+    assert (rows, total) == ([], 0)
+
 
 def test_filters_search_and_pagination(media_tmp, alice):
     make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA, [
