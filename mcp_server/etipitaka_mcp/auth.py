@@ -51,6 +51,10 @@ class Authenticator:
         return resp.json()['key']
 
     def token(self, *, refresh=False):
+        # An explicit token always wins and is never cached, so a later change
+        # to ETIPITAKA_TOKEN can't be shadowed by a stale cache file.
+        if self._explicit_token:
+            return self._explicit_token
         if not refresh:
             cached = self._read_cache()
             if cached:

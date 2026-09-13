@@ -1,4 +1,5 @@
 import sqlite3
+from urllib.parse import quote
 
 from . import canon_registry as reg
 
@@ -8,7 +9,9 @@ class CanonError(Exception):
 
 
 def _open_ro(path):
-    return sqlite3.connect('file:%s?mode=ro&immutable=1' % path, uri=True)
+    # Percent-encode the path so a resources dir containing ? or # can't
+    # corrupt the SQLite URI. quote() keeps '/' by default.
+    return sqlite3.connect('file:%s?mode=ro&immutable=1' % quote(path), uri=True)
 
 
 def _snippet(content, term, width=80):
