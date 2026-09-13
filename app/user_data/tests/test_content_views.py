@@ -54,3 +54,13 @@ def test_highlights_search_selection(media_tmp, auth_alice, alice):
     body = auth_alice.get('/api/content/highlights/?q=อาสีวิส').json()
     assert body['count'] == 1
     assert body['items'][0]['selection'] == 'อาสีวิสสูตร'
+
+
+def test_bookmarks_important_zero_filter(media_tmp, auth_alice, alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SCHEMA, [
+        (0, 1, 'imp', 0, 1, 1, 1),
+        (0, 0, 'not', 0, 1, 2, 2),
+    ])
+    body = auth_alice.get('/api/content/bookmarks/?important=0').json()
+    assert body['count'] == 1
+    assert body['items'][0]['note'] == 'not'

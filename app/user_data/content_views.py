@@ -9,6 +9,9 @@ from .sqlite_reader import read_table
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 
+# `allowed`, `search_cols`, `table` and these filenames are interpolated into
+# SQL as identifiers by sqlite_reader — keep them fixed, server-defined values,
+# never request-derived. Only param *values* are bound.
 DB_TABLES = {
     'bookmarks':  ('bookmark.sqlite', 'bookmark'),
     'highlights': ('highlight.sqlite', 'highlight'),
@@ -62,6 +65,7 @@ def _content_endpoint(allowed, search_cols, key):
     def view(request):
         return _list(request, db_filename, table,
                      allowed=allowed, search_cols=search_cols)
+    view.__name__ = key
     return view
 
 
