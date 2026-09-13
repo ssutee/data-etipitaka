@@ -1,8 +1,9 @@
+# -*- coding: utf-8 -*-
 import os
 
 import pytest
 
-from etipitaka_mcp import canon_registry as reg
+from user_data import canon_registry as reg
 
 
 def test_edition_for_ios_and_android():
@@ -41,8 +42,8 @@ def _pc_literals(path, names):
     """Extract module-level literal assignments without importing the module.
 
     The PC app's constants.py imports wx (not installed here), so we parse it
-    with ast and literal_eval only the assignments we need — the drift check
-    then works regardless of the PC app's own dependencies.
+    with ast and literal_eval only the assignments we need. This file is on the
+    developer host, not in the container, so the test below is skipped in CI.
     """
     import ast
     with open(path, encoding='utf-8') as f:
@@ -57,7 +58,7 @@ def _pc_literals(path, names):
 
 
 @pytest.mark.skipif(not os.path.exists(PC_CONSTANTS),
-                    reason='PC app constants.py not present')
+                    reason='PC app constants.py not present (expected in container/CI)')
 def test_code_tables_match_pc_app():
     vals = _pc_literals(PC_CONSTANTS,
                         {'IOS_CODE_TABLE', 'ANDROID_CODE_TABLE', 'CODES'})

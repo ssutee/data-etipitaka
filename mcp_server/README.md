@@ -14,18 +14,21 @@ pip install -e .
 
 ## Configuration (environment variables)
 
+- `ETIPITAKA_BASE_URL` — default `https://data.etipitaka.com`. Serves both the
+  personal-data API and the public canon API.
+
 Personal data (choose ONE auth method):
-- `ETIPITAKA_BASE_URL` — default `https://data.etipitaka.com`
 - `ETIPITAKA_USERNAME` + `ETIPITAKA_PASSWORD` — your web login; exchanged once
   for a token, which is cached at `~/.config/etipitaka-mcp/token` (mode 0600).
   The password is never stored.
 - or `ETIPITAKA_TOKEN` — a pre-existing DRF token.
 
-Canon (optional; enables the canon tools):
-- `ETIPITAKA_RESOURCES_DIR` — path to the E-Tipitaka resources folder
-  (e.g. `/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/resources`).
-- `ETIPITAKA_DEFAULT_EDITION` — default edition for `search_canon`
-  (e.g. `thaiwn`).
+Canon:
+- Canon search/read/dictionary is served **remotely** by the server at
+  `ETIPITAKA_BASE_URL` (`/api/canon/*`, public — no auth). No local resource
+  files are needed by the MCP anymore.
+- `ETIPITAKA_DEFAULT_EDITION` (optional) — default edition for `search_canon`
+  when the tool call omits one (e.g. `thaiwn`).
 
 ## Tools
 
@@ -55,8 +58,7 @@ Add to `claude_desktop_config.json` (or an `.mcp.json`):
       "env": {
         "ETIPITAKA_USERNAME": "your-username",
         "ETIPITAKA_PASSWORD": "your-password",
-        "ETIPITAKA_RESOURCES_DIR": "/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/resources",
-        "ETIPITAKA_DEFAULT_EDITION": "thaiwn"
+        "ETIPITAKA_DEFAULT_EDITION": "thai"
       }
     }
   }

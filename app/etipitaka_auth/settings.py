@@ -166,6 +166,12 @@ STATICFILES_DIRS = (
 STATIC_ROOT = os.path.join(BASE_DIR, "static")
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
+# Directory holding the read-only canon edition/dictionary SQLite files that
+# back the public /api/canon/* endpoints. In production set CANON_RESOURCES_DIR
+# to the mount holding the rsync'd resources (e.g. /canon); when unset it falls
+# back to media/canon, which the golden seed and local dev populate.
+CANON_RESOURCES_DIR = os.environ.get('CANON_RESOURCES_DIR') or os.path.join(MEDIA_ROOT, 'canon')
+
 try:
     from .local_settings import *
 except ImportError:

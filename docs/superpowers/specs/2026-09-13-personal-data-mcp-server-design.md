@@ -3,6 +3,17 @@
 **Date:** 2026-09-13
 **Status:** Approved
 
+> **Amendment 2026-09-14 — canon search moved to REMOTE.** The decision below
+> to read the canon databases *locally inside the MCP* was reversed. Canon
+> search / passage read / dictionary lookup are now served by the Django backend
+> as **public** (no-auth) endpoints under `/api/canon/*`, backed by the
+> `user_data.canon_reader` + `canon_registry` modules reading SQLite from
+> `settings.CANON_RESOURCES_DIR` (prod: the rsync'd 1.4 GB at `/canon`; dev/test:
+> `media/canon`). The MCP keeps the same tool surface but is now a thin
+> `CanonClient` over HTTP — it no longer needs `ETIPITAKA_RESOURCES_DIR` or any
+> local canon files. Sections mentioning "local canon", `ETIPITAKA_RESOURCES_DIR`,
+> and the in-MCP `canon_reader` are superseded by this note.
+
 ## Goal
 
 Give AI agents access to two related bodies of E-Tipitaka data through a Model

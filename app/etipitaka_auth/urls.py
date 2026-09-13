@@ -5,6 +5,7 @@ from django.views.i18n import set_language
 
 from user_data import views, auth_views
 from user_data import content_views
+from user_data import canon_views
 from user_data.auth_urls import rest_auth_patterns
 
 urlpatterns = [
@@ -32,6 +33,11 @@ urlpatterns = [
     path('api/content/history/', content_views.history),
     path('api/content/lexicon/', content_views.lexicon),
     path('api/content/summary/', content_views.summary),
+    path('api/canon/editions/', canon_views.editions),
+    path('api/canon/search/', canon_views.search),
+    path('api/canon/passage/', canon_views.passage),
+    path('api/canon/resolve/', canon_views.resolve),
+    path('api/canon/dictionary/', canon_views.dictionary),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),

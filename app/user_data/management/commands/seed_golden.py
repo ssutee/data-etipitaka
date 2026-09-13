@@ -51,7 +51,41 @@ class Command(BaseCommand):
             "rank INTEGER, code INTEGER, volume INTEGER, page INTEGER)",
             [(1457843335.0, 1, 'golden-note', 0, 1, 10, 101)])
 
+        self._seed_canon()
+
         self.stdout.write("seed_golden: done")
+
+    def _seed_canon(self):
+        # Tiny deterministic canon fixtures backing the public /api/canon/*
+        # golden cases. Written to CANON_RESOURCES_DIR (defaults to
+        # media/canon), which the golden server reads. Only thai.sqlite and
+        # p2t_dict.sqlite exist, so editions' `present` flags are deterministic.
+        cdir = settings.CANON_RESOURCES_DIR
+        if not os.path.isdir(cdir):
+            os.makedirs(cdir)
+        self._sqlite(
+            os.path.join(cdir, 'thai.sqlite'),
+            'CREATE TABLE main (volume VARCHAR(2), page VARCHAR(4), '
+            'items TEXT, content TEXT)', 'main',
+            [('01', '0001', '1', 'golden alpha passage'),
+             ('02', '0001', '1', 'golden beta passage')])
+        self._sqlite(
+            os.path.join(cdir, 'p2t_dict.sqlite'),
+            'CREATE TABLE p2t (headword TEXT, content TEXT, type TEXT, gender '
+            'TEXT, vachana TEXT, viphat TEXT, category TEXT, read TEXT, note '
+            'TEXT, roman TEXT, eng_content TEXT, source TEXT)', 'p2t',
+            [('golden', 'ทองคำ', 'n', '', '', '', '', '', '', 'golden',
+              'gold', 'seed')])
+
+    def _sqlite(self, dest, schema_sql, table, rows):
+        if os.path.exists(dest):
+            os.remove(dest)
+        conn = sqlite3.connect(dest)
+        conn.execute(schema_sql)
+        conn.executemany('INSERT INTO %s VALUES (%s)'
+                         % (table, ','.join('?' * len(rows[0]))), rows)
+        conn.commit()
+        conn.close()
 
     def _user(self, pk, username, email, password):
         user = User(pk=pk, username=username, email=email, is_active=True)

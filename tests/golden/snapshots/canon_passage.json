@@ -1,0 +1,16 @@
+{
+  "body": {
+    "json": {
+      "content": "golden alpha passage",
+      "edition": "thai",
+      "items": "1",
+      "page": "0001",
+      "volume": "01"
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

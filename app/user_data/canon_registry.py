@@ -1,7 +1,14 @@
+# -*- coding: utf-8 -*-
+"""Canon edition / dictionary registry.
+
+Maps edition keys and per-platform integer codes to the SQLite files that back
+the public canon API. Values are copied from the E-Tipitaka-PC app's
+constants.py (the *_DB constants, LANGS, and *_CODE_TABLE); that app is
+intentionally NOT imported (it depends on wx).
+"""
 import os
 
-# Edition key -> file + display name. Copied from E-Tipitaka-PC constants.py
-# (the *_DB constants and LANGS); the PC app is intentionally NOT imported.
+# Edition key -> file + display name.
 EDITIONS = {
     'thai':    {'filename': 'thai.sqlite',    'name': 'ไทย (ฉบับหลวง)'},
     'pali':    {'filename': 'pali.sqlite',    'name': 'บาลี (สยามรัฐ)'},

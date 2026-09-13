@@ -65,6 +65,13 @@ GOLDEN_CASES = [
     GoldenCase("content_bookmarks_anon", "GET", "/api/content/bookmarks/"),
     GoldenCase("content_summary_alice", "GET", "/api/content/summary/", token=ALICE_TOKEN),
 
+    # --- public canon API (same-stack; old stack lacks these routes; no auth) ---
+    GoldenCase("canon_editions", "GET", "/api/canon/editions/"),
+    GoldenCase("canon_search", "GET", "/api/canon/search/?edition=thai&query=golden"),
+    GoldenCase("canon_passage", "GET", "/api/canon/passage/?edition=thai&volume=1&page=1"),
+    GoldenCase("canon_dictionary", "GET", "/api/canon/dictionary/?term=golden&dictionary=pali_thai&match=exact"),
+    GoldenCase("canon_search_unknown_edition", "GET", "/api/canon/search/?edition=nope&query=x"),
+
     # --- file downloads (body stored as md5 by normalizer) ---
     GoldenCase("download_sync_data_alice", "GET", "/sync_data/sync_alice.json/", token=ALICE_TOKEN),
     GoldenCase("download_sync_data_404", "GET", "/sync_data/nope.json/", token=ALICE_TOKEN),

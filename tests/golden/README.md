@@ -35,6 +35,11 @@ English-only stack and are intentionally same-stack:
 - The `/api/content/*` snapshots (`content_bookmarks_alice`,
   `content_bookmarks_anon`, `content_summary_alice`) are same-stack — these
   routes did not exist on the old stack.
+- The public `/api/canon/*` snapshots (`canon_editions`, `canon_search`,
+  `canon_passage`, `canon_dictionary`, `canon_search_unknown_edition`) are
+  same-stack — these routes did not exist on the old stack. They read the tiny
+  deterministic canon fixtures (`thai.sqlite`, `p2t_dict.sqlite`) the golden
+  seed writes to `CANON_RESOURCES_DIR` (defaults to `media/canon`).
 - `sync_data_list_alice` was re-recorded (and is now same-stack): the golden
   seed adds a `bookmark.sqlite` SyncData row for alice to back the content-API
   snapshots, which the old stack's seed did not create.

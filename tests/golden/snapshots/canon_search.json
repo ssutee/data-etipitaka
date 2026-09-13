@@ -1,0 +1,30 @@
+{
+  "body": {
+    "json": {
+      "count": 2,
+      "items": [
+        {
+          "edition": "thai",
+          "items": "1",
+          "page": "0001",
+          "snippet": "golden alpha passage",
+          "volume": "01"
+        },
+        {
+          "edition": "thai",
+          "items": "1",
+          "page": "0001",
+          "snippet": "golden beta passage",
+          "volume": "02"
+        }
+      ],
+      "limit": 20,
+      "offset": 0
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

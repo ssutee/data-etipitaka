@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""Read-only access to the canon edition / dictionary SQLite files.
+
+All connections are opened immutable + read-only, so a corrupt or concurrently
+written file can never be mutated through here. Table/column names come only
+from the trusted `canon_registry`, never from request input; only bound values
+(the query term, volume, page, limit) are request-derived.
+"""
 import sqlite3
 from urllib.parse import quote
 

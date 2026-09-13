@@ -1,0 +1,28 @@
+{
+  "body": {
+    "json": {
+      "count": 1,
+      "entries": [
+        {
+          "category": "",
+          "content": "\u0e17\u0e2d\u0e07\u0e04\u0e33",
+          "eng_content": "gold",
+          "gender": "",
+          "headword": "golden",
+          "note": "",
+          "read": "",
+          "roman": "golden",
+          "source": "seed",
+          "type": "n",
+          "vachana": "",
+          "viphat": ""
+        }
+      ]
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

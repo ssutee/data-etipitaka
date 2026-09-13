@@ -51,6 +51,40 @@ def media_tmp(settings, tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def canon_dir(settings, tmp_path):
+    """Point CANON_RESOURCES_DIR at an empty temp dir for canon tests."""
+    d = tmp_path / 'canon'
+    d.mkdir()
+    settings.CANON_RESOURCES_DIR = str(d)
+    return d
+
+
+def make_canon_edition(canon_dir, filename, rows):
+    """Write a canon edition SQLite file. rows: (volume, page, items, content)."""
+    dest = os.path.join(str(canon_dir), filename)
+    conn = sqlite3.connect(dest)
+    conn.execute('CREATE TABLE main (volume VARCHAR(2), page VARCHAR(4), '
+                 'items TEXT, content TEXT)')
+    conn.executemany('INSERT INTO main VALUES (?,?,?,?)', rows)
+    conn.commit()
+    conn.close()
+    return dest
+
+
+def make_canon_dict(canon_dir, filename, table, columns, rows):
+    """Write a dictionary SQLite file with the given columns and rows."""
+    dest = os.path.join(str(canon_dir), filename)
+    conn = sqlite3.connect(dest)
+    cols_ddl = ','.join('%s TEXT' % c for c in columns)
+    conn.execute('CREATE TABLE %s (%s)' % (table, cols_ddl))
+    conn.executemany('INSERT INTO %s VALUES (%s)'
+                     % (table, ','.join('?' * len(columns))), rows)
+    conn.commit()
+    conn.close()
+    return dest
+
+
 def make_content_db(user, filename, table, schema_sql, rows, platform='ios'):
     """Create a SyncData row backed by a real SQLite file under MEDIA_ROOT."""
     from django.conf import settings

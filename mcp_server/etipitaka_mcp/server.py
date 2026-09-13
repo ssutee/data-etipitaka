@@ -1,11 +1,7 @@
-import os
-
 from mcp.server.fastmcp import FastMCP
 
-from . import canon_reader
-from . import canon_registry as reg
 from .auth import Authenticator
-from .client import ContentClient
+from .client import CanonClient, ContentClient
 from .config import load_config
 
 cfg = load_config()
@@ -13,13 +9,7 @@ mcp = FastMCP('etipitaka')
 
 _auth = Authenticator(cfg.base_url, cfg.username, cfg.password, cfg.token)
 _content = ContentClient(_auth)
-
-
-def _require_resources():
-    if not cfg.resources_dir or not os.path.isdir(cfg.resources_dir):
-        raise ValueError('canon unavailable: set ETIPITAKA_RESOURCES_DIR '
-                         'to the E-Tipitaka resources folder')
-    return cfg.resources_dir
+_canon = CanonClient(cfg.base_url)
 
 
 # --- personal data (plain impls) ---
@@ -51,49 +41,29 @@ def _whoami():
     return _content.whoami()
 
 
-# --- canon (plain impls) ---
+# --- canon (plain impls; served remotely by the Django /api/canon/* API) ---
 def _search_canon(query, edition=None, volume=None, limit=20, offset=0):
-    rdir = _require_resources()
     edition = edition or cfg.default_edition
     if not edition:
         raise ValueError('no edition given and ETIPITAKA_DEFAULT_EDITION unset')
-    items, total = canon_reader.search(rdir, edition, query, volume=volume,
-                                       limit=limit, offset=offset)
-    return {'items': items, 'count': total, 'limit': limit, 'offset': offset}
+    return _canon.search(edition=edition, query=query, volume=volume,
+                         limit=limit, offset=offset)
 
 
 def _get_passage(edition, volume, page):
-    rdir = _require_resources()
-    row = canon_reader.get_page(rdir, edition, volume, page)
-    if row is None:
-        raise ValueError('passage not found: %s vol %s page %s'
-                         % (edition, volume, page))
-    return row
+    return _canon.passage(edition=edition, volume=volume, page=page)
 
 
 def _resolve_reference(platform, code, volume, page):
-    rdir = _require_resources()
-    edition = reg.edition_for(platform, code)
-    row = canon_reader.get_page(rdir, edition, volume, page)
-    if row is None:
-        raise ValueError('passage not found for %s code %s vol %s page %s'
-                         % (platform, code, volume, page))
-    return row
+    return _canon.resolve(platform=platform, code=code, volume=volume, page=page)
 
 
 def _list_editions():
-    rdir = cfg.resources_dir
-    editions = [{'key': k, 'name': m['name'],
-                 'present': bool(rdir) and os.path.exists(os.path.join(rdir, m['filename']))}
-                for k, m in reg.EDITIONS.items()]
-    return {'editions': editions, 'dictionaries': list(reg.DICTIONARIES),
-            'default_edition': cfg.default_edition}
+    return _canon.editions()
 
 
 def _lookup_dictionary(term, dictionary='pali_thai', match='exact', limit=20):
-    rdir = _require_resources()
-    entries = canon_reader.lookup(rdir, dictionary, term, match=match, limit=limit)
-    return {'entries': entries, 'count': len(entries)}
+    return _canon.dictionary(term=term, dictionary=dictionary, match=match, limit=limit)
 
 
 # --- MCP tool registrations ---

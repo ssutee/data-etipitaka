@@ -43,3 +43,32 @@ class ContentClient:
 
     def whoami(self):
         return self._get('/rest-auth/user/')
+
+
+class CanonClient:
+    """Calls the public /api/canon/* REST API. No auth (canon is public)."""
+
+    def __init__(self, base_url, timeout=30):
+        self.base_url = base_url.rstrip('/')
+        self.timeout = timeout
+
+    def _get(self, path, params=None):
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        resp = httpx.get(self.base_url + path, params=clean, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def editions(self):
+        return self._get('/api/canon/editions/')
+
+    def search(self, **params):
+        return self._get('/api/canon/search/', params)
+
+    def passage(self, **params):
+        return self._get('/api/canon/passage/', params)
+
+    def resolve(self, **params):
+        return self._get('/api/canon/resolve/', params)
+
+    def dictionary(self, **params):
+        return self._get('/api/canon/dictionary/', params)

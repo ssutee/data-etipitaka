@@ -1,0 +1,12 @@
+{
+  "body": {
+    "json": {
+      "detail": "unknown or missing edition"
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 400
+}
