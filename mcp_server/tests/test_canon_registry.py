@@ -34,16 +34,33 @@ def test_dictionary_metadata():
     assert reg.DICTIONARIES['thai']['head'] == 'head'
 
 
-@pytest.mark.skipif(
-    not os.path.exists(
-        '/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/constants.py'),
-    reason='PC app constants.py not present')
+PC_CONSTANTS = '/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/constants.py'
+
+
+def _pc_literals(path, names):
+    """Extract module-level literal assignments without importing the module.
+
+    The PC app's constants.py imports wx (not installed here), so we parse it
+    with ast and literal_eval only the assignments we need — the drift check
+    then works regardless of the PC app's own dependencies.
+    """
+    import ast
+    with open(path, encoding='utf-8') as f:
+        tree = ast.parse(f.read())
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    out[target.id] = ast.literal_eval(node.value)
+    return out
+
+
+@pytest.mark.skipif(not os.path.exists(PC_CONSTANTS),
+                    reason='PC app constants.py not present')
 def test_code_tables_match_pc_app():
-    import importlib.util
-    path = '/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/constants.py'
-    spec = importlib.util.spec_from_file_location('pc_constants', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert reg.IOS_CODE_TABLE == mod.IOS_CODE_TABLE
-    assert reg.ANDROID_CODE_TABLE == mod.ANDROID_CODE_TABLE
-    assert set(reg.EDITIONS) >= set(mod.CODES)
+    vals = _pc_literals(PC_CONSTANTS,
+                        {'IOS_CODE_TABLE', 'ANDROID_CODE_TABLE', 'CODES'})
+    assert reg.IOS_CODE_TABLE == vals['IOS_CODE_TABLE']
+    assert reg.ANDROID_CODE_TABLE == vals['ANDROID_CODE_TABLE']
+    assert set(reg.EDITIONS) >= set(vals['CODES'])
