@@ -5,21 +5,36 @@
 
 ## Goal
 
-Expose a user's personal E-Tipitaka study data — bookmarks, highlights, tags,
-search history, and saved lexicon terms — to AI agents through a Model Context
-Protocol (MCP) server. An agent can then answer questions over the user's own
-data, for example *"what have I bookmarked in volume 11?"*, *"summarize my
-highlights tagged ขันธ์"*, or *"which Pali terms have I saved?"*.
+Give AI agents access to two related bodies of E-Tipitaka data through a Model
+Context Protocol (MCP) server:
 
-The work has two deliverables:
+1. **A user's personal study data** — bookmarks, highlights, tags, search
+   history, and saved lexicon terms — served from the Django backend.
+2. **The Buddhist canon itself** — full-text search, passage read, and Pali /
+   Thai dictionary lookup — read locally from the E-Tipitaka canon databases.
+
+Because the MCP holds both, it can also **cross-reference** them: resolve a
+user's bookmark or highlight `(code, volume, page)` to the actual canon text.
+An agent can then answer questions such as *"what have I bookmarked in volume
+11?"*, *"summarize the canon text behind my highlights tagged ขันธ์"*, *"find
+canon pages that mention อานาปานสติ"*, or *"what does the Pali word ภว mean?"*.
+
+The work has three parts:
 
 1. **Content REST API** — new read-only Django REST Framework endpoints that
    open a user's per-platform SQLite sync databases and return normalized JSON.
-2. **MCP server** — a thin local (stdio) Python server that authenticates with
-   the user's web credentials, calls those endpoints, and exposes them as MCP
-   tools to AI clients (Claude Desktop, Claude Code, etc.).
+2. **MCP server** — a local (stdio) Python server that (a) authenticates with
+   the user's web credentials and calls the Content REST API for personal data,
+   and (b) reads the local canon databases directly for search, passage read,
+   dictionary lookup, and cross-reference. It exposes everything as MCP tools to
+   AI clients (Claude Desktop, Claude Code, etc.).
+3. **Canon registry + reader** — a small local module in the MCP server that
+   maps the user's integer `code` (per platform) to a canon edition and file,
+   and reads canon / dictionary SQLite databases read-only.
 
 ## Scope
+
+**Personal data (via Django):**
 
 - **Read-only.** No upload, delete, or sharing mutation.
 - **Own data only.** The agent sees only the authenticated user's data; no
@@ -27,14 +42,29 @@ The work has two deliverables:
 - **All five content types:** bookmarks, highlights, tags, history,
   saved lexicon.
 
+**Canon data (local in the MCP):**
+
+- **Full-text search** over canon editions (`content LIKE` substring, scoped by
+  edition).
+- **Passage read** by edition + volume + page.
+- **Dictionary lookup** over three dictionaries: Pali→Thai (`p2t_dict.sqlite`),
+  Pali→English (`pali-english.sqlite`), Thai (`thaidict.sqlite`).
+- **Cross-reference:** resolve a user's `(platform, code, volume, page)` to the
+  canon passage.
+- **Read-only** on every canon / dictionary file. These are reference data and
+  are never modified.
+
 ### Out of scope (v1, YAGNI)
 
 - Writes of any kind (upload / soft-delete / add-remove follower).
 - Follower / shared-owner data (the existing `Sharing` relationship).
 - Remote hosting or OAuth 2.1 — the MCP runs locally over stdio.
-- Canon body-text resolution — the server does not store scripture text (it
-  lives in the client app bundle), so the agent works from the user's own
-  references and text only.
+- Shipping canon databases to the server — they stay local (1.4 GB), read by
+  the MCP.
+- A persistent FTS index — v1 uses `LIKE` substring search. FTS5-trigram is the
+  documented upgrade path if latency demands it (see below).
+- Item-number (`items`) lookup and the canon `mapping` tables — v1 addresses
+  passages by volume + page only.
 - MCP resources and prompts — v1 is tools-only.
 
 ## Background: where the data lives
@@ -63,15 +93,80 @@ Notes grounded in real data:
 - Column sets drift across app versions, so readers must not assume a fixed
   column list.
 
+## Background: the canon resources
+
+The canon databases live locally (default
+`/Users/sutee/Works/watnapahpong/E-Tipitaka-PC/resources`, configurable) —
+14 canon editions plus 3 dictionaries (17 SQLite files, ~1.4 GB total). Their
+layout comes from the E-Tipitaka-PC app's `constants.py`.
+
+**Canon edition schema** is uniform — one row per page:
+
+```sql
+CREATE TABLE main (volume VARCHAR(2), page VARCHAR(4), items VARCHAR(100), content TEXT);
+-- indexed on (volume) and (volume, page)
+```
+
+`volume` / `page` are **zero-padded strings** in the canon (`'01'`, `'0101'`),
+whereas the user's personal data stores them as integers (`volume=10`,
+`page=101`). The reader must pad on lookup: `f"{int(volume):02d}"`,
+`f"{int(page):04d}"`, and fall back to an unpadded match if the padded query
+returns nothing (edition-specific padding differences).
+
+**Edition registry** (embedded as static data in the MCP, sourced from
+`constants.py` — the PC app is *not* imported):
+
+- `code → filename`, e.g. `thai → thai.sqlite`, `thaiwn → thaiwn.sqlite`,
+  `pali → pali.sqlite`, `palimc → palimc.sqlite`, `romanct → romanct.sqlite`.
+  Full set: `thai, pali, thaiwn, thaimm, thaimc, thaimc2, thaipb, thaibt,
+  romanct, palimc, thaims, thaivn, palinew, thaict`.
+- Each entry also carries a human display name (Thai/English) from the PC app's
+  `LANGS` list.
+
+**Integer-code mapping** (the crucial join key). The user's personal data uses
+integer `code`s, and the mapping differs by platform:
+
+```python
+IOS_CODE_TABLE     = {1:'thai', 2:'pali', 3:'thaimm', 4:'thaimc', 5:'thaibt',
+                      6:'thaiwn', 7:'thaipb', 8:'romanct', 9:'palimc',
+                      10:'thaims', 11:'thaivn', 12:'thaimc2'}
+ANDROID_CODE_TABLE = {0:'thai', 1:'pali', 2:'thaimm', 3:'thaimc', 4:'thaibt',
+                      5:'thaiwn', 6:'thaipb', 7:'romanct', 8:'palimc', 9:'thaivn'}
+```
+
+A `(platform, code)` pair resolves to an edition key, then to a file.
+
+**Dictionary schemas** (all indexed on the head column → fast lookups):
+
+| `dictionary` value | File                  | Table     | Columns |
+|--------------------|-----------------------|-----------|---------|
+| `pali_thai`        | `p2t_dict.sqlite`     | `p2t`     | `headword, content, type, gender, vachana, viphat, category, read, note, roman, eng_content, source` (66,752 rows) |
+| `pali_english`     | `pali-english.sqlite` | `english` | `head, translation` (32,574 rows) |
+| `thai`             | `thaidict.sqlite`     | `thai`    | `head, translation` (37,705 rows) |
+
 ## Architecture & data flow
 
+The MCP server draws on two sources — remote personal data and local canon —
+and can join them:
+
 ```
-AI client ──stdio──▶ MCP server ──HTTPS (Token)──▶ Django /api/content/* ──▶ sqlite_reader
-                     (mint/cache token)             (TokenAuth, own-data)     (per-platform .sqlite, read-only)
+                        ┌─ HTTPS (Token) ─▶ Django /api/content/*  ──▶ sqlite_reader
+AI client ──stdio──▶ MCP │                  (TokenAuth, own-data)       (per-platform user .sqlite, read-only)
+                    server│
+                        └─ local read ────▶ canon_reader / canon_registry
+                                            (canon + dictionary .sqlite in ETIPITAKA_RESOURCES_DIR, read-only)
 ```
 
-Every endpoint merges across the user's platforms and tags each returned row
-with its `platform`.
+- **Personal data** flows over HTTPS through the Django Content REST API. Every
+  endpoint merges across the user's platforms and tags each row with its
+  `platform`.
+- **Canon data** is read directly from local files; no network, no server.
+- **Cross-reference** happens in the MCP: it fetches a personal item (with its
+  `platform`, `code`, `volume`, `page`), maps `code`→edition via the registry,
+  and reads the passage with `canon_reader`.
+- The two sources are independent: canon tools work with no credentials, and
+  personal-data tools work with no `ETIPITAKA_RESOURCES_DIR`. Cross-reference
+  needs both.
 
 ## Component 1: `sqlite_reader` helper
 
@@ -172,13 +267,14 @@ Each endpoint is a thin wrapper: parse and validate params → call
 ## Component 3: MCP server
 
 **Location:** `mcp_server/` at the repo root, with its own `pyproject.toml` and
-virtualenv. It shares no runtime with the Django app — it is a standalone HTTP
-client.
+virtualenv. It shares no runtime with the Django app. It has two backends: an
+`httpx` client for personal data over HTTPS, and the local canon reader
+(Component 4).
 
 **Stack:** Python, the official `mcp` SDK (FastMCP), `httpx` for HTTP. Transport
 is **stdio** (runs inside the user's AI client).
 
-**Tools** (1:1 over the endpoints; same filter params surfaced as typed args):
+**Personal-data tools** (1:1 over the endpoints; same filter params as typed args):
 
 - `list_bookmarks(platform?, code?, volume?, page?, important?, query?, limit?, offset?)`
 - `list_highlights(platform?, code?, volume?, page?, query?, limit?, offset?)`
@@ -188,13 +284,43 @@ is **stdio** (runs inside the user's AI client).
 - `get_summary()`
 - `whoami()` — returns `/rest-auth/user/` (pk, username, email) for orientation.
 
-### Authentication (credential → token exchange)
+**Canon tools** (local; require `ETIPITAKA_RESOURCES_DIR`):
 
-Configuration via environment variables:
+- `list_editions()` — available editions: key, display name, whether the file
+  is present. Plus the three dictionary keys.
+- `search_canon(query, edition?, volume?, limit?, offset?)` — `content LIKE`
+  substring search within one edition (defaults to `ETIPITAKA_DEFAULT_EDITION`).
+  Returns `{items: [{edition, volume, page, items, snippet}], count, ...}`;
+  `snippet` is a window of ±N chars around the first match. Full text via
+  `get_passage`.
+- `get_passage(edition, volume, page)` — the full `content` of one canon page,
+  with `items`. `edition` is an edition key (e.g. `thai`, `thaiwn`).
+- `resolve_reference(platform, code, volume, page)` — maps the integer `code`
+  (+ platform) to an edition, then returns that passage. This is the primitive
+  behind cross-reference; the personal-data tools return `platform`/`code`, so
+  an agent can pipe a bookmark or highlight straight into this.
+- `lookup_dictionary(term, dictionary, match?, limit?)` — `dictionary` is one of
+  `pali_thai` / `pali_english` / `thai`; `match` is `exact` (default) /
+  `prefix` / `contains` on the head column. Returns entries (Pali→Thai includes
+  the extra `p2t` fields).
+
+### Configuration (environment variables)
+
+Personal data:
 
 - `ETIPITAKA_BASE_URL` — default `https://data.etipitaka.com`.
 - **Either** `ETIPITAKA_USERNAME` + `ETIPITAKA_PASSWORD` **or** a pre-existing
   `ETIPITAKA_TOKEN`.
+
+Canon:
+
+- `ETIPITAKA_RESOURCES_DIR` — path to the canon resources folder. If unset or
+  missing, the canon tools return a clear "resources not configured" error and
+  the personal-data tools keep working.
+- `ETIPITAKA_DEFAULT_EDITION` — default edition for `search_canon` when none is
+  given (e.g. `thaiwn`, the Watnapahpong edition).
+
+### Authentication (credential → token exchange)
 
 Token lifecycle:
 
@@ -219,6 +345,52 @@ messages: `401` → authentication failed; `403`/`404` → not found / not
 permitted; timeout / network error → transient error with the base URL named.
 Tool payloads stay bounded by the endpoint `limit`.
 
+## Component 4: Canon registry & reader (local)
+
+Two small modules inside `mcp_server/`, both operating only on local files.
+
+### `canon_registry.py`
+
+Static data + resolution helpers, sourced from the PC app's `constants.py` but
+**copied in** (the PC app is never imported):
+
+- `EDITIONS: {key → {filename, display_name}}` for all 14 edition keys.
+- `IOS_CODE_TABLE` / `ANDROID_CODE_TABLE` (integer `code` → edition key).
+- `DICTIONARIES: {key → {filename, table, head_column, extra_columns}}` for the
+  three dictionaries.
+- `edition_for(platform, code) -> key` and `path_for(key) -> resolved file path`
+  (joined against `ETIPITAKA_RESOURCES_DIR`), with clear errors for unknown
+  code / platform / missing file.
+
+A unit test asserts the embedded tables match the current `constants.py` when
+that file is reachable, so drift is caught (skipped when it isn't present).
+
+### `canon_reader.py`
+
+The only module that opens canon / dictionary files. Mirrors `sqlite_reader`'s
+safety posture:
+
+- Opens every file **read-only** (`file:<path>?mode=ro&immutable=1`).
+- `search(edition_key, query, *, volume=None, limit, offset) -> (rows, total)` —
+  `SELECT ... WHERE content LIKE ?` (`%term%`), optionally `AND volume = ?`
+  (uses the volume index). Builds the `snippet` in Python from the match offset.
+  A missing edition file → clear error, not a crash.
+- `get_page(edition_key, volume, page) -> row | None` — zero-pads
+  `volume`/`page`, falls back to an unpadded match if the padded lookup is
+  empty.
+- `lookup(dictionary_key, term, *, match, limit) -> rows` — `=` /
+  `LIKE 'term%'` / `LIKE '%term%'` on the head column (indexed), returns the
+  mapped columns.
+- Fixed table/column names per registry entry; every value is parameter-bound —
+  no SQL string interpolation.
+
+**Latency note:** a `LIKE '%term%'` scan of one edition (`thai.sqlite` ≈ 90 MB,
+19,701 rows) is a full-column scan — expect up to a few seconds. v1 bounds this
+by searching one edition at a time and capping results. If that proves too slow,
+the upgrade path is a persistent **FTS5 trigram** index built once per edition
+and cached beside the resources; the reader would prefer it when present. Out of
+scope for v1.
+
 ## Testing
 
 **Django (pytest, existing 90% coverage gate; project currently at 100%):**
@@ -233,19 +405,40 @@ Tool payloads stay bounded by the endpoint `limit`.
 - **Golden harness:** add HTTP regression snapshots for the six read routes
   (see `tests/golden/README.md`).
 
-**MCP server (own test suite, mocked `httpx`):**
+**MCP server — personal data (own test suite, mocked `httpx`):**
 
 - Token lifecycle: mint from credentials, cache, reuse cached, use
   `ETIPITAKA_TOKEN`, refresh once on `401`.
 - Tool schemas and argument passthrough to query params.
 - Error mapping (401 / 404 / timeout).
 
+**MCP server — canon (own test suite, tiny fixture DBs):**
+
+- `canon_registry`: `edition_for` for iOS and Android codes, unknown
+  code/platform errors, `path_for` missing-file error, and (when reachable) the
+  drift check against `constants.py`.
+- `canon_reader` against small hand-built `main`-schema fixtures: substring
+  match + snippet, `volume` filter, pagination, zero-pad and unpad fallback in
+  `get_page`, missing-file/missing-table handling, read-only enforcement.
+- `lookup_dictionary` against tiny `p2t` / `english` / `thai` fixtures: exact /
+  prefix / contains, extra-column passthrough for `pali_thai`.
+- `resolve_reference` end to end on fixtures: `(platform, code, volume, page)`
+  → edition → passage.
+
+No Django or golden-harness changes for the canon layer — it is entirely local
+to the MCP.
+
 ## Deliverables & suggested order
 
 1. `sqlite_reader` helper + unit tests.
 2. Content endpoints + URL wiring + tests + golden snapshots.
-3. MCP server: auth/token cache, httpx client, tools, tests.
-4. Docs: `mcp_server/README.md` with install steps and a sample client config
+3. MCP server foundation: auth/token cache, httpx client, personal-data tools,
+   tests.
+4. `canon_registry` + `canon_reader` + tests.
+5. Canon MCP tools (`list_editions`, `search_canon`, `get_passage`,
+   `resolve_reference`, `lookup_dictionary`) + tests.
+6. Docs: `mcp_server/README.md` with install steps, the two config groups
+   (personal + canon env vars), and a sample client config
    (`claude_desktop_config.json` / `.mcp.json`).
 
 ## Open choices (decided, recorded for the record)
@@ -255,3 +448,9 @@ Tool payloads stay bounded by the endpoint `limit`.
   unnecessary friction.
 - **Five typed endpoints** rather than one generic `/api/content/<type>/` route
   — clearer per-type schemas and filters, at the cost of slightly more code.
+- **Canon runs locally in the MCP**, not on the server — the resource files are
+  1.4 GB and already local; shipping them to data.etipitaka.com was rejected.
+- **`LIKE` substring search for v1**, FTS5-trigram deferred — no build step, and
+  substring is the natural match model for unsegmented Thai text.
+- **Code tables copied into `canon_registry`**, not imported from the PC app —
+  avoids coupling the MCP to that codebase; a test guards against drift.
