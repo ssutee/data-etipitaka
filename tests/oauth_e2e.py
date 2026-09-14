@@ -24,6 +24,15 @@ from mcp.client.streamable_http import streamablehttp_client
 USERNAME, PASSWORD = 'alice', 'alicepass123'
 REDIRECT = 'https://app.example/cb'
 
+# Full advertised tool surface (sorted). The e2e check fails if this drifts
+# from what the server registers -- a dropped or renamed tool must not pass
+# silently just because a couple of well-known names still show up.
+EXPECTED_TOOLS = [
+    'get_passage', 'get_summary', 'list_bookmarks', 'list_editions',
+    'list_highlights', 'list_history', 'list_lexicon', 'list_tags',
+    'lookup_dictionary', 'resolve_reference', 'search_canon', 'whoami',
+]
+
 
 def pkce():
     verifier = secrets.token_urlsafe(64)
@@ -82,7 +91,7 @@ async def call_mcp(base, access):
             tools = await session.list_tools()
             names = sorted(t.name for t in tools.tools)
             print('tools:', names)
-            assert 'whoami' in names and 'search_canon' in names
+            assert names == EXPECTED_TOOLS, f'tool set mismatch: {names}'
             who = await session.call_tool('whoami', {})
             print('whoami:', who.content[0].text)
             assert USERNAME in who.content[0].text
