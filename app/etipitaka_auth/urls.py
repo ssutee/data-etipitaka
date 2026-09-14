@@ -3,11 +3,11 @@ from django.urls import include, path, re_path
 from django.views.generic import TemplateView
 from django.views.i18n import set_language
 from oauth2_provider import urls as oauth2_urls
+from oauth2_provider.views import OAuthServerMetadataView
 
 from user_data import views, auth_views
 from user_data import content_views
 from user_data import canon_views
-from user_data import oauth_views
 from user_data.auth_urls import rest_auth_patterns
 
 urlpatterns = [
@@ -42,7 +42,7 @@ urlpatterns = [
     path('api/canon/dictionary/', canon_views.dictionary),
     path('o/', include((oauth2_urls.base_urlpatterns + oauth2_urls.dcr_urlpatterns,
                         'oauth2_provider'), namespace='oauth2_provider')),
-    path('.well-known/oauth-authorization-server', oauth_views.as_metadata),
+    path('.well-known/oauth-authorization-server', OAuthServerMetadataView.as_view()),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),

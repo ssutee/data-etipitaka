@@ -70,7 +70,7 @@ REST_FRAMEWORK = {
 # endpoint. Clients self-register (DCR), must use PKCE, and receive the single
 # read-only scope. Issuer is the site root so RFC 8414 discovery lives at
 # /.well-known/oauth-authorization-server.
-OAUTH_ISSUER_URL = os.environ.get('OAUTH_ISSUER_URL', 'https://data.etipitaka.com')
+OAUTH_ISSUER_URL = os.environ.get('OAUTH_ISSUER_URL', 'https://data.etipitaka.com').rstrip('/')
 
 OAUTH2_PROVIDER = {
     'SCOPES': {
@@ -103,6 +103,15 @@ OAUTH2_PROVIDER = {
     'COMPLIANT_BCP_RFC9700_PASSWORD_GRANT': True,
     'COMPLIANT_BCP_RFC9700_ACCESS_TOKEN_TRANSPORT': True,
     'COMPLIANT_BCP_RFC9700_AUTHZ_RESPONSE_ISS': True,
+    # What the RFC 8414 document (DOT's OAuthServerMetadataView, mounted at the
+    # site root) advertises. `none` is for public DCR clients; the response/
+    # grant lists name only the flows this server is meant to serve.
+    # (client_credentials / device_code remain enabled inside DOT — restricting
+    # them server-side is a recorded hardening follow-up.)
+    'OAUTH2_TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED': ['none', 'client_secret_post',
+                                                     'client_secret_basic'],
+    'OAUTH2_RESPONSE_TYPES_SUPPORTED': ['code'],
+    'OAUTH2_GRANT_TYPES_SUPPORTED': ['authorization_code', 'refresh_token'],
 }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'

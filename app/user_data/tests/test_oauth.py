@@ -27,9 +27,13 @@ def test_dcr_registers_public_client(client):
 
 
 def test_as_metadata(client, settings):
-    settings.OAUTH_ISSUER_URL = 'https://issuer.example'
+    # Override DOT's issuer knob (pytest-django's setting_changed makes DOT
+    # reload oauth2_settings); the document must anchor on it, not the request.
+    settings.OAUTH2_PROVIDER = {**settings.OAUTH2_PROVIDER,
+                                'OIDC_ISS_ENDPOINT': 'https://issuer.example'}
     resp = client.get('/.well-known/oauth-authorization-server')
     assert resp.status_code == 200
+    assert resp['Content-Type'].startswith('application/json')
     body = resp.json()
     assert body['issuer'] == 'https://issuer.example'
     assert body['authorization_endpoint'] == 'https://issuer.example/o/authorize/'
@@ -37,6 +41,10 @@ def test_as_metadata(client, settings):
     assert body['registration_endpoint'] == 'https://issuer.example/o/register/'
     assert body['revocation_endpoint'] == 'https://issuer.example/o/revoke_token/'
     assert body['scopes_supported'] == ['etipitaka:read']
-    assert body['code_challenge_methods_supported'] == ['S256']
+    assert body['response_types_supported'] == ['code']
     assert body['grant_types_supported'] == ['authorization_code', 'refresh_token']
-    assert 'none' in body['token_endpoint_auth_methods_supported']
+    assert body['code_challenge_methods_supported'] == ['S256']
+    assert body['authorization_response_iss_parameter_supported'] is True
+    for key in ('token_endpoint_auth_methods_supported',
+                'revocation_endpoint_auth_methods_supported'):
+        assert 'none' in body[key] and 'client_secret_basic' in body[key]
