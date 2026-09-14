@@ -135,7 +135,7 @@ def _authz_params(cid, challenge):
     }
 
 
-def test_authorization_code_pkce_flow(client, alice):
+def test_authorization_code_pkce_flow(client, alice, settings):
     reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
                       content_type='application/json').json()
     cid = reg['client_id']
@@ -143,7 +143,7 @@ def test_authorization_code_pkce_flow(client, alice):
     params = _authz_params(cid, challenge)
     # Anonymous -> redirected to the site login page.
     anon = client.get('/o/authorize/', params)
-    assert anon.status_code == 302 and anon['Location'].startswith('/login/')
+    assert anon.status_code == 302 and anon['Location'].startswith(settings.LOGIN_URL)
 
     client.force_login(alice)
     page = client.get('/o/authorize/', params)
@@ -194,3 +194,17 @@ def test_authorization_denied_redirects_with_access_denied(client, alice):
     assert qs['error'] == ['access_denied']
     assert qs['state'] == ['xyz']
     assert 'code' not in qs
+
+
+def test_consent_page_never_interpolates_client_name(client, alice):
+    # base.html boots AngularJS with <[ ]> delimiters; a DCR client name must
+    # be shown verbatim, never evaluated in the user's session.
+    reg = client.post('/o/register/',
+                      data=json.dumps({**DCR_BODY, 'client_name': '<[7*7]>'}),
+                      content_type='application/json').json()
+    _, challenge = _pkce()
+    client.force_login(alice)
+    page = client.get('/o/authorize/', _authz_params(reg['client_id'], challenge))
+    assert page.status_code == 200
+    assert b'ng-non-bindable' in page.content
+    assert b'&lt;[7*7]&gt;' in page.content and b'<[7*7]>' not in page.content
