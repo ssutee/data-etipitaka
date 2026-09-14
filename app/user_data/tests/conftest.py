@@ -11,6 +11,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from user_data.models import UserData, SyncData, Sharing
+from user_data.tests.soft_authenticator import SoftAuthenticator
 
 
 @pytest.fixture
@@ -133,3 +134,17 @@ def oauth_alice(api, alice):
     tok = make_oauth_token(alice)
     api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
     return api
+
+
+@pytest.fixture(autouse=True)
+def _passkey_settings(settings):
+    """Pin the relying party so a dev PASSKEY_* override never leaks into tests."""
+    settings.PASSKEY_RP_ID = 'data.etipitaka.com'
+    settings.PASSKEY_WEB_ORIGIN = 'https://data.etipitaka.com'
+    settings.PASSKEY_ANDROID_PACKAGE = ''
+    settings.PASSKEY_ANDROID_CERT_SHA256 = []
+
+
+@pytest.fixture
+def authenticator():
+    return SoftAuthenticator()
