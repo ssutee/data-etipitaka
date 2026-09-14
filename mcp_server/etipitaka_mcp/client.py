@@ -2,23 +2,32 @@ import httpx
 
 
 class ContentClient:
-    """Calls the Django Content REST API, attaching the auth token."""
+    """Calls the Django Content REST API with a caller-supplied credential.
 
-    def __init__(self, auth, timeout=30):
-        self.auth = auth
+    `token_provider()` returns the credential for the current call: in stdio
+    mode the user's DRF token (scheme "Token"); in http mode the OAuth bearer
+    of the request being served (scheme "Bearer"). `refresh()` optionally
+    re-mints once on 401 (stdio only); when absent a 401 is raised.
+    """
+
+    def __init__(self, base_url, token_provider, refresh=None, scheme='Token',
+                 timeout=30):
+        self.base_url = base_url.rstrip('/')
+        self.token_provider = token_provider
+        self.refresh = refresh
+        self.scheme = scheme
         self.timeout = timeout
+
+    def _headers(self, token):
+        return {'Authorization': '%s %s' % (self.scheme, token)}
 
     def _get(self, path, params=None):
         clean = {k: v for k, v in (params or {}).items() if v is not None}
-        url = self.auth.base_url + path
-        token = self.auth.token()
-        resp = httpx.get(url, params=clean,
-                         headers={'Authorization': 'Token %s' % token},
+        url = self.base_url + path
+        resp = httpx.get(url, params=clean, headers=self._headers(self.token_provider()),
                          timeout=self.timeout)
-        if resp.status_code == 401:
-            token = self.auth.token(refresh=True)
-            resp = httpx.get(url, params=clean,
-                             headers={'Authorization': 'Token %s' % token},
+        if resp.status_code == 401 and self.refresh is not None:
+            resp = httpx.get(url, params=clean, headers=self._headers(self.refresh()),
                              timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()

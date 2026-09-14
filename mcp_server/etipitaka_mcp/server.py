@@ -1,14 +1,57 @@
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import Authenticator
 from .client import CanonClient, ContentClient
 from .config import load_config
+from .verifier import DjangoTokenVerifier
+
+REQUIRED_SCOPE = 'etipitaka:read'
 
 cfg = load_config()
-mcp = FastMCP('etipitaka')
 
-_auth = Authenticator(cfg.base_url, cfg.username, cfg.password, cfg.token)
-_content = ContentClient(_auth)
+
+def _request_token():
+    """Bearer token of the MCP request currently being served (http mode)."""
+    access = get_access_token()
+    if access is None:
+        raise ValueError('no authenticated request token')
+    return access.token
+
+
+if cfg.transport == 'http':
+    if not (cfg.issuer_url and cfg.resource_url):
+        raise SystemExit('ETIPITAKA_TRANSPORT=http needs ETIPITAKA_ISSUER_URL '
+                         'and ETIPITAKA_RESOURCE_URL')
+    # Resource server: the SDK validates bearer tokens via the verifier,
+    # answers unauthenticated calls with 401 + WWW-Authenticate, enforces the
+    # scope, and publishes RFC 9728 metadata naming the issuer.
+    mcp = FastMCP(
+        'etipitaka',
+        auth=AuthSettings(
+            issuer_url=cfg.issuer_url,
+            resource_server_url=cfg.resource_url,
+            required_scopes=[REQUIRED_SCOPE],
+            # v1 relies on scope + issuer; DOT tokens carry no resource claim.
+            validate_token_resource=False,
+        ),
+        token_verifier=DjangoTokenVerifier(cfg.base_url),
+        host=cfg.http_host,
+        port=cfg.http_port,
+        streamable_http_path='/mcp',
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=cfg.allowed_hosts),
+    )
+    _content = ContentClient(cfg.base_url, _request_token, scheme='Bearer')
+else:
+    mcp = FastMCP('etipitaka')
+    _auth = Authenticator(cfg.base_url, cfg.username, cfg.password, cfg.token)
+    _content = ContentClient(cfg.base_url, _auth.token,
+                             refresh=lambda: _auth.token(refresh=True))
+
 _canon = CanonClient(cfg.base_url)
 
 
@@ -154,7 +197,7 @@ def lookup_dictionary(term: str, dictionary: str = 'pali_thai',
 
 
 def main():
-    mcp.run()
+    mcp.run(transport='streamable-http' if cfg.transport == 'http' else 'stdio')
 
 
 if __name__ == '__main__':
