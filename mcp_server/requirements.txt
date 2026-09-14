@@ -1,0 +1,8 @@
+# Pinned exactly: this server's auth behaviour (per-request token isolation,
+# session-owner binding, transport security, resource-validation) rests on
+# mcp SDK internals verified empirically against these versions, not on any
+# documented contract. They must not drift between image builds.
+# Transitive dependencies are left to the resolver.
+mcp==1.30.0
+httpx==0.28.1
+uvicorn==0.52.4
