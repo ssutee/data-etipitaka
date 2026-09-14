@@ -551,7 +551,8 @@ well-known documents — **out of scope** until such a client is targeted.
 - `/api/canon/*` still public.
 - Coverage stays ≥ 90 % (the existing gate).
 
-**MCP (`mcp_server/tests/test_http_auth.py`, pytest + pytest-httpx):**
+**MCP (`mcp_server/tests/test_http_mode.py` and `test_verifier.py`, pytest +
+pytest-httpx):**
 - `DjangoTokenVerifier`: 200 → `AccessToken` with scopes/expiry; 401/403/network
   error → `None`; second call within 60 s does not re-request.
 - http-mode client: `current_token()` returns the request's bearer and
@@ -607,6 +608,49 @@ run `whoami` and `list_bookmarks`.
   which also records why the published port was left bound to all interfaces.
 - Replacing the local stdio transport — it stays as the desktop path.
 - Migrating existing DRF tokens to OAuth — both keep working side by side.
+
+## Follow-ups from the final review
+
+Merged as "ready with follow-ups". None blocks the release; the first two are
+the ones worth scheduling.
+
+- **Required operator step, not optional:** bind the published port to
+  loopback once the host proxy's address is confirmed. It closes the
+  client-IP spoofing path that lets a private-range peer evade rate limiting,
+  and stops the authorization server being reachable over cleartext HTTP on
+  the public IP. Left undone deliberately — a wrong bind address takes the
+  site down on deploy with no local signal. See `remote-mcp-oauth-deploy.md`.
+- **A Django outage is reported to clients as `invalid_token`**, so a
+  conforming client discards a good token and restarts the authorization
+  flow — pushing the user through login and consent again for what may be a
+  brief blip. The verifier already distinguishes infrastructure failure from
+  rejection internally. Serving the cached entry past its TTL when the check
+  itself fails, or answering 503, would fix it.
+- `deploy.sh` health-checks only `/`. It should also check `/mcp` and the two
+  discovery documents, which are what this work exists to ship, and warn when
+  `TRUST_PROXY_PROTO` is unset.
+- `RegisterSerializer` declares `username` as a plain `CharField`, so
+  Django's username validator never runs and a username may contain the
+  AngularJS delimiters. Harmless in the guarded layout, but it would matter
+  the moment a username reaches an unguarded HTML context or another user's
+  page. Bind the field to the model instead.
+- The consent page names only the client's self-declared `client_name`. With
+  open registration anything is registrable, so showing the redirect host
+  would give the user something verifiable.
+- The AS metadata advertises an `introspection_endpoint` that can never be
+  used: the view requires an `introspection` scope this deployment does not
+  define, so it always answers 403.
+- `ScopedOrAuthenticated` distinguishes OAuth from DRF credentials by duck
+  typing on a `scope` attribute. Correct today; an explicit type check would
+  not silently flip if another authenticator's object grew one.
+- `admin.site.unregister(Application)` works only because `oauth2_provider`
+  precedes `user_data` in `INSTALLED_APPS`; reordering raises at startup.
+- anyio's default thread limiter is 40, so 40 simultaneously stuck REST calls
+  would queue the next one for up to the client timeout. Far better than the
+  single-threaded behaviour it replaced, but it is the next ceiling.
+- The base layout fix closed a reflected-XSS vector that was **live on
+  `master`** independently of this branch, reachable unauthenticated through
+  the password-reset confirm route.
 
 ## Risks / notes
 
