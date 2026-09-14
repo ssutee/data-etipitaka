@@ -2,7 +2,8 @@
 <div>
 <form class="form-horizontal" id="signup" role="form" method="post" action="/login/">{% csrf_token %}
   {% if next %}
-  <input type="hidden" name="next" value="{{ next }}">
+  {# ng-non-bindable: base.html boots AngularJS; client-supplied text must never be interpolated. #}
+  <input type="hidden" name="next" value="{{ next }}" ng-non-bindable>
   {% endif %}
   {% if confirm_email %}
   <div class="form-group row">

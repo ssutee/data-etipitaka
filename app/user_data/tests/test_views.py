@@ -417,6 +417,18 @@ def test_login_form_omits_hidden_next_field_when_absent(api):
     assert 'name="next"' not in _login_form_html(resp)
 
 
+def test_login_form_never_interpolates_next_value(api):
+    # base.html boots AngularJS with <[ ]> delimiters; a `next` value is
+    # reflected verbatim into the hidden field and must never be evaluated
+    # client-side (mirrors test_consent_page_never_interpolates_client_name).
+    resp = api.get('/login/?next=%3C%5B7*7%5D%3E')
+    assert resp.status_code == 200
+    form_html = _login_form_html(resp)
+    assert 'ng-non-bindable' in form_html
+    assert '&lt;[7*7]&gt;' in form_html
+    assert '<[7*7]>' not in form_html
+
+
 def test_anonymous_authorize_then_login_lands_back_on_authorize(client, alice):
     # The ordering the current suite misses: an anonymous GET of /o/authorize/
     # redirects to login carrying the full authorization request in `next`;
