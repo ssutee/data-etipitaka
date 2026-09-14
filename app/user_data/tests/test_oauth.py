@@ -126,17 +126,21 @@ def _pkce():
     return verifier, challenge
 
 
-def test_authorization_code_pkce_flow(client, alice):
-    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
-                      content_type='application/json').json()
-    cid = reg['client_id']
-    verifier, challenge = _pkce()
-    params = {
+def _authz_params(cid, challenge):
+    return {
         'response_type': 'code', 'client_id': cid,
         'redirect_uri': 'https://app.example/cb', 'scope': 'etipitaka:read',
         'state': 'xyz', 'code_challenge': challenge,
         'code_challenge_method': 'S256',
     }
+
+
+def test_authorization_code_pkce_flow(client, alice):
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    verifier, challenge = _pkce()
+    params = _authz_params(cid, challenge)
     # Anonymous -> redirected to the site login page.
     anon = client.get('/o/authorize/', params)
     assert anon.status_code == 302 and anon['Location'].startswith('/login/')
@@ -173,3 +177,20 @@ def test_authorization_code_pkce_flow(client, alice):
     ok = client.get('/api/oauth/verify/',
                     HTTP_AUTHORIZATION='Bearer ' + body['access_token'])
     assert ok.status_code == 200 and ok.json()['username'] == 'alice'
+
+
+def test_authorization_denied_redirects_with_access_denied(client, alice):
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    _, challenge = _pkce()
+    params = _authz_params(reg['client_id'], challenge)
+    client.force_login(alice)
+    # Posting without `allow` is what the Deny button does (it has no name).
+    denied = client.post('/o/authorize/', params)
+    assert denied.status_code == 302
+    loc = urlparse(denied['Location'])
+    assert loc.netloc == 'app.example'
+    qs = parse_qs(loc.query)
+    assert qs['error'] == ['access_denied']
+    assert qs['state'] == ['xyz']
+    assert 'code' not in qs
