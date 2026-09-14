@@ -28,7 +28,7 @@ DEBUG = os.environ.get('DJANGO_DEBUG', '') == 'True'
 
 FILE_SERVER = 'data.etipitaka.com'
 
-ALLOWED_HOSTS = ['data.etipitaka.com','128.199.181.198','localhost','127.0.0.1']
+ALLOWED_HOSTS = ['data.etipitaka.com', '128.199.181.198', 'localhost', '127.0.0.1', 'web']
 
 
 # Application definition
@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework.authtoken',
+    'oauth2_provider',
     'user_data',
 ]
 
@@ -63,6 +64,32 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'login': '10/min',
     },
+}
+
+# OAuth 2.1 Authorization Server (django-oauth-toolkit) backing the remote MCP
+# endpoint. Clients self-register (DCR), must use PKCE, and receive the single
+# read-only scope. Issuer is the site root so RFC 8414 discovery lives at
+# /.well-known/oauth-authorization-server.
+OAUTH_ISSUER_URL = os.environ.get('OAUTH_ISSUER_URL', 'https://data.etipitaka.com')
+
+OAUTH2_PROVIDER = {
+    'SCOPES': {
+        'etipitaka:read': 'Read your E-Tipitaka bookmarks, highlights, tags, '
+                          'history and saved lexicon',
+    },
+    'DEFAULT_SCOPES': ['etipitaka:read'],
+    'PKCE_REQUIRED': True,
+    'DCR_ENABLED': True,
+    'DCR_REGISTRATION_PERMISSION_CLASSES': (
+        'oauth2_provider.dcr.AllowAllDCRPermission',
+    ),
+    # https covers web-callback clients (e.g. the Claude app); http covers
+    # loopback redirects in dev. A client needing a custom scheme is onboarded
+    # by appending it here.
+    'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
+    'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
+    'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,
+    'ROTATE_REFRESH_TOKEN': True,
 }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
