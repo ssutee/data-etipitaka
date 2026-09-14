@@ -166,11 +166,12 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
 - `GET /api/oauth/verify/` → `oauth_views.verify` — the resource server's
   token check (Component 3 calls it). Authentication:
   `ActiveUserOAuth2Authentication` only — DOT's `OAuth2Authentication`
-  subclassed to also reject tokens whose user is inactive (DOT validates the
-  token, not the account; without this a deactivated user could keep
-  verifying and refreshing for the refresh-token lifetime); permission:
-  `IsAuthenticated` (any valid, unexpired OAuth token of an active user; a
-  user-less client-credentials token gets 403). It does **not** enforce
+  subclassed to also reject tokens not bound to an active user: a user set
+  inactive after consenting (DOT validates the token, not the account;
+  without this a deactivated user could keep verifying and refreshing for the
+  refresh-token lifetime) and user-less client-credentials tokens (DOT stores
+  `user = None` for them; reachable through open DCR). Both are answered
+  `401 invalid_token`. Permission: `IsAuthenticated`. It does **not** enforce
   scope itself — it reports
   the token's scopes so the MCP SDK can enforce `required_scopes` and answer
   a scope-less token with **403 `insufficient_scope`** (see Error handling);
@@ -179,8 +180,9 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   "expires_at": <epoch seconds>, "client_id"}` with `Cache-Control: no-store`;
   `client_id` is always a string (`""` for a token without an application)
   because the MCP side builds `AccessToken(client_id=str)` from it. An
-  invalid/expired token, a missing header, or an inactive user yields `401`
-  with a `WWW-Authenticate: Bearer` challenge. This is functionally the RFC 7662 introspection answer, obtained by
+  invalid/expired token, a missing header, an inactive user, or a user-less
+  (client-credentials) token yields `401` with a `WWW-Authenticate: Bearer`
+  challenge. This is functionally the RFC 7662 introspection answer, obtained by
   simply forwarding the user's own token — no confidential "resource server"
   client or client-credentials mint is needed. (RFC 7662 `/o/introspect/`
   remains available from DOT but is not used.)
