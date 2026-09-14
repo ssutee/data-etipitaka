@@ -429,6 +429,22 @@ def test_login_form_never_interpolates_next_value(api):
     assert '<[7*7]>' not in form_html
 
 
+def test_password_reset_confirm_never_interpolates_request_path(api):
+    # base.html boots AngularJS with <[ ]> delimiters; the language-switcher
+    # form reflects `request.path` into a hidden `next` field on EVERY page
+    # that extends base.html, including this unauthenticated password-reset
+    # route (django.contrib.auth.urls's `reset/<uidb64>/<token>/` uses the
+    # default `str` converter, so `<`, `[`, `]`, `>` reach the path even for
+    # an invalid link). Mirrors test_consent_page_never_interpolates_client_name
+    # and test_login_form_never_interpolates_next_value.
+    resp = api.get('/reset/%3C%5B7*7%5D%3E/abc-def/')
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'ng-non-bindable' in content
+    assert '&lt;[7*7]&gt;' in content
+    assert '<[7*7]>' not in content
+
+
 def test_anonymous_authorize_then_login_lands_back_on_authorize(client, alice):
     # The ordering the current suite misses: an anonymous GET of /o/authorize/
     # redirects to login carrying the full authorization request in `next`;
