@@ -237,7 +237,13 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
   `required_scopes` off the view class, which function-based `api_view`
   views do not carry; with one fixed scope a small explicit permission is
   clearer.
-- `/api/canon/*` untouched (public). `/rest-auth/*` untouched.
+- `/api/canon/*` untouched (public).
+- `GET /rest-auth/user/` gets the same stack, because the `whoami` tool calls
+  it. This was missed until the end-to-end run: eleven of the twelve tools
+  went through `/api/content/*` and worked remotely, while `whoami` returned
+  401 for every remote caller. The rest of `/rest-auth/*` is untouched — in
+  particular logout stays on the legacy stack, since a read-scoped OAuth
+  token should not be able to delete the caller's DRF token.
 - Consequence of listing the OAuth authenticator first: DRF builds the
   anonymous `401` challenge from the first authenticator, so `/api/content/*`
   answers `WWW-Authenticate: Bearer realm="api"` instead of `Token`.
@@ -273,6 +279,19 @@ working exactly as today.
   (http mode only).
 - `ETIPITAKA_HTTP_HOST` / `ETIPITAKA_HTTP_PORT` — bind address for uvicorn
   (default `0.0.0.0` / `8001`).
+- `ETIPITAKA_ALLOWED_HOSTS` — hosts the SDK's DNS-rebinding protection accepts
+  (default `localhost:*,127.0.0.1:*,[::1]:*`). nginx forwards the original
+  `Host`, so production adds its public hostname. An empty value means the
+  operator deliberately emptied it, not "unset": the default lives in one
+  module constant shared by both the dataclass and the environment reader.
+- `ETIPITAKA_ALLOWED_ORIGINS` — origins the same protection accepts (default
+  empty). With none configured the SDK rejects any request that *carries* an
+  `Origin` header; requests without one pass. Native clients send no `Origin`,
+  so the default suits them, and a browser-based client needs its site listed.
+- `ETIPITAKA_TRANSPORT` is normalised and validated: anything outside
+  `stdio`/`http` raises rather than silently falling back to stdio. The issuer
+  and resource URLs have a trailing slash stripped, matching how Django
+  normalises its own issuer.
 - Existing `ETIPITAKA_USERNAME/PASSWORD/TOKEN` and `ETIPITAKA_DEFAULT_EDITION`
   keep their meaning; the credential vars are used **only** in stdio mode.
 
@@ -290,14 +309,39 @@ working exactly as today.
       token_verifier=DjangoTokenVerifier(cfg.base_url),
       host=cfg.http_host, port=cfg.http_port,
       streamable_http_path="/mcp",
+      transport_security=TransportSecuritySettings(
+          enable_dns_rebinding_protection=True,
+          allowed_hosts=cfg.allowed_hosts,
+          allowed_origins=cfg.allowed_origins),
   )
   mcp.run(transport="streamable-http")
   ```
+  `validate_token_resource=False` is set explicitly: this deployment's clients
+  never send a `resource` parameter and the verify endpoint returns none, so
+  the verifier has nothing to propagate. If that changes, the verifier can set
+  `AccessToken.resource` and the flag can be flipped. http mode exits with a
+  clear message if either public URL is missing.
+
   The SDK then: rejects unauthenticated requests with 401 +
   `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`,
   enforces `etipitaka:read`, and serves the RFC 9728 document
-  (`resource`, `authorization_servers: ["https://data.etipitaka.com"]`,
+  (`resource`, `authorization_servers: ["https://data.etipitaka.com/"]`,
   `scopes_supported`, `bearer_methods_supported: ["header"]`).
+
+  That `authorization_servers` entry carries a trailing slash while the AS
+  metadata reports `issuer` without one, because the SDK's URL type always
+  renders a root issuer with the slash. This is expected and correct: the
+  reference client compares the two as equal (RFC 3986 §6.2.3) while still
+  rejecting genuine mismatches. Do not "fix" it by adding a slash to Django's
+  issuer — that would produce double-slashed endpoint URLs.
+- **The twelve tool functions are `async`** and hand their blocking REST call
+  to `anyio.to_thread.run_sync`. FastMCP invokes a *synchronous* tool body
+  inline on the request's own task, so a blocking call would serialise every
+  other session on the worker — measured at 0.319 s for two concurrent 0.15 s
+  calls before the change, 0.163 s after. anyio specifically is required
+  because it copies the context into the worker thread, which is what keeps
+  the per-request bearer token resolving there; a bare thread pool would not
+  and would silently break per-caller isolation.
 - A second console script `etipitaka-mcp-http` is **not** added; the single
   `etipitaka-mcp` entry point reads `ETIPITAKA_TRANSPORT`.
 
@@ -315,23 +359,58 @@ class DjangoTokenVerifier:                       # implements mcp TokenVerifier
   keyed by SHA-256 of the token, bounded to a few hundred entries, so a burst
   of Streamable-HTTP requests does not re-verify on every call. Negative
   results are not cached.
+- The cache never extends a token's life: the SDK re-checks the absolute
+  `expires_at` on every request. It delays only **revocation**, by at most the
+  cache TTL. Cache hits hand out deep copies, so no caller can mutate the
+  token another caller will receive.
+- It fails closed on anything doubtful, because "no answer" must mean 401 and
+  never a 500: a malformed body, an unexpected field type, an invalid base URL
+  and a network error all return `None`. A 200 whose body is not `active` is
+  rejected too. `subject` is populated from the verify response's `user_id`,
+  which the SDK uses when binding a session to its owner.
+- Anything other than a 401 is logged with the status and a truncated token
+  digest. A 401 stays silent because it is routine; without this a wrong base
+  URL would look exactly like every client presenting a bad token.
 
 **Per-request token (`client.py` / `server.py`):**
-- `ContentClient._get(path, params, token)` takes the token explicitly.
-- A `current_token()` resolver:
-  - http mode → `mcp.server.auth.middleware.auth_context.get_access_token()`
-    (set by the SDK's `AuthContextMiddleware` for the request being served)
-    → `.token`;
-  - stdio mode → `Authenticator.token()` (env or cache), unchanged.
-- The 401→re-mint retry stays **stdio-only**; in http mode a 401 from the API
-  is returned as an error (the MCP client must refresh its token).
+- `ContentClient(base_url, token_provider, refresh=None, scheme="Token")` —
+  the credential is a callable resolved per call, so nothing can cache one
+  caller's token across requests, and the scheme is a parameter.
+- `_request_token()` is the http-mode provider:
+  `mcp.server.auth.middleware.auth_context.get_access_token()` (set by the
+  SDK's `AuthContextMiddleware` for the request being served) → `.token`,
+  raising if there is no authenticated request. stdio mode passes
+  `Authenticator.token` (env or cache), unchanged.
+- The 401→re-mint retry stays **stdio-only**, enforced structurally: http mode
+  passes no `refresh` callable, so the retry branch cannot run. The MCP client
+  must refresh its own token.
+- Failures raise `EtipitakaAPIError` naming the request path and status but
+  never the base URL, which in the deployed stack is an internal address. A
+  401 says the token was rejected and should be refreshed. Both REST clients
+  share this, since an unprovisioned canon edition returns 503 in normal
+  operation and would otherwise leak the internal host.
 - Canon tools call `CanonClient` with no token in both modes.
 - Tool names, parameters and result shapes are **identical** in both modes.
+- Isolation was verified end-to-end, not by inspection: two concurrent
+  sessions with different bearers, driven from two threads, each forwarded
+  its own caller's token, and the SDK independently rejects a session id
+  replayed with a different bearer before any tool runs.
 
 **Packaging / container (`pyproject.toml`, `Dockerfile`):**
-- Add `uvicorn` to dependencies (the SDK's streamable-http runner uses it).
-- `mcp_server/Dockerfile`: `python:3.12-slim`, copy the package, `pip install
-  .`, `CMD ["etipitaka-mcp"]` with `ETIPITAKA_TRANSPORT=http` from compose.
+- Add `uvicorn` to dependencies (the SDK's streamable-http runner uses it) and
+  `anyio`, which `server.py` imports directly and whose thread-context
+  behaviour carries the per-request token isolation.
+- `mcp_server/requirements.txt` pins that runtime set exactly, as
+  `app/requirements.txt` already does for Django. This matters more than usual
+  because the security behaviour above rests on SDK internals verified by
+  experiment rather than by a documented contract, and `deploy.sh` rebuilds on
+  every deploy. The image installs the pinned set first, then the package with
+  `--no-deps` so its open ranges cannot re-resolve over the pins.
+- `mcp_server/Dockerfile`: a Debian-pinned `python:3.12-slim-bookworm`,
+  unbuffered output, no bytecode, an unprivileged `USER`, `CMD
+  ["etipitaka-mcp"]` with `ETIPITAKA_TRANSPORT=http` baked in (compose can
+  still override). A `.dockerignore` keeps the virtualenv out of the build
+  context, which took it from about 74 MB to 35 kB.
 
 **Depends on:** Component 2 (verify endpoint + bearer-accepting API), the
 `mcp` SDK auth module (present in 1.30.0), `httpx`.
@@ -355,6 +434,19 @@ build), `deploy.sh` unchanged.
   - `location /.well-known/oauth-protected-resource` (prefix) → `mcp`.
   - `location = /.well-known/oauth-authorization-server` → `web`.
   - everything else → `web` as today.
+  - Rate limiting, per recovered client IP: `/mcp` at 10r/s burst 20, and a
+    regex location covering both `/o/register` spellings at 6r/m burst 5,
+    leaving the RFC 7592 management URLs beneath it unmetered. Throttled
+    requests get a JSON body and a `Retry-After` hint rather than nginx's HTML
+    page, scoped per location so Django's own login throttle is untouched.
+  - `real_ip_header X-Forwarded-For` with `set_real_ip_from` limited to
+    private ranges, so buckets key on the true client and a direct caller
+    from a public address cannot spoof its way into another bucket.
+  - `X-Forwarded-Proto` forwarded on every proxying location, preferring a
+    value from the terminator and falling back to this proxy's own scheme.
+- The `mcp` service carries a healthcheck probing its own unauthenticated
+  protected-resource metadata, and nginx waits on it, so startup does not
+  serve errors while the app is still importing.
 - The mobile client only ever sees the public https URLs; the `mcp` service
   reaches Django on the internal compose network. DOT migrations run in the
   existing `deploy.sh` `migrate` step.
@@ -487,9 +579,11 @@ run `whoami` and `list_bookmarks`.
 - OpenID Connect / ID tokens; write scopes; more than one scope.
 - Browser-based MCP clients (CORS) — add `django-cors-headers` when needed.
 - Resource/audience-bound tokens beyond scope + issuer checks (hardening).
-- Rate limiting on `/mcp` and `/o/register/` (DRF throttles do not cover
-  DOT's registration view; add an nginx `limit_req` zone or a Django-level
-  limiter).
+- ~~Rate limiting on `/mcp` and `/o/register/`~~ — **done**, in nginx (see
+  Component 4). It moved out of scope during review: a bogus bearer costs a
+  Django round trip plus roughly two database transactions, because rejected
+  tokens are deliberately never cached, so exposing `/mcp` publicly without a
+  limit was not defensible.
 - Hashed token storage at rest (`COMPLIANT_BCP_RFC9700_TOKEN_STORAGE`, DOT
   check W006) — deferred; evaluate against the direct-`AccessToken` test
   fixture before enabling.
@@ -501,9 +595,16 @@ run `whoami` and `list_bookmarks`.
 - Scoping `ng-app` in `base.html` to the pages that actually use AngularJS —
   until then every template that extends it and renders free text must opt
   out with `ng-non-bindable` (the consent page does).
-- `registration_client_uri` in DCR responses is request-derived; forwarding
-  `X-Forwarded-Proto` from the TLS terminator plus `SECURE_PROXY_SSL_HEADER`
-  would make it `https`. Unused by the MCP flow, so cosmetic.
+- `registration_client_uri` in DCR responses is request-derived — **the code
+  half is done**: nginx forwards `X-Forwarded-Proto` and Django trusts it
+  behind an opt-in `TRUST_PROXY_PROTO`, default off, because a spoofable
+  header must not be trusted by default. It is not cosmetic after all: that
+  URL is returned beside a `registration_access_token`, so an `http://` value
+  invites a bearer token over cleartext on the first hop. **Remaining
+  operator step:** confirm the host-level TLS terminator sets both
+  `X-Forwarded-Proto` and `X-Forwarded-For`, overwriting rather than passing
+  client values, then enable the flag. See `docs/remote-mcp-oauth-deploy.md`,
+  which also records why the published port was left bound to all interfaces.
 - Replacing the local stdio transport — it stays as the desktop path.
 - Migrating existing DRF tokens to OAuth — both keep working side by side.
 
