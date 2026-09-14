@@ -86,9 +86,8 @@ OAUTH2_PROVIDER = {
     # https for web-callback clients (e.g. the Claude app); http is allowed
     # for any host so local/dev callbacks work (DOT has no loopback-only
     # mode). A client needing a custom scheme is onboarded by appending it
-    # here. PKCE_REQUIRED, ROTATE_REFRESH_TOKEN and these schemes are pinned
-    # explicitly for clarity (they equal DOT's defaults) rather than implying
-    # they tighten anything.
+    # here. PKCE_REQUIRED, ROTATE_REFRESH_TOKEN and these schemes equal DOT's
+    # defaults; pinned explicitly.
     'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
     'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,

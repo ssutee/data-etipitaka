@@ -1,4 +1,6 @@
 from django.contrib import admin
+from oauth2_provider.admin import ApplicationAdmin
+from oauth2_provider.models import Application
 from .models import UserData, SyncData
 
 class UserDataAdmin(admin.ModelAdmin):
@@ -10,3 +12,12 @@ class SyncDataAdmin(admin.ModelAdmin):
 
 admin.site.register(UserData, UserDataAdmin)
 admin.site.register(SyncData, SyncDataAdmin)
+
+admin.site.unregister(Application)
+
+
+@admin.register(Application)
+class OAuthApplicationAdmin(ApplicationAdmin):
+    # Only DOT's base + DCR routes are mounted; oauth2_provider:detail (which
+    # Application.get_absolute_url reverses) does not exist here.
+    view_on_site = False
