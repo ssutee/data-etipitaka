@@ -102,3 +102,27 @@ def make_content_db(user, filename, table, schema_sql, rows, platform='ios'):
     sd.file.name = rel
     sd.save()
     return sd
+
+
+def make_oauth_token(user, scope='etipitaka:read', seconds=3600):
+    """Create a django-oauth-toolkit access token for `user` (public client)."""
+    import secrets
+    from datetime import timedelta
+    from django.utils import timezone
+    from oauth2_provider.models import AccessToken, Application
+    app = Application.objects.create(
+        name='test-app', client_type=Application.CLIENT_PUBLIC,
+        authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+        redirect_uris='https://app.example/cb')
+    return AccessToken.objects.create(
+        user=user, application=app, scope=scope,
+        token='t-' + secrets.token_hex(16),
+        expires=timezone.now() + timedelta(seconds=seconds))
+
+
+@pytest.fixture
+def oauth_alice(api, alice):
+    """APIClient sending alice's OAuth bearer token with the read scope."""
+    tok = make_oauth_token(alice)
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    return api

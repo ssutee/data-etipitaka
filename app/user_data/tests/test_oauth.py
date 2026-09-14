@@ -5,6 +5,8 @@ import json
 import pytest
 from oauth2_provider.models import Application
 
+from .conftest import make_oauth_token
+
 pytestmark = pytest.mark.django_db
 
 DCR_BODY = {
@@ -48,3 +50,34 @@ def test_as_metadata(client, settings):
     for key in ('token_endpoint_auth_methods_supported',
                 'revocation_endpoint_auth_methods_supported'):
         assert 'none' in body[key] and 'client_secret_basic' in body[key]
+
+
+def test_verify_valid_token(api, alice):
+    tok = make_oauth_token(alice)
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/oauth/verify/')
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['active'] is True
+    assert body['username'] == 'alice' and body['user_id'] == alice.pk
+    assert body['scopes'] == ['etipitaka:read']
+    assert body['client_id'] == tok.application.client_id
+    assert isinstance(body['expires_at'], int)
+
+
+def test_verify_bogus_token_401(api):
+    api.credentials(HTTP_AUTHORIZATION='Bearer nope')
+    assert api.get('/api/oauth/verify/').status_code == 401
+
+
+def test_verify_expired_token_401(api, alice):
+    tok = make_oauth_token(alice, seconds=-10)
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    assert api.get('/api/oauth/verify/').status_code == 401
+
+
+def test_verify_reports_scopes_without_enforcing(api, alice):
+    tok = make_oauth_token(alice, scope='')
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/oauth/verify/')
+    assert resp.status_code == 200 and resp.json()['scopes'] == []
