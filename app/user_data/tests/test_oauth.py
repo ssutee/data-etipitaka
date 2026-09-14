@@ -24,3 +24,19 @@ def test_dcr_registers_public_client(client):
     assert body['client_id']
     app = Application.objects.get(client_id=body['client_id'])
     assert app.client_type == Application.CLIENT_PUBLIC
+
+
+def test_as_metadata(client, settings):
+    settings.OAUTH_ISSUER_URL = 'https://issuer.example'
+    resp = client.get('/.well-known/oauth-authorization-server')
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['issuer'] == 'https://issuer.example'
+    assert body['authorization_endpoint'] == 'https://issuer.example/o/authorize/'
+    assert body['token_endpoint'] == 'https://issuer.example/o/token/'
+    assert body['registration_endpoint'] == 'https://issuer.example/o/register/'
+    assert body['revocation_endpoint'] == 'https://issuer.example/o/revoke_token/'
+    assert body['scopes_supported'] == ['etipitaka:read']
+    assert body['code_challenge_methods_supported'] == ['S256']
+    assert body['grant_types_supported'] == ['authorization_code', 'refresh_token']
+    assert 'none' in body['token_endpoint_auth_methods_supported']
