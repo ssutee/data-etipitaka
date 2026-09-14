@@ -228,12 +228,15 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
   agree that a deactivated account is rejected.
 - `permission_classes = (ScopedOrAuthenticated,)` — a small custom permission:
   - if `request.auth` is an OAuth access token (has a `scope` attribute) →
-    allow only if it is valid for `etipitaka:read`;
+    allow only if it is valid for `etipitaka:read`; otherwise answer `403`
+    with `WWW-Authenticate: Bearer realm="api",error="insufficient_scope",
+    scope="etipitaka:read"` (RFC 6750 §3.1);
   - otherwise (DRF `Token` or session) → behave exactly like `IsAuthenticated`.
 
-  DOT's own `TokenHasScope` cannot be used directly because it asserts when
-  the request was authenticated by something other than OAuth2, which would
-  break today's DRF-token clients.
+  DOT's `IsAuthenticatedOrTokenHasScope` would do the same job, but it reads
+  `required_scopes` off the view class, which function-based `api_view`
+  views do not carry; with one fixed scope a small explicit permission is
+  clearer.
 - `/api/canon/*` untouched (public). `/rest-auth/*` untouched.
 - Consequence of listing the OAuth authenticator first: DRF builds the
   anonymous `401` challenge from the first authenticator, so `/api/content/*`
@@ -241,6 +244,12 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
   Authenticated responses are unchanged; existing DRF-token clients only send
   the header, they never parse the challenge. The golden snapshot
   `content_bookmarks_anon` is re-recorded to match.
+- DOT's authenticator now runs on every `/api/content/*` request, DRF-token
+  ones included. Two edge behaviours change, both only for broken clients: a
+  query string with malformed percent-encoding (`?q=%zz`) is rejected by
+  oauthlib as `400` where it used to be served, and an invalid `Token …`
+  header is answered with the `Bearer` challenge (status and body
+  unchanged).
 
 **Depends on:** Component 1 (DOT installed).
 
