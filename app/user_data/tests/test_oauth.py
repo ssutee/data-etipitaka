@@ -57,12 +57,13 @@ def test_verify_valid_token(api, alice):
     api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
     resp = api.get('/api/oauth/verify/')
     assert resp.status_code == 200
+    assert resp['Cache-Control'] == 'no-store'
     body = resp.json()
     assert body['active'] is True
-    assert body['username'] == 'alice' and body['user_id'] == alice.pk
+    assert body['username'] == alice.username and body['user_id'] == alice.pk
     assert body['scopes'] == ['etipitaka:read']
     assert body['client_id'] == tok.application.client_id
-    assert isinstance(body['expires_at'], int)
+    assert body['expires_at'] == int(tok.expires.timestamp())
 
 
 def test_verify_bogus_token_401(api):
@@ -81,3 +82,17 @@ def test_verify_reports_scopes_without_enforcing(api, alice):
     api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
     resp = api.get('/api/oauth/verify/')
     assert resp.status_code == 200 and resp.json()['scopes'] == []
+
+
+def test_verify_missing_header_401(api):
+    assert api.get('/api/oauth/verify/').status_code == 401
+
+
+def test_verify_inactive_user_401(api, alice):
+    tok = make_oauth_token(alice)
+    alice.is_active = False
+    alice.save(update_fields=['is_active'])
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/oauth/verify/')
+    assert resp.status_code == 401
+    assert 'invalid_token' in resp['WWW-Authenticate']

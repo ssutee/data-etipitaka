@@ -1,8 +1,12 @@
 import os
+import secrets
 import sqlite3
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth.models import User
+from django.utils import timezone
+from oauth2_provider.models import AccessToken, Application
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
@@ -106,14 +110,11 @@ def make_content_db(user, filename, table, schema_sql, rows, platform='ios'):
 
 def make_oauth_token(user, scope='etipitaka:read', seconds=3600):
     """Create a django-oauth-toolkit access token for `user` (public client)."""
-    import secrets
-    from datetime import timedelta
-    from django.utils import timezone
-    from oauth2_provider.models import AccessToken, Application
     app = Application.objects.create(
         name='test-app', client_type=Application.CLIENT_PUBLIC,
         authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
-        redirect_uris='https://app.example/cb')
+        redirect_uris='https://app.example/cb',
+        client_secret='', hash_client_secret=False)
     return AccessToken.objects.create(
         user=user, application=app, scope=scope,
         token='t-' + secrets.token_hex(16),
