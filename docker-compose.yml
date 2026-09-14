@@ -15,6 +15,26 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  mcp:
+    build:
+      context: ./mcp_server
+    expose:
+      - 8001
+    environment:
+      ETIPITAKA_TRANSPORT: http
+      # Internal Django for verify + API calls; public URLs for OAuth metadata.
+      ETIPITAKA_BASE_URL: http://web:8000
+      ETIPITAKA_ISSUER_URL: https://data.etipitaka.com
+      ETIPITAKA_RESOURCE_URL: https://data.etipitaka.com/mcp
+      # nginx forwards the original Host header; allow prod + local dev/golden.
+      ETIPITAKA_ALLOWED_HOSTS: data.etipitaka.com,data.etipitaka.com:*,localhost:*,127.0.0.1:*
+    depends_on:
+      - web
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/.well-known/oauth-protected-resource/mcp')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   db:
     image: postgres:16-alpine
     volumes:
@@ -34,7 +54,10 @@ services:
     ports:
       - 1338:80
     depends_on:
-      - web
+      web:
+        condition: service_started
+      mcp:
+        condition: service_healthy
 
 volumes:
   postgres_data:
