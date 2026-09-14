@@ -2,39 +2,12 @@
 """OAuth support view: the resource-server token check used by the remote
 MCP service. (The RFC 8414 metadata document is served by django-oauth-
 toolkit's OAuthServerMetadataView, wired directly in urls.py.)"""
-from collections import OrderedDict
-
 from django.http import JsonResponse
-from oauth2_provider.contrib.rest_framework import OAuth2Authentication
-from rest_framework import exceptions
 from rest_framework.decorators import (api_view, authentication_classes,
                                        permission_classes)
 from rest_framework.permissions import IsAuthenticated
 
-
-class ActiveUserOAuth2Authentication(OAuth2Authentication):
-    """OAuth2Authentication that also rejects tokens not bound to an active user.
-
-    django-oauth-toolkit validates the token, not the account: a user set
-    inactive after consenting would otherwise keep verifying (and refreshing)
-    for the refresh-token lifetime, and a client-credentials token (its
-    AccessToken.user is None) has no account to check at all. DRF's
-    Token/Session authenticators already reject inactive users; this makes
-    the OAuth path consistent for both cases.
-    """
-
-    def authenticate(self, request):
-        result = super().authenticate(request)
-        user = result[0] if result is not None else None
-        if result is not None and (user is None or not user.is_active):
-            request.oauth2_error = OrderedDict([
-                ('error', 'invalid_token'),
-                ('error_description',
-                 'The access token is not bound to an active user.'),
-            ])
-            raise exceptions.AuthenticationFailed(
-                'The access token is not bound to an active user.')
-        return result
+from .oauth_authentication import ActiveUserOAuth2Authentication
 
 
 @api_view(['GET'])
