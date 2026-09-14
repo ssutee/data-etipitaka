@@ -38,7 +38,8 @@ async def test_cache_hit_skips_second_request(httpx_mock):
     v = DjangoTokenVerifier('http://d')
     first = await v.verify_token('abc')
     second = await v.verify_token('abc')
-    assert first is second
+    assert first == second
+    assert first is not second
     assert len(httpx_mock.get_requests()) == 1
 
 
@@ -48,3 +49,36 @@ async def test_negative_result_not_cached(httpx_mock):
     v = DjangoTokenVerifier('http://d')
     assert await v.verify_token('abc') is None
     assert (await v.verify_token('abc')) is not None
+
+
+async def test_malformed_json_body_is_none(httpx_mock):
+    httpx_mock.add_response(url=VERIFY_URL, content=b'not json',
+                             headers={'Content-Type': 'application/json'})
+    assert await DjangoTokenVerifier('http://d').verify_token('abc') is None
+
+
+async def test_bad_field_type_is_none(httpx_mock):
+    bad_body = dict(OK_BODY, expires_at='soon')
+    httpx_mock.add_response(url=VERIFY_URL, json=bad_body)
+    assert await DjangoTokenVerifier('http://d').verify_token('abc') is None
+
+
+async def test_inactive_body_is_none(httpx_mock):
+    httpx_mock.add_response(url=VERIFY_URL, json={'active': False})
+    assert await DjangoTokenVerifier('http://d').verify_token('abc') is None
+
+
+async def test_server_error_is_none_and_logged(httpx_mock, caplog):
+    httpx_mock.add_response(url=VERIFY_URL, status_code=500)
+    with caplog.at_level('WARNING'):
+        assert await DjangoTokenVerifier('http://d').verify_token('abc') is None
+    assert any('500' in rec.message for rec in caplog.records)
+
+
+async def test_cache_hit_scopes_are_independent_copies(httpx_mock):
+    httpx_mock.add_response(url=VERIFY_URL, json=OK_BODY)
+    v = DjangoTokenVerifier('http://d')
+    first = await v.verify_token('abc')
+    first.scopes.append('mutated:scope')
+    second = await v.verify_token('abc')
+    assert second.scopes == ['etipitaka:read']

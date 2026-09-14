@@ -2,6 +2,10 @@
 
 The remote MCP server never issues tokens; it asks Django whether the bearer
 token it received is valid by forwarding that token to /api/oauth/verify/.
+
+The SDK re-checks the returned token's absolute `expires_at` on every
+request, so the short cache kept here never extends a token's lifetime — it
+only delays *revocation* becoming effective, by at most CACHE_TTL_SECONDS.
 """
 import hashlib
 import logging
@@ -29,24 +33,35 @@ class DjangoTokenVerifier:
         now = time.monotonic()
         hit = self._cache.get(key)
         if hit and hit[0] > now:
-            return hit[1]
+            return hit[1].model_copy(deep=True)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.get(
                     self.url, headers={'Authorization': 'Bearer ' + token})
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             log.warning('token verify failed (%s) for %s…', exc, key[:8])
             return None
-        if resp.status_code != 200:
+        if resp.status_code == 401:
             return None
-        body = resp.json()
-        access = AccessToken(
-            token=token,
-            client_id=body.get('client_id') or '',
-            scopes=list(body.get('scopes') or []),
-            expires_at=body.get('expires_at'),
-        )
+        if resp.status_code != 200:
+            log.warning('token verify got status %s for %s…',
+                         resp.status_code, key[:8])
+            return None
+        try:
+            body = resp.json()
+            if not body.get('active'):
+                return None
+            access = AccessToken(
+                token=token,
+                client_id=body.get('client_id') or '',
+                scopes=list(body.get('scopes') or []),
+                expires_at=body.get('expires_at'),
+            )
+        except Exception as exc:
+            log.warning('token verify got malformed body (%s) for %s…',
+                         exc, key[:8])
+            return None
         if len(self._cache) >= CACHE_MAX_ENTRIES:
             self._cache.clear()
         self._cache[key] = (now + CACHE_TTL_SECONDS, access)
-        return access
+        return access.model_copy(deep=True)
