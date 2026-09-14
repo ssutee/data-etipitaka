@@ -280,3 +280,26 @@ def test_content_bogus_drf_token_still_401(api):
 
 def test_canon_still_public(api, canon_dir):
     assert api.get('/api/canon/editions/').status_code == 200
+
+
+def test_user_details_accepts_oauth_bearer(oauth_alice, alice):
+    resp = oauth_alice.get('/rest-auth/user/')
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['username'] == alice.username
+    assert body['pk'] == alice.pk
+    assert body['email'] == alice.email
+
+
+def test_user_details_oauth_without_scope_403(api, alice):
+    tok = make_oauth_token(alice, scope='')
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/rest-auth/user/')
+    assert resp.status_code == 403
+    assert 'insufficient_scope' in resp['WWW-Authenticate']
+
+
+def test_user_details_drf_token_still_works(auth_alice, alice):
+    resp = auth_alice.get('/rest-auth/user/')
+    assert resp.status_code == 200
+    assert resp.json()['username'] == alice.username

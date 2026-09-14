@@ -15,6 +15,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
+from .oauth_authentication import ActiveUserOAuth2Authentication
+from .oauth_permissions import ScopedOrAuthenticated
 from .serializers import RegisterSerializer, LoginSerializer
 
 
@@ -75,8 +77,9 @@ def rest_logout(request):
 
 
 @api_view(['GET'])
-@authentication_classes([TokenAuthentication, SessionAuthentication])
-@permission_classes([IsAuthenticated])
+@authentication_classes([ActiveUserOAuth2Authentication, TokenAuthentication,
+                         SessionAuthentication])
+@permission_classes([ScopedOrAuthenticated])
 def rest_user_details(request):
     user = request.user
     return Response({'pk': user.pk, 'username': user.username, 'email': user.email})
