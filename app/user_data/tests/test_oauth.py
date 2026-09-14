@@ -3,6 +3,9 @@
 import json
 
 import pytest
+from oauth2_provider.models import Application
+
+pytestmark = pytest.mark.django_db
 
 DCR_BODY = {
     'client_name': 'test-client',
@@ -13,12 +16,11 @@ DCR_BODY = {
 }
 
 
-@pytest.mark.django_db
-def test_dcr_registers_client(client):
-    from oauth2_provider.models import Application
+def test_dcr_registers_public_client(client):
     resp = client.post('/o/register/', data=json.dumps(DCR_BODY),
                        content_type='application/json')
     assert resp.status_code == 201, resp.content
     body = resp.json()
     assert body['client_id']
-    assert Application.objects.filter(client_id=body['client_id']).exists()
+    app = Application.objects.get(client_id=body['client_id'])
+    assert app.client_type == Application.CLIENT_PUBLIC

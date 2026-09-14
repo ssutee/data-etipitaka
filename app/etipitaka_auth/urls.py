@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.urls import include, path, re_path
 from django.views.generic import TemplateView
 from django.views.i18n import set_language
+from oauth2_provider import urls as oauth2_urls
 
 from user_data import views, auth_views
 from user_data import content_views
@@ -38,7 +39,8 @@ urlpatterns = [
     path('api/canon/passage/', canon_views.passage),
     path('api/canon/resolve/', canon_views.resolve),
     path('api/canon/dictionary/', canon_views.dictionary),
-    path('o/', include(('oauth2_provider.urls', 'oauth2_provider'), namespace='oauth2_provider')),
+    path('o/', include((oauth2_urls.base_urlpatterns + oauth2_urls.dcr_urlpatterns,
+                        'oauth2_provider'), namespace='oauth2_provider')),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),

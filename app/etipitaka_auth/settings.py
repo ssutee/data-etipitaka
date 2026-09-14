@@ -83,13 +83,27 @@ OAUTH2_PROVIDER = {
     'DCR_REGISTRATION_PERMISSION_CLASSES': (
         'oauth2_provider.dcr.AllowAllDCRPermission',
     ),
-    # https covers web-callback clients (e.g. the Claude app); http covers
-    # loopback redirects in dev. A client needing a custom scheme is onboarded
-    # by appending it here.
+    # https for web-callback clients (e.g. the Claude app); http is allowed
+    # for any host so local/dev callbacks work (DOT has no loopback-only
+    # mode). A client needing a custom scheme is onboarded by appending it
+    # here. PKCE_REQUIRED, ROTATE_REFRESH_TOKEN and these schemes are pinned
+    # explicitly for clarity (they equal DOT's defaults) rather than implying
+    # they tighten anything.
     'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
     'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,
     'ROTATE_REFRESH_TOKEN': True,
+    # Enforce the OAuth 2.1 / RFC 9700 posture the server metadata advertises:
+    # S256-only PKCE, no implicit/password grants, tokens only in headers,
+    # RFC 9207 `iss` in the authorization response, and refresh-token reuse
+    # detection (a replayed refresh token revokes the whole family).
+    'REFRESH_TOKEN_REUSE_PROTECTION': True,
+    'OIDC_ISS_ENDPOINT': OAUTH_ISSUER_URL,
+    'COMPLIANT_BCP_RFC9700_PKCE_METHOD': True,
+    'COMPLIANT_BCP_RFC9700_IMPLICIT_GRANT': True,
+    'COMPLIANT_BCP_RFC9700_PASSWORD_GRANT': True,
+    'COMPLIANT_BCP_RFC9700_ACCESS_TOKEN_TRANSPORT': True,
+    'COMPLIANT_BCP_RFC9700_AUTHZ_RESPONSE_ISS': True,
 }
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
