@@ -219,6 +219,12 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
   the request was authenticated by something other than OAuth2, which would
   break today's DRF-token clients.
 - `/api/canon/*` untouched (public). `/rest-auth/*` untouched.
+- Consequence of listing the OAuth authenticator first: DRF builds the
+  anonymous `401` challenge from the first authenticator, so `/api/content/*`
+  answers `WWW-Authenticate: Bearer realm="api"` instead of `Token`.
+  Authenticated responses are unchanged; existing DRF-token clients only send
+  the header, they never parse the challenge. The golden snapshot
+  `content_bookmarks_anon` is re-recorded to match.
 
 **Depends on:** Component 1 (DOT installed).
 
