@@ -2,8 +2,9 @@ from django.http import JsonResponse
 from rest_framework.decorators import (api_view, authentication_classes,
                                        permission_classes)
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
-from rest_framework.permissions import IsAuthenticated
 
+from .oauth_authentication import ActiveUserOAuth2Authentication
+from .oauth_permissions import ScopedOrAuthenticated
 from .sqlite_reader import read_table
 
 DEFAULT_LIMIT = 50
@@ -60,8 +61,9 @@ def _content_endpoint(allowed, search_cols, key):
     db_filename, table = DB_TABLES[key]
 
     @api_view(['GET'])
-    @authentication_classes((TokenAuthentication, SessionAuthentication))
-    @permission_classes((IsAuthenticated,))
+    @authentication_classes((ActiveUserOAuth2Authentication, TokenAuthentication,
+                             SessionAuthentication))
+    @permission_classes((ScopedOrAuthenticated,))
     def view(request):
         return _list(request, db_filename, table,
                      allowed=allowed, search_cols=search_cols)
@@ -85,8 +87,9 @@ lexicon = _content_endpoint({}, ['head'], 'lexicon')
 
 
 @api_view(['GET'])
-@authentication_classes((TokenAuthentication, SessionAuthentication))
-@permission_classes((IsAuthenticated,))
+@authentication_classes((ActiveUserOAuth2Authentication, TokenAuthentication,
+                         SessionAuthentication))
+@permission_classes((ScopedOrAuthenticated,))
 def summary(request):
     counts, platforms = {}, set()
     for key, (db_filename, table) in DB_TABLES.items():

@@ -7,7 +7,7 @@
   "headers": {
     "allow": "GET, OPTIONS",
     "content-type": "application/json",
-    "www-authenticate": "Token"
+    "www-authenticate": "Bearer realm=\"api\""
   },
   "status": 401
 }

@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from oauth2_provider.models import Application
 
-from .conftest import make_oauth_token
+from .conftest import make_content_db, make_oauth_token
 
 pytestmark = pytest.mark.django_db
 
@@ -220,3 +220,43 @@ def test_consent_page_renders_in_thai(client, alice, settings):
     assert page.status_code == 200
     assert 'ปฏิเสธ'.encode() in page.content          # Deny (template string)
     assert 'ที่คั่นหน้า'.encode() in page.content     # scope description (settings, gettext_lazy)
+
+
+BOOKMARK_SQL = ("CREATE TABLE bookmark (created FLOAT, important INTEGER, note TEXT, "
+                "rank INTEGER, code INTEGER, volume INTEGER, page INTEGER)")
+
+
+def _seed_bookmarks(alice):
+    make_content_db(alice, 'bookmark.sqlite', 'bookmark', BOOKMARK_SQL,
+                    [(1457843335.0, 1, 'n', 0, 1, 10, 101)])
+
+
+def test_content_accepts_oauth_bearer(oauth_alice, alice, media_tmp):
+    _seed_bookmarks(alice)
+    resp = oauth_alice.get('/api/content/bookmarks/')
+    assert resp.status_code == 200 and resp.json()['count'] == 1
+
+
+def test_content_oauth_without_scope_403(api, alice, media_tmp):
+    tok = make_oauth_token(alice, scope='')
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    assert api.get('/api/content/bookmarks/').status_code == 403
+
+
+def test_content_drf_token_still_works(auth_alice, alice, media_tmp):
+    _seed_bookmarks(alice)
+    assert auth_alice.get('/api/content/bookmarks/').status_code == 200
+
+
+def test_content_anonymous_401_with_bearer_challenge(api):
+    resp = api.get('/api/content/bookmarks/')
+    assert resp.status_code == 401
+    assert resp['WWW-Authenticate'].startswith('Bearer')
+
+
+def test_summary_accepts_oauth_bearer(oauth_alice):
+    assert oauth_alice.get('/api/content/summary/').status_code == 200
+
+
+def test_canon_still_public(api, canon_dir):
+    assert api.get('/api/canon/editions/').status_code == 200
