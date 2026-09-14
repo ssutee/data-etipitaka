@@ -130,9 +130,9 @@ def _lookup_dictionary(term, dictionary='pali_thai', match='exact', limit=20):
 # --- MCP tool registrations ---
 @mcp.tool()
 async def list_bookmarks(platform: str | None = None, code: int | None = None,
-                   volume: int | None = None, page: int | None = None,
-                   important: int | None = None, query: str | None = None,
-                   limit: int = 50, offset: int = 0) -> dict:
+                         volume: int | None = None, page: int | None = None,
+                         important: int | None = None, query: str | None = None,
+                         limit: int = 50, offset: int = 0) -> dict:
     """List the user's bookmarks (canon locations with notes)."""
     return await _off_loop(_list_bookmarks, platform=platform, code=code, volume=volume,
                            page=page, important=important, q=query, limit=limit, offset=offset)
@@ -140,8 +140,8 @@ async def list_bookmarks(platform: str | None = None, code: int | None = None,
 
 @mcp.tool()
 async def list_highlights(platform: str | None = None, code: int | None = None,
-                    volume: int | None = None, page: int | None = None,
-                    query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+                          volume: int | None = None, page: int | None = None,
+                          query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """List the user's highlighted passages (selected text + notes)."""
     return await _off_loop(_list_highlights, platform=platform, code=code, volume=volume,
                            page=page, q=query, limit=limit, offset=offset)
@@ -149,14 +149,14 @@ async def list_highlights(platform: str | None = None, code: int | None = None,
 
 @mcp.tool()
 async def list_tags(platform: str | None = None, query: str | None = None,
-              limit: int = 50, offset: int = 0) -> dict:
+                    limit: int = 50, offset: int = 0) -> dict:
     """List the user's tags."""
     return await _off_loop(_list_tags, platform=platform, q=query, limit=limit, offset=offset)
 
 
 @mcp.tool()
 async def list_history(platform: str | None = None, starred: int | None = None,
-                 query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+                       query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """List the user's search/reading history."""
     return await _off_loop(_list_history, platform=platform, starred=starred, q=query,
                            limit=limit, offset=offset)
@@ -164,7 +164,7 @@ async def list_history(platform: str | None = None, starred: int | None = None,
 
 @mcp.tool()
 async def list_lexicon(platform: str | None = None, query: str | None = None,
-                 limit: int = 50, offset: int = 0) -> dict:
+                       limit: int = 50, offset: int = 0) -> dict:
     """List the user's saved dictionary (lexicon) terms."""
     return await _off_loop(_list_lexicon, platform=platform, q=query, limit=limit, offset=offset)
 
@@ -189,7 +189,7 @@ async def list_editions() -> dict:
 
 @mcp.tool()
 async def search_canon(query: str, edition: str | None = None, volume: int | None = None,
-                 limit: int = 20, offset: int = 0) -> dict:
+                       limit: int = 20, offset: int = 0) -> dict:
     """Substring-search one canon edition; returns matching pages with snippets."""
     return await _off_loop(_search_canon, query, edition=edition, volume=volume,
                            limit=limit, offset=offset)
@@ -209,7 +209,7 @@ async def resolve_reference(platform: str, code: int, volume: int, page: int) ->
 
 @mcp.tool()
 async def lookup_dictionary(term: str, dictionary: str = 'pali_thai',
-                      match: str = 'exact', limit: int = 20) -> dict:
+                            match: str = 'exact', limit: int = 20) -> dict:
     """Look up a term in pali_thai / pali_english / thai; match exact|prefix|contains."""
     return await _off_loop(_lookup_dictionary, term, dictionary=dictionary, match=match, limit=limit)
 

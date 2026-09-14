@@ -20,13 +20,6 @@ HTTP_ENV = {
     'ETIPITAKA_ALLOWED_HOSTS': 'testserver,testserver:*',
 }
 
-# The twelve @mcp.tool() names registered in server.py.
-TOOL_NAMES = [
-    'list_bookmarks', 'list_highlights', 'list_tags', 'list_history',
-    'list_lexicon', 'get_summary', 'whoami', 'list_editions',
-    'search_canon', 'get_passage', 'resolve_reference', 'lookup_dictionary',
-]
-
 
 @pytest.fixture
 def http_server(monkeypatch):
@@ -81,14 +74,14 @@ async def test_all_tools_are_coroutine_functions(http_server):
     (`fn(**args)`, no thread hand-off) — so every registered tool must be
     `async def`, or one caller's blocking REST call stalls every other
     session sharing the worker. Reached via the FastMCP instance's own
-    ToolManager.get_tool(name).fn, which is the exact callable dispatched
+    ToolManager.list_tools(), which returns the exact callables dispatched
     for a tool call (verified empirically: `@mcp.tool()` returns the
     original function unchanged, and that same object is what
     ToolManager.get_tool(name).fn holds)."""
-    for name in TOOL_NAMES:
-        tool = http_server.mcp._tool_manager.get_tool(name)
-        assert tool is not None, name
-        assert inspect.iscoroutinefunction(tool.fn), name
+    tools = http_server.mcp._tool_manager.list_tools()
+    assert len(tools) == 12
+    for tool in tools:
+        assert inspect.iscoroutinefunction(tool.fn), tool.name
 
 
 async def test_off_loop_propagates_request_token_across_thread(http_server):

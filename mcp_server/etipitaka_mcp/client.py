@@ -1,8 +1,26 @@
 import httpx
 
 
-class ContentAPIError(RuntimeError):
-    """A Content API call failed. Carries no internal URL."""
+class EtipitakaAPIError(RuntimeError):
+    """A ContentClient or CanonClient REST call failed. Carries no internal URL."""
+
+
+def _raise_for_status(resp, path):
+    """Convert a failed response into an error that carries no internal URL.
+
+    httpx's own message embeds the full URL, which in the deployed stack is
+    an internal address the MCP caller must never see. The request path is
+    ours and safe to name.
+    """
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        if resp.status_code == 401:
+            raise EtipitakaAPIError(
+                '%s: the access token was rejected (401); refresh it '
+                'and retry.' % path) from None
+        raise EtipitakaAPIError(
+            '%s: request failed (status %d).' % (path, resp.status_code)) from None
 
 
 class ContentClient:
@@ -33,15 +51,7 @@ class ContentClient:
         if resp.status_code == 401 and self.refresh is not None:
             resp = httpx.get(url, params=clean, headers=self._headers(self.refresh()),
                              timeout=self.timeout)
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError:
-            if resp.status_code == 401:
-                raise ContentAPIError(
-                    '%s: the access token was rejected (401); refresh it '
-                    'and retry.' % path) from None
-            raise ContentAPIError(
-                '%s: request failed (status %d).' % (path, resp.status_code)) from None
+        _raise_for_status(resp, path)
         return resp.json()
 
     def list_bookmarks(self, **params):
@@ -76,7 +86,7 @@ class CanonClient:
     def _get(self, path, params=None):
         clean = {k: v for k, v in (params or {}).items() if v is not None}
         resp = httpx.get(self.base_url + path, params=clean, timeout=self.timeout)
-        resp.raise_for_status()
+        _raise_for_status(resp, path)
         return resp.json()
 
     def editions(self):
