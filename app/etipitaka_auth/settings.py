@@ -86,6 +86,9 @@ REST_FRAMEWORK = {
 # read-only scope. Issuer is the site root so RFC 8414 discovery lives at
 # /.well-known/oauth-authorization-server.
 OAUTH_ISSUER_URL = os.environ.get('OAUTH_ISSUER_URL', 'https://data.etipitaka.com').rstrip('/')
+# RFC 8707 audience of the remote MCP endpoint; must equal the MCP service's
+# ETIPITAKA_RESOURCE_URL. See user_data.oauth_resource.
+OAUTH_MCP_RESOURCE_URL = OAUTH_ISSUER_URL + '/mcp'
 
 OAUTH2_PROVIDER = {
     'SCOPES': {
@@ -106,6 +109,7 @@ OAUTH2_PROVIDER = {
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
     'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,
     'ROTATE_REFRESH_TOKEN': True,
+    'RESOURCE_SERVER_TOKEN_RESOURCE_VALIDATOR': 'user_data.oauth_resource.validate_mcp_audience',
     # Enforce the OAuth 2.1 / RFC 9700 posture the server metadata advertises:
     # S256-only PKCE, no implicit/password grants, tokens only in headers,
     # RFC 9207 `iss` in the authorization response, and refresh-token reuse

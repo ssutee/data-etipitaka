@@ -108,8 +108,13 @@ def make_content_db(user, filename, table, schema_sql, rows, platform='ios'):
     return sd
 
 
-def make_oauth_token(user, scope='etipitaka:read', seconds=3600):
-    """Create a django-oauth-toolkit access token for `user` (public client)."""
+def make_oauth_token(user, scope='etipitaka:read', seconds=3600, resource=None):
+    """Create a django-oauth-toolkit access token for `user` (public client).
+
+    `resource` is the RFC 8707 audience list the token is bound to; clients
+    such as ChatGPT always send one, so unrestricted tokens are not the only
+    shape production sees.
+    """
     app = Application.objects.create(
         name='test-app', client_type=Application.CLIENT_PUBLIC,
         authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
@@ -118,7 +123,8 @@ def make_oauth_token(user, scope='etipitaka:read', seconds=3600):
     return AccessToken.objects.create(
         user=user, application=app, scope=scope,
         token='t-' + secrets.token_hex(16),
-        expires=timezone.now() + timedelta(seconds=seconds))
+        expires=timezone.now() + timedelta(seconds=seconds),
+        resource=resource or [])
 
 
 @pytest.fixture

@@ -7,6 +7,10 @@ Run by hand (needs the golden seed users):
 Flow: DCR -> web login -> consent -> code -> token -> MCP initialize +
 tools/list + whoami over Streamable HTTP with the bearer token.
 
+Like real MCP clients (ChatGPT), it reads the protected-resource metadata and
+sends that `resource` (RFC 8707) when authorizing and exchanging the code, so
+the token is audience-bound to the MCP endpoint.
+
 Note: /o/register/ is rate-limited (6/min, burst 5); repeated runs within
 a minute may fail with 429.
 """
@@ -60,9 +64,10 @@ def get_token(base):
     assert 'sessionid' in s.cookies, 'login failed'
     print('logged in as', USERNAME)
 
+    resource = s.get('/.well-known/oauth-protected-resource/mcp').json()['resource']
     verifier, challenge = pkce()
     params = {'response_type': 'code', 'client_id': cid, 'redirect_uri': REDIRECT,
-              'scope': 'etipitaka:read', 'state': 's1',
+              'scope': 'etipitaka:read', 'state': 's1', 'resource': resource,
               'code_challenge': challenge, 'code_challenge_method': 'S256'}
     page = s.get('/o/authorize/', params=params)
     assert page.status_code == 200 and 'name="allow"' in page.text, page.status_code
@@ -76,7 +81,7 @@ def get_token(base):
 
     tok = s.post('/o/token/', data={'grant_type': 'authorization_code', 'code': code,
                                     'redirect_uri': REDIRECT, 'client_id': cid,
-                                    'code_verifier': verifier})
+                                    'code_verifier': verifier, 'resource': resource})
     tok.raise_for_status()
     access = tok.json()['access_token']
     print('access token issued (scope:', tok.json()['scope'] + ')')

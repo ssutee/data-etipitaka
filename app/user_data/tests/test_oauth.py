@@ -303,3 +303,56 @@ def test_user_details_drf_token_still_works(auth_alice, alice):
     resp = auth_alice.get('/rest-auth/user/')
     assert resp.status_code == 200
     assert resp.json()['username'] == alice.username
+
+
+# RFC 8707: clients such as ChatGPT send `resource=<MCP URL>` when authorizing,
+# so the issued token is audience-bound to the MCP endpoint. The MCP service
+# forwards that token to these Django endpoints over the internal network,
+# where django-oauth-toolkit's default prefix check would compare the audience
+# with http://web:8000/... and reject every such token.
+MCP_RESOURCE = 'https://data.etipitaka.com/mcp'
+
+
+def _bearer(api, tok):
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    return api
+
+
+def test_verify_accepts_token_bound_to_mcp_resource(api, alice):
+    tok = make_oauth_token(alice, resource=[MCP_RESOURCE])
+    resp = _bearer(api, tok).get('/api/oauth/verify/')
+    assert resp.status_code == 200 and resp.json()['username'] == alice.username
+
+
+def test_content_accepts_token_bound_to_mcp_resource(api, alice, media_tmp):
+    _seed_bookmarks(alice)
+    tok = make_oauth_token(alice, resource=[MCP_RESOURCE])
+    resp = _bearer(api, tok).get('/api/content/bookmarks/')
+    assert resp.status_code == 200 and resp.json()['count'] == 1
+
+
+def test_user_details_accepts_token_bound_to_mcp_resource(api, alice):
+    tok = make_oauth_token(alice, resource=[MCP_RESOURCE])
+    resp = _bearer(api, tok).get('/rest-auth/user/')
+    assert resp.status_code == 200 and resp.json()['username'] == alice.username
+
+
+def test_mcp_resource_follows_the_issuer(api, alice, settings):
+    settings.OAUTH_MCP_RESOURCE_URL = 'http://localhost:1338/mcp'
+    tok = make_oauth_token(alice, resource=['http://localhost:1338/mcp'])
+    assert _bearer(api, tok).get('/api/oauth/verify/').status_code == 200
+
+
+def test_verify_rejects_token_bound_to_foreign_resource(api, alice):
+    tok = make_oauth_token(alice, resource=['https://other.example/mcp'])
+    resp = _bearer(api, tok).get('/api/oauth/verify/')
+    assert resp.status_code == 401
+    assert 'invalid_token' in resp['WWW-Authenticate']
+
+
+def test_verify_rejects_lookalike_of_mcp_resource(api, alice):
+    for aud in ('https://data.etipitaka.com/mcp-evil',
+                'https://data.etipitaka.com.evil.example/mcp',
+                'http://data.etipitaka.com/mcp'):
+        tok = make_oauth_token(alice, resource=[aud])
+        assert _bearer(api, tok).get('/api/oauth/verify/').status_code == 401, aud
