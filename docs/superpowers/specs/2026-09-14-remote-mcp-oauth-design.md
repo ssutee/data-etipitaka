@@ -131,8 +131,11 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   clients) and its own `/o/.well-known/*` documents are deliberately not
   mounted. Because `oauth2_provider:detail` is therefore unmounted, the admin
   re-registers `Application` with `view_on_site = False`.
-- `GET /.well-known/oauth-authorization-server` → `oauth_views.as_metadata`, a
-  small JSON view (RFC 8414) built from the request host:
+- `GET /.well-known/oauth-authorization-server` → DOT's
+  `OAuthServerMetadataView` mounted at the site root (RFC 8414). It anchors
+  every URL on `OIDC_ISS_ENDPOINT` (never the request, so it advertises
+  `https` behind nginx) and filters the advertised lists through the same
+  RFC 9700 gates the server enforces. Example document:
 
   ```json
   {
@@ -145,11 +148,21 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
     "response_types_supported": ["code"],
     "grant_types_supported": ["authorization_code", "refresh_token"],
     "code_challenge_methods_supported": ["S256"],
-    "token_endpoint_auth_methods_supported": ["none", "client_secret_post"]
+    "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
+    "revocation_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
+    "introspection_endpoint": "https://data.etipitaka.com/o/introspect/",
+    "authorization_response_iss_parameter_supported": true,
+    "client_id_metadata_document_supported": false
   }
   ```
-  We serve this ourselves rather than enabling DOT's OIDC discovery, which
-  would require an RSA key and OIDC settings we do not need (YAGNI).
+  DOT's plain OAuth metadata view needs no OIDC/RSA setup. The lists come
+  from `OAUTH2_TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED` (`none` for public DCR
+  clients), `OAUTH2_RESPONSE_TYPES_SUPPORTED = ["code"]` and
+  `OAUTH2_GRANT_TYPES_SUPPORTED = ["authorization_code", "refresh_token"]`.
+  `OAUTH_ISSUER_URL` is normalised (`rstrip('/')`) once in settings, so the
+  metadata `issuer` and the RFC 9207 `iss` value are always identical. Only
+  DOT's `/o/.well-known/*` *location* is avoided (wrong issuer path), not its
+  view. The view also sends `Access-Control-Allow-Origin: *`.
 - `GET /api/oauth/verify/` → `oauth_views.verify` — the resource server's
   token check (Component 3 calls it). Authentication:
   `OAuth2Authentication` only; permission: `IsAuthenticated` (any valid,
@@ -385,8 +398,11 @@ well-known documents — **out of scope** until such a client is targeted.
 ## Testing
 
 **Django (`app/user_data/tests/test_oauth.py`, pytest-django):**
-- `/.well-known/oauth-authorization-server` returns the exact metadata (issuer
-  = request host, all endpoints, `S256`, `etipitaka:read`).
+- `/.well-known/oauth-authorization-server` returns the exact metadata
+  (issuer = `OIDC_ISS_ENDPOINT`, never the request host; all endpoints
+  anchored on it; `S256` only; `etipitaka:read`; `response_types ["code"]`;
+  `authorization_response_iss_parameter_supported: true`; `none` and
+  `client_secret_basic` in the token/revocation auth methods).
 - DCR: `POST /o/register/` creates an `Application` and returns `client_id`.
 - Authorization-code + PKCE end to end with the test client: log in, GET
   `/o/authorize/` renders consent, POST allow → code, `POST /o/token/` → access
@@ -436,6 +452,9 @@ run `whoami` and `list_bookmarks`.
   fixture before enabling.
 - Periodic expiry cleanup (`manage.py cleartokens`) — with open DCR and 30-day
   refresh tokens the token tables grow until this is scheduled.
+- Restricting the `client_credentials` and device-code grants server-side —
+  they stay enabled inside DOT (and registrable via DCR); the metadata simply
+  does not advertise them.
 - `registration_client_uri` in DCR responses is request-derived; forwarding
   `X-Forwarded-Proto` from the TLS terminator plus `SECURE_PROXY_SSL_HEADER`
   would make it `https`. Unused by the MCP flow, so cosmetic.
