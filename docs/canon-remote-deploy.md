@@ -60,29 +60,12 @@ curl -fsS 'https://data.etipitaka.com/api/canon/search/?edition=thaiwn&query=อ
 
 ## TLS termination in front of this stack
 
-This applies to the whole stack (not just canon), documented here because it
-uses the same production-override mechanism as step 2 above.
-
-The `nginx` container in this repo (`nginx/nginx.conf`) always sees plain
-HTTP -- in production, a **host-level nginx terminates TLS** and forwards to
-this container. That host proxy must:
-
-- set `proxy_set_header X-Forwarded-Proto $scheme;` on its forwarded
-  location(s), and
-- **overwrite** rather than pass through any client-supplied
-  `X-Forwarded-Proto`, since Django will trust whatever value it receives
-  once told to.
-
-Once that is confirmed on the host, enable `TRUST_PROXY_PROTO=1` for the
-`web` service via `docker-compose.override.yml` (the same gitignored,
-prod-side override file used for `CANON_RESOURCES_DIR` above) -- this turns
-on Django's `SECURE_PROXY_SSL_HEADER`. `TRUST_PROXY_PROTO` is intentionally
-not read from `.env`, since `.env` is tracked and shared with production.
-
-Until `TRUST_PROXY_PROTO` is enabled, dynamic client registration
-(`POST /o/register/`) hands clients back an `http://` `registration_client_uri`
-management URL alongside a `registration_access_token` bearer token, even
-though the request actually arrived over TLS.
+This applies to the whole stack (not just canon), and is documented
+separately: see
+[`docs/remote-mcp-oauth-deploy.md`](remote-mcp-oauth-deploy.md) for the
+full host-proxy contract (`X-Forwarded-Proto` and `X-Forwarded-For`),
+the `TRUST_PROXY_PROTO` opt-in, and what breaks if either header is
+missing.
 
 ## Notes
 

@@ -39,8 +39,9 @@ ALLOWED_HOSTS = ['data.etipitaka.com', '128.199.181.198', 'localhost', '127.0.0.
 # overwrites X-Forwarded-Proto (never passes through a client-supplied
 # value) -- otherwise a client can spoof this header and trick Django into
 # treating an insecure request as secure. Production opts in via its own
-# compose override once that proxy behaviour is confirmed.
-TRUST_PROXY_PROTO = os.environ.get('TRUST_PROXY_PROTO', '') == 'True'
+# compose override once that proxy behaviour is confirmed. Accepts the
+# values an operator would plausibly write (see docs/remote-mcp-oauth-deploy.md).
+TRUST_PROXY_PROTO = os.environ.get('TRUST_PROXY_PROTO', '').strip().lower() in ('1', 'true', 'yes')
 if TRUST_PROXY_PROTO:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
