@@ -145,6 +145,10 @@ def test_authorization_code_pkce_flow(client, alice):
     page = client.get('/o/authorize/', params)
     assert page.status_code == 200
     assert b'test-client' in page.content and b'name="allow"' in page.content
+    # Our branded consent page (extends the site's base.html), not DOT's stock
+    # template, which extends oauth2_provider/base.html instead.
+    assert 'base.html' in [t.name for t in page.templates]
+    assert b'navbar-brand' in page.content
 
     allowed = client.post('/o/authorize/', {**params, 'allow': 'Authorize'})
     assert allowed.status_code == 302
