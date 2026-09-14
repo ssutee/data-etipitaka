@@ -237,10 +237,12 @@ def test_content_accepts_oauth_bearer(oauth_alice, alice, media_tmp):
     assert resp.status_code == 200 and resp.json()['count'] == 1
 
 
-def test_content_oauth_without_scope_403(api, alice, media_tmp):
+def test_content_oauth_without_scope_403(api, alice):
     tok = make_oauth_token(alice, scope='')
     api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
-    assert api.get('/api/content/bookmarks/').status_code == 403
+    resp = api.get('/api/content/bookmarks/')
+    assert resp.status_code == 403
+    assert 'insufficient_scope' in resp['WWW-Authenticate']
 
 
 def test_content_drf_token_still_works(auth_alice, alice, media_tmp):
@@ -256,6 +258,24 @@ def test_content_anonymous_401_with_bearer_challenge(api):
 
 def test_summary_accepts_oauth_bearer(oauth_alice):
     assert oauth_alice.get('/api/content/summary/').status_code == 200
+
+
+def test_content_inactive_user_oauth_401(api, alice):
+    # Proves the content views use the active-user subclass, not plain
+    # OAuth2Authentication.
+    tok = make_oauth_token(alice)
+    alice.is_active = False
+    alice.save(update_fields=['is_active'])
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/content/bookmarks/')
+    assert resp.status_code == 401
+    assert 'invalid_token' in resp['WWW-Authenticate']
+
+
+def test_content_bogus_drf_token_still_401(api):
+    # TokenAuthentication still raises behind the OAuth authenticator.
+    api.credentials(HTTP_AUTHORIZATION='Token bogus')
+    assert api.get('/api/content/bookmarks/').status_code == 401
 
 
 def test_canon_still_public(api, canon_dir):
