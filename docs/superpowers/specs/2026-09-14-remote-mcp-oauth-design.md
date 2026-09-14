@@ -165,14 +165,22 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   view. The view also sends `Access-Control-Allow-Origin: *`.
 - `GET /api/oauth/verify/` → `oauth_views.verify` — the resource server's
   token check (Component 3 calls it). Authentication:
-  `OAuth2Authentication` only; permission: `IsAuthenticated` (any valid,
-  unexpired OAuth token). It does **not** enforce scope itself — it reports
+  `ActiveUserOAuth2Authentication` only — DOT's `OAuth2Authentication`
+  subclassed to also reject tokens whose user is inactive (DOT validates the
+  token, not the account; without this a deactivated user could keep
+  verifying and refreshing for the refresh-token lifetime); permission:
+  `IsAuthenticated` (any valid, unexpired OAuth token of an active user; a
+  user-less client-credentials token gets 403). It does **not** enforce
+  scope itself — it reports
   the token's scopes so the MCP SDK can enforce `required_scopes` and answer
   a scope-less token with **403 `insufficient_scope`** (see Error handling);
   `/api/content/*` enforces the scope independently. Returns
   `200 {"active": true, "username", "user_id", "scopes": [...],
-  "expires_at": <epoch>, "client_id"}`; an invalid/expired token yields DRF's
-  `401`. This is functionally the RFC 7662 introspection answer, obtained by
+  "expires_at": <epoch seconds>, "client_id"}` with `Cache-Control: no-store`;
+  `client_id` is always a string (`""` for a token without an application)
+  because the MCP side builds `AccessToken(client_id=str)` from it. An
+  invalid/expired token, a missing header, or an inactive user yields `401`
+  with a `WWW-Authenticate: Bearer` challenge. This is functionally the RFC 7662 introspection answer, obtained by
   simply forwarding the user's own token — no confidential "resource server"
   client or client-credentials mint is needed. (RFC 7662 `/o/introspect/`
   remains available from DOT but is not used.)
@@ -195,9 +203,11 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
 `app/user_data/oauth_permissions.py`, tests.
 
 **Change:**
-- `authentication_classes = (OAuth2Authentication, TokenAuthentication,
-  SessionAuthentication)` on every `/api/content/*` view (the
-  `_content_endpoint` factory and `summary`).
+- `authentication_classes = (ActiveUserOAuth2Authentication,
+  TokenAuthentication, SessionAuthentication)` on every `/api/content/*` view
+  (the `_content_endpoint` factory and `summary`) — the same inactive-user-
+  rejecting subclass the verify endpoint uses, so all three authenticators
+  agree that a deactivated account is rejected.
 - `permission_classes = (ScopedOrAuthenticated,)` — a small custom permission:
   - if `request.auth` is an OAuth access token (has a `scope` attribute) →
     allow only if it is valid for `etipitaka:read`;
