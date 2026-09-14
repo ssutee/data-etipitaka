@@ -13,22 +13,27 @@ from rest_framework.permissions import IsAuthenticated
 
 
 class ActiveUserOAuth2Authentication(OAuth2Authentication):
-    """OAuth2Authentication that also rejects tokens of deactivated users.
+    """OAuth2Authentication that also rejects tokens not bound to an active user.
 
     django-oauth-toolkit validates the token, not the account: a user set
     inactive after consenting would otherwise keep verifying (and refreshing)
-    for the refresh-token lifetime. DRF's Token/Session authenticators already
-    reject inactive users; this makes the OAuth path consistent.
+    for the refresh-token lifetime, and a client-credentials token (its
+    AccessToken.user is None) has no account to check at all. DRF's
+    Token/Session authenticators already reject inactive users; this makes
+    the OAuth path consistent for both cases.
     """
 
     def authenticate(self, request):
         result = super().authenticate(request)
-        if result is not None and not result[0].is_active:
+        user = result[0] if result is not None else None
+        if result is not None and (user is None or not user.is_active):
             request.oauth2_error = OrderedDict([
                 ('error', 'invalid_token'),
-                ('error_description', 'User inactive or deleted.'),
+                ('error_description',
+                 'The access token is not bound to an active user.'),
             ])
-            raise exceptions.AuthenticationFailed('User inactive or deleted.')
+            raise exceptions.AuthenticationFailed(
+                'The access token is not bound to an active user.')
         return result
 
 
@@ -41,7 +46,7 @@ def verify(request):
     Reports the token's scopes but does NOT enforce them: the MCP SDK enforces
     its required scope (answering 403 insufficient_scope) and /api/content/*
     enforces it again independently. A user-less token (client-credentials
-    grant) is rejected by IsAuthenticated with 403; the consumer treats any
+    grant) is rejected as invalid_token (401); the consumer treats any
     non-200 as invalid.
     """
     tok = request.auth  # oauth2_provider.models.AccessToken

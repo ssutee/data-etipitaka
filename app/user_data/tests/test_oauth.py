@@ -96,3 +96,20 @@ def test_verify_inactive_user_401(api, alice):
     resp = api.get('/api/oauth/verify/')
     assert resp.status_code == 401
     assert 'invalid_token' in resp['WWW-Authenticate']
+
+
+def test_verify_userless_token_401(api, db):
+    tok = make_oauth_token(None)  # client-credentials style: no user
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/oauth/verify/')
+    assert resp.status_code == 401
+    assert 'invalid_token' in resp['WWW-Authenticate']
+
+
+def test_verify_token_without_application_reports_empty_client_id(api, alice):
+    tok = make_oauth_token(alice)
+    tok.application = None
+    tok.save(update_fields=['application'])
+    api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
+    resp = api.get('/api/oauth/verify/')
+    assert resp.status_code == 200 and resp.json()['client_id'] == ''
