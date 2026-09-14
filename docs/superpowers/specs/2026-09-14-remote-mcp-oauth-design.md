@@ -106,7 +106,13 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   Open registration is the norm for MCP: any client may register, but a token
   still requires a real user to log in and consent.
 - `ACCESS_TOKEN_EXPIRE_SECONDS = 3600`;
-  `REFRESH_TOKEN_EXPIRE_SECONDS = 30 * 24 * 3600`; `ROTATE_REFRESH_TOKEN = True`.
+  `REFRESH_TOKEN_EXPIRE_SECONDS = 30 * 24 * 3600`; `ROTATE_REFRESH_TOKEN = True`;
+  `REFRESH_TOKEN_REUSE_PROTECTION = True`.
+- `OIDC_ISS_ENDPOINT = OAUTH_ISSUER_URL` (DOT's issuer knob, derived from the
+  same setting the metadata view uses — one source of truth) and the RFC 9700
+  gates `COMPLIANT_BCP_RFC9700_PKCE_METHOD`, `_IMPLICIT_GRANT`,
+  `_PASSWORD_GRANT`, `_ACCESS_TOKEN_TRANSPORT`, `_AUTHZ_RESPONSE_ISS` all
+  `True`, so the server enforces exactly what the metadata advertises.
 - `ALLOWED_REDIRECT_URI_SCHEMES = ["https", "http"]` as the baseline (`https`
   covers web-callback clients such as the Claude app; `http` covers loopback
   redirects in dev). DOT rejects a DCR redirect URI whose scheme is not in this
@@ -117,9 +123,14 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   Application, Grant, AccessToken, RefreshToken, IDToken).
 
 **URLs:**
-- `path("o/", include("oauth2_provider.urls", namespace="oauth2_provider"))` —
-  gives `/o/authorize/`, `/o/token/`, `/o/revoke_token/`, `/o/introspect/`,
-  `/o/register/`.
+- `path("o/", include((oauth2_urls.base_urlpatterns + oauth2_urls.dcr_urlpatterns,
+  "oauth2_provider"), namespace="oauth2_provider"))` — mounts **only** DOT's
+  base routes (`/o/authorize/`, `/o/token/`, `/o/revoke_token/`,
+  `/o/introspect/`) and DCR (`/o/register/`). DOT's application-management
+  UI (`/o/applications/…`, which would let any signed-in user create arbitrary
+  clients) and its own `/o/.well-known/*` documents are deliberately not
+  mounted. Because `oauth2_provider:detail` is therefore unmounted, the admin
+  re-registers `Application` with `view_on_site = False`.
 - `GET /.well-known/oauth-authorization-server` → `oauth_views.as_metadata`, a
   small JSON view (RFC 8414) built from the request host:
 
@@ -342,8 +353,18 @@ well-known documents — **out of scope** until such a client is targeted.
   metadata and clients send `resource=` per the MCP spec; DOT's support for
   binding issued tokens to that resource is limited, so v1 relies on scope +
   issuer checks. Recorded as a **hardening follow-up** (see Out of scope).
-- **Open DCR** cannot mint tokens by itself; abuse of `/o/register/` is bounded
-  by nginx/DRF throttling (the existing login throttle applies to `/login/`).
+- **Open DCR** cannot mint tokens by itself. Note that DOT's registration view
+  is a plain Django view, so DRF throttle rates do **not** apply to it, and
+  nginx has no `limit_req` today; rate limiting `/o/register/` and `/mcp` is a
+  recorded follow-up (see Out of scope). The existing login throttle still
+  protects `/login/`, which every token ultimately requires.
+- **RFC 9700 posture is enforced, not just advertised:** DOT's
+  `COMPLIANT_BCP_RFC9700_*` gates make PKCE S256-only, disable the implicit
+  and password grants, accept tokens only in headers, and emit RFC 9207 `iss`;
+  `REFRESH_TOKEN_REUSE_PROTECTION` revokes the whole token family when a
+  rotated refresh token is replayed. Only DOT's base + DCR routes are mounted —
+  its application-management UI and its own `/o/.well-known/*` documents are
+  not exposed.
 - The `mcp` service is not reachable except through nginx; it talks to Django
   over the internal compose network.
 - Existing DRF-token and session clients are **unaffected** (Component 2's
@@ -407,7 +428,17 @@ run `whoami` and `list_bookmarks`.
 - OpenID Connect / ID tokens; write scopes; more than one scope.
 - Browser-based MCP clients (CORS) — add `django-cors-headers` when needed.
 - Resource/audience-bound tokens beyond scope + issuer checks (hardening).
-- Rate limiting on `/mcp` and `/o/register/` beyond existing throttles.
+- Rate limiting on `/mcp` and `/o/register/` (DRF throttles do not cover
+  DOT's registration view; add an nginx `limit_req` zone or a Django-level
+  limiter).
+- Hashed token storage at rest (`COMPLIANT_BCP_RFC9700_TOKEN_STORAGE`, DOT
+  check W006) — deferred; evaluate against the direct-`AccessToken` test
+  fixture before enabling.
+- Periodic expiry cleanup (`manage.py cleartokens`) — with open DCR and 30-day
+  refresh tokens the token tables grow until this is scheduled.
+- `registration_client_uri` in DCR responses is request-derived; forwarding
+  `X-Forwarded-Proto` from the TLS terminator plus `SECURE_PROXY_SSL_HEADER`
+  would make it `https`. Unused by the MCP flow, so cosmetic.
 - Replacing the local stdio transport — it stays as the desktop path.
 - Migrating existing DRF tokens to OAuth — both keep working side by side.
 
