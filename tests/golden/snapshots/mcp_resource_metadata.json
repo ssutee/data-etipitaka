@@ -1,0 +1,20 @@
+{
+  "body": {
+    "json": {
+      "authorization_servers": [
+        "https://data.etipitaka.com/"
+      ],
+      "bearer_methods_supported": [
+        "header"
+      ],
+      "resource": "https://data.etipitaka.com/mcp",
+      "scopes_supported": [
+        "etipitaka:read"
+      ]
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}

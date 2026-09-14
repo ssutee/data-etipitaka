@@ -72,6 +72,11 @@ GOLDEN_CASES = [
     GoldenCase("canon_dictionary", "GET", "/api/canon/dictionary/?term=golden&dictionary=pali_thai&match=exact"),
     GoldenCase("canon_search_unknown_edition", "GET", "/api/canon/search/?edition=nope&query=x"),
 
+    # --- OAuth / remote MCP discovery (same-stack; deterministic JSON) ---
+    GoldenCase("oauth_as_metadata", "GET", "/.well-known/oauth-authorization-server"),
+    GoldenCase("mcp_resource_metadata", "GET", "/.well-known/oauth-protected-resource/mcp"),
+    GoldenCase("mcp_unauthenticated", "POST", "/mcp"),
+
     # --- file downloads (body stored as md5 by normalizer) ---
     GoldenCase("download_sync_data_alice", "GET", "/sync_data/sync_alice.json/", token=ALICE_TOKEN),
     GoldenCase("download_sync_data_404", "GET", "/sync_data/nope.json/", token=ALICE_TOKEN),

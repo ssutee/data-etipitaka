@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "error": "invalid_token",
+      "error_description": "Authentication required"
+    }
+  },
+  "headers": {
+    "content-type": "application/json",
+    "www-authenticate": "Bearer error=\"invalid_token\", error_description=\"Authentication required\", resource_metadata=\"https://data.etipitaka.com/.well-known/oauth-protected-resource/mcp\""
+  },
+  "status": 401
+}

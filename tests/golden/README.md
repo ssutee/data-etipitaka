@@ -43,6 +43,11 @@ English-only stack and are intentionally same-stack:
 - `sync_data_list_alice` was re-recorded (and is now same-stack): the golden
   seed adds a `bookmark.sqlite` SyncData row for alice to back the content-API
   snapshots, which the old stack's seed did not create.
+- The OAuth / remote-MCP discovery snapshots (`oauth_as_metadata`,
+  `mcp_resource_metadata`, `mcp_unauthenticated`) are same-stack — the
+  authorization server and the `mcp` service did not exist on the old stack.
+  They advertise the canonical production issuer (`OAUTH_ISSUER_URL`,
+  default `https://data.etipitaka.com`) regardless of the host under test.
 
 All other golden snapshots (JSON data, tokens, file downloads, status codes)
 are not localized and remain valid cross-stack regression checks.

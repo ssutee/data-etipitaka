@@ -1,0 +1,46 @@
+{
+  "body": {
+    "json": {
+      "authorization_endpoint": "https://data.etipitaka.com/o/authorize/",
+      "authorization_response_iss_parameter_supported": true,
+      "client_id_metadata_document_supported": false,
+      "code_challenge_methods_supported": [
+        "S256"
+      ],
+      "grant_types_supported": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "introspection_endpoint": "https://data.etipitaka.com/o/introspect/",
+      "introspection_endpoint_auth_methods_supported": [
+        "none",
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "issuer": "https://data.etipitaka.com",
+      "registration_endpoint": "https://data.etipitaka.com/o/register/",
+      "response_types_supported": [
+        "code"
+      ],
+      "revocation_endpoint": "https://data.etipitaka.com/o/revoke_token/",
+      "revocation_endpoint_auth_methods_supported": [
+        "none",
+        "client_secret_post",
+        "client_secret_basic"
+      ],
+      "scopes_supported": [
+        "etipitaka:read"
+      ],
+      "token_endpoint": "https://data.etipitaka.com/o/token/",
+      "token_endpoint_auth_methods_supported": [
+        "none",
+        "client_secret_post",
+        "client_secret_basic"
+      ]
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}
