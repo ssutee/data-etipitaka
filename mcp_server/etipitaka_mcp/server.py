@@ -1,3 +1,6 @@
+import functools
+
+import anyio.to_thread
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
@@ -11,6 +14,18 @@ from .verifier import DjangoTokenVerifier
 REQUIRED_SCOPE = 'etipitaka:read'
 
 cfg = load_config()
+
+
+async def _off_loop(fn, *args, **kwargs):
+    """Run a blocking REST call in a worker thread.
+
+    FastMCP invokes a synchronous tool body inline on the request's own task,
+    so a blocking HTTP call would stall every other session sharing the
+    worker. anyio copies the current context into the thread, so the
+    per-request bearer token still resolves inside it; a bare thread pool
+    would not, and would break that isolation.
+    """
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
 
 
 def _request_token():
@@ -111,89 +126,89 @@ def _lookup_dictionary(term, dictionary='pali_thai', match='exact', limit=20):
 
 # --- MCP tool registrations ---
 @mcp.tool()
-def list_bookmarks(platform: str | None = None, code: int | None = None,
+async def list_bookmarks(platform: str | None = None, code: int | None = None,
                    volume: int | None = None, page: int | None = None,
                    important: int | None = None, query: str | None = None,
                    limit: int = 50, offset: int = 0) -> dict:
     """List the user's bookmarks (canon locations with notes)."""
-    return _list_bookmarks(platform=platform, code=code, volume=volume, page=page,
-                           important=important, q=query, limit=limit, offset=offset)
+    return await _off_loop(_list_bookmarks, platform=platform, code=code, volume=volume,
+                           page=page, important=important, q=query, limit=limit, offset=offset)
 
 
 @mcp.tool()
-def list_highlights(platform: str | None = None, code: int | None = None,
+async def list_highlights(platform: str | None = None, code: int | None = None,
                     volume: int | None = None, page: int | None = None,
                     query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """List the user's highlighted passages (selected text + notes)."""
-    return _list_highlights(platform=platform, code=code, volume=volume, page=page,
-                            q=query, limit=limit, offset=offset)
+    return await _off_loop(_list_highlights, platform=platform, code=code, volume=volume,
+                           page=page, q=query, limit=limit, offset=offset)
 
 
 @mcp.tool()
-def list_tags(platform: str | None = None, query: str | None = None,
+async def list_tags(platform: str | None = None, query: str | None = None,
               limit: int = 50, offset: int = 0) -> dict:
     """List the user's tags."""
-    return _list_tags(platform=platform, q=query, limit=limit, offset=offset)
+    return await _off_loop(_list_tags, platform=platform, q=query, limit=limit, offset=offset)
 
 
 @mcp.tool()
-def list_history(platform: str | None = None, starred: int | None = None,
+async def list_history(platform: str | None = None, starred: int | None = None,
                  query: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     """List the user's search/reading history."""
-    return _list_history(platform=platform, starred=starred, q=query,
-                         limit=limit, offset=offset)
+    return await _off_loop(_list_history, platform=platform, starred=starred, q=query,
+                           limit=limit, offset=offset)
 
 
 @mcp.tool()
-def list_lexicon(platform: str | None = None, query: str | None = None,
+async def list_lexicon(platform: str | None = None, query: str | None = None,
                  limit: int = 50, offset: int = 0) -> dict:
     """List the user's saved dictionary (lexicon) terms."""
-    return _list_lexicon(platform=platform, q=query, limit=limit, offset=offset)
+    return await _off_loop(_list_lexicon, platform=platform, q=query, limit=limit, offset=offset)
 
 
 @mcp.tool()
-def get_summary() -> dict:
+async def get_summary() -> dict:
     """Per-type, per-platform counts of the user's data."""
-    return _get_summary()
+    return await _off_loop(_get_summary)
 
 
 @mcp.tool()
-def whoami() -> dict:
+async def whoami() -> dict:
     """The authenticated user's pk, username, email."""
-    return _whoami()
+    return await _off_loop(_whoami)
 
 
 @mcp.tool()
-def list_editions() -> dict:
+async def list_editions() -> dict:
     """Available canon editions (key, name, present) and dictionary keys."""
-    return _list_editions()
+    return await _off_loop(_list_editions)
 
 
 @mcp.tool()
-def search_canon(query: str, edition: str | None = None, volume: int | None = None,
+async def search_canon(query: str, edition: str | None = None, volume: int | None = None,
                  limit: int = 20, offset: int = 0) -> dict:
     """Substring-search one canon edition; returns matching pages with snippets."""
-    return _search_canon(query, edition=edition, volume=volume,
-                         limit=limit, offset=offset)
+    return await _off_loop(_search_canon, query, edition=edition, volume=volume,
+                           limit=limit, offset=offset)
 
 
 @mcp.tool()
-def get_passage(edition: str, volume: int, page: int) -> dict:
+async def get_passage(edition: str, volume: int, page: int) -> dict:
     """Full text of one canon page in the given edition."""
-    return _get_passage(edition, volume, page)
+    return await _off_loop(_get_passage, edition, volume, page)
 
 
 @mcp.tool()
-def resolve_reference(platform: str, code: int, volume: int, page: int) -> dict:
+async def resolve_reference(platform: str, code: int, volume: int, page: int) -> dict:
     """Resolve a personal item's (platform, code, volume, page) to canon text."""
-    return _resolve_reference(platform, code, volume, page)
+    return await _off_loop(_resolve_reference, platform, code, volume, page)
 
 
 @mcp.tool()
-def lookup_dictionary(term: str, dictionary: str = 'pali_thai',
+async def lookup_dictionary(term: str, dictionary: str = 'pali_thai',
                       match: str = 'exact', limit: int = 20) -> dict:
     """Look up a term in pali_thai / pali_english / thai; match exact|prefix|contains."""
-    return _lookup_dictionary(term, dictionary=dictionary, match=match, limit=limit)
+    return await _off_loop(_lookup_dictionary, term, dictionary=dictionary, match=match, limit=limit)
 
 
 def main():
