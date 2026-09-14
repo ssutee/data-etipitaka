@@ -70,13 +70,35 @@ Until it's enabled, dynamic client registration hands back an `http://`
 
 ## Rate limiting and throttled responses
 
-`nginx/nginx.conf` rate-limits `/mcp` and dynamic client registration
-(`/o/register/` and `/o/register`, both spellings — the per-client
-management URLs nested beneath registration, e.g. `/o/register/<id>/`, are
-not limited). A throttled request gets `429` with a `Retry-After` header and
-a small JSON body (`{"error":"rate_limited",...}`) instead of nginx's stock
-HTML error page, so a JSON-RPC client mid-session gets something it can
-parse and act on.
+`nginx/nginx.conf` rate-limits four public write/read paths:
+
+- `/mcp` — 10 req/s, burst 20.
+- `/o/register/` (dynamic client registration, both spellings — the
+  per-client management URLs nested beneath it, e.g. `/o/register/<id>/`,
+  are not limited) — 6 req/min, burst 5.
+- `/o/token/` (authorization-code exchange and refresh) — 30 req/min,
+  burst 5. A legitimate client hits this once per authorization and once
+  per refresh; anything faster is a client minting tokens in a loop.
+- `/api/oauth/verify/` — 10 req/s, burst 20, mirroring the `/mcp` limit.
+  The MCP container calls this endpoint on every tool call, but over the
+  internal docker network (`http://web:8000`), bypassing this proxy
+  entirely — so this limit exists only to stop the `/mcp` rate limit from
+  being routed around by hitting the resource-server check directly.
+
+A throttled request gets `429` with a `Retry-After` header and a small JSON
+body (`{"error":"rate_limited",...}`) instead of nginx's stock HTML error
+page, so a JSON-RPC client mid-session gets something it can parse and act
+on.
+
+## Token table growth — schedule `cleartokens`
+
+Dynamic client registration is open and refresh tokens are long-lived (30
+days), so `oauth2_provider`'s access/refresh/grant tables grow without
+bound under normal use, not just abuse. Schedule
+`docker compose exec -T web python manage.py cleartokens` to run
+periodically (e.g. daily via cron/systemd timer on the host) to prune
+expired tokens and grants. There is no cron process inside this compose
+stack today — the operator must add one.
 
 ## Recommended follow-up (not applied here — operator to confirm and apply)
 

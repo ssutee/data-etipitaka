@@ -3,13 +3,32 @@ from django.urls import include, path, re_path
 from django.views.generic import TemplateView
 from django.views.i18n import set_language
 from oauth2_provider import urls as oauth2_urls
-from oauth2_provider.views import OAuthServerMetadataView
+from oauth2_provider.views import (
+    AuthorizationView,
+    IntrospectTokenView,
+    OAuthServerMetadataView,
+    RevokeTokenView,
+    TokenView,
+)
 
 from user_data import views, auth_views
 from user_data import content_views
 from user_data import canon_views
 from user_data import oauth_views
 from user_data.auth_urls import rest_auth_patterns
+
+# Explicit allow-list, not oauth2_provider.urls.base_urlpatterns: that also
+# wires up the device-code grant (device-authorization/, device/,
+# device-confirm/<...>, device-grant-status/<...>), which this deployment
+# does not intend to serve -- it is untested, unmetered, and renders
+# django-oauth-toolkit's stock templates rather than this project's branded
+# consent page. Only mount the grants this deployment actually supports.
+oauth2_base_urlpatterns = [
+    path('authorize/', AuthorizationView.as_view(), name='authorize'),
+    path('token/', TokenView.as_view(), name='token'),
+    path('revoke_token/', RevokeTokenView.as_view(), name='revoke-token'),
+    path('introspect/', IntrospectTokenView.as_view(), name='introspect'),
+]
 
 urlpatterns = [
     path('', views.index_view),
@@ -41,7 +60,7 @@ urlpatterns = [
     path('api/canon/passage/', canon_views.passage),
     path('api/canon/resolve/', canon_views.resolve),
     path('api/canon/dictionary/', canon_views.dictionary),
-    path('o/', include((oauth2_urls.base_urlpatterns + oauth2_urls.dcr_urlpatterns,
+    path('o/', include((oauth2_base_urlpatterns + oauth2_urls.dcr_urlpatterns,
                         'oauth2_provider'), namespace='oauth2_provider')),
     path('.well-known/oauth-authorization-server', OAuthServerMetadataView.as_view()),
     path('api/oauth/verify/', oauth_views.verify),
