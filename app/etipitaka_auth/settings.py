@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/1.9/ref/settings/
 
 import os
 
+from django.utils.translation import gettext_lazy as _
+
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -74,8 +76,7 @@ OAUTH_ISSUER_URL = os.environ.get('OAUTH_ISSUER_URL', 'https://data.etipitaka.co
 
 OAUTH2_PROVIDER = {
     'SCOPES': {
-        'etipitaka:read': 'Read your E-Tipitaka bookmarks, highlights, tags, '
-                          'history and saved lexicon',
+        'etipitaka:read': _('Read your E-Tipitaka bookmarks, highlights, tags, history and saved lexicon'),
     },
     'DEFAULT_SCOPES': ['etipitaka:read'],
     'PKCE_REQUIRED': True,

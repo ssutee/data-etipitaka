@@ -208,3 +208,15 @@ def test_consent_page_never_interpolates_client_name(client, alice):
     assert page.status_code == 200
     assert b'ng-non-bindable' in page.content
     assert b'&lt;[7*7]&gt;' in page.content and b'<[7*7]>' not in page.content
+
+
+def test_consent_page_renders_in_thai(client, alice, settings):
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    _, challenge = _pkce()
+    client.force_login(alice)
+    client.cookies[settings.LANGUAGE_COOKIE_NAME] = 'th'
+    page = client.get('/o/authorize/', _authz_params(reg['client_id'], challenge))
+    assert page.status_code == 200
+    assert 'ปฏิเสธ'.encode() in page.content          # Deny (template string)
+    assert 'ที่คั่นหน้า'.encode() in page.content     # scope description (settings, gettext_lazy)

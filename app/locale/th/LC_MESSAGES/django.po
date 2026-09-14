@@ -369,3 +369,25 @@ msgstr "รหัสผ่านคล้ายกับ%(verbose_name)sมา�
 msgid "This password is too short. It must contain at least %d character."
 msgid_plural "This password is too short. It must contain at least %d characters."
 msgstr[0] "รหัสผ่านสั้นเกินไป ต้องมีอย่างน้อย %d ตัวอักษร"
+
+msgid "Authorize application"
+msgstr "อนุญาตแอปพลิเคชัน"
+
+#, python-format
+msgid "Allow \"%(name)s\" to access your E-Tipitaka data?"
+msgstr "อนุญาตให้ \"%(name)s\" เข้าถึงข้อมูล E-Tipitaka ของคุณหรือไม่"
+
+msgid "The application will be able to:"
+msgstr "แอปพลิเคชันนี้จะสามารถ:"
+
+msgid "Deny"
+msgstr "ปฏิเสธ"
+
+msgid "Allow"
+msgstr "อนุญาต"
+
+msgid "Error"
+msgstr "ข้อผิดพลาด"
+
+msgid "Read your E-Tipitaka bookmarks, highlights, tags, history and saved lexicon"
+msgstr "อ่านที่คั่นหน้า ไฮไลต์ แท็ก ประวัติ และคำศัพท์ที่บันทึกไว้ใน E-Tipitaka ของคุณ"
