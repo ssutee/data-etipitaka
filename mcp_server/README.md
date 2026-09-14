@@ -104,3 +104,26 @@ the token via the token file instead (see Configuration):
   }
 }
 ```
+
+## Remote use (mobile / any remote MCP client)
+
+The same tools are served remotely at `https://data.etipitaka.com/mcp` over
+Streamable HTTP, protected by OAuth 2.1 (dynamic client registration + PKCE):
+
+1. In the client, add a remote MCP connector with URL
+   `https://data.etipitaka.com/mcp`.
+2. The client discovers the authorization server automatically
+   (`/.well-known/oauth-protected-resource/mcp` →
+   `/.well-known/oauth-authorization-server`), registers itself, and opens the
+   login page — sign in with your E-Tipitaka account and press **Allow**.
+3. Done: personal-data tools run as you; canon tools are public.
+
+Tokens last 1 h and refresh automatically for 30 days. Revoke at any time via
+the client (it calls `/o/revoke_token/`). No local install or token file is
+needed for remote use — those apply only to the local stdio server above.
+
+Operators: the `mcp` compose service runs the remote server; nginx routes
+`/mcp` and the protected-resource metadata to it. `OAUTH_ISSUER_URL`
+(Django) and `ETIPITAKA_ISSUER_URL` / `ETIPITAKA_RESOURCE_URL` (mcp service)
+must name the public site. `tests/oauth_e2e.py` exercises the full flow
+against a running stack.
