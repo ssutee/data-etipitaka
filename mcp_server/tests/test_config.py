@@ -5,7 +5,7 @@ from etipitaka_mcp.config import Config, load_config
 ALL_VARS = ['ETIPITAKA_BASE_URL', 'ETIPITAKA_USERNAME', 'ETIPITAKA_PASSWORD',
             'ETIPITAKA_TOKEN', 'ETIPITAKA_DEFAULT_EDITION', 'ETIPITAKA_TRANSPORT',
             'ETIPITAKA_ISSUER_URL', 'ETIPITAKA_RESOURCE_URL', 'ETIPITAKA_HTTP_HOST',
-            'ETIPITAKA_HTTP_PORT', 'ETIPITAKA_ALLOWED_HOSTS']
+            'ETIPITAKA_HTTP_PORT', 'ETIPITAKA_ALLOWED_HOSTS', 'ETIPITAKA_ALLOWED_ORIGINS']
 
 
 def test_defaults(monkeypatch):
@@ -19,6 +19,7 @@ def test_defaults(monkeypatch):
     assert cfg.issuer_url is None and cfg.resource_url is None
     assert cfg.http_host == '0.0.0.0' and cfg.http_port == 8001
     assert cfg.allowed_hosts == ['localhost:*', '127.0.0.1:*', '[::1]:*']
+    assert cfg.allowed_origins == []
 
 
 def test_reads_env(monkeypatch):
@@ -31,6 +32,7 @@ def test_reads_env(monkeypatch):
     monkeypatch.setenv('ETIPITAKA_HTTP_HOST', '127.0.0.1')
     monkeypatch.setenv('ETIPITAKA_HTTP_PORT', '9000')
     monkeypatch.setenv('ETIPITAKA_ALLOWED_HOSTS', 'rs.example, localhost:*')
+    monkeypatch.setenv('ETIPITAKA_ALLOWED_ORIGINS', 'https://app.example, https://other.example')
     cfg = load_config()
     assert cfg.base_url == 'http://localhost:1338'
     assert cfg.username == 'alice'
@@ -41,6 +43,7 @@ def test_reads_env(monkeypatch):
     assert cfg.http_host == '127.0.0.1'
     assert cfg.http_port == 9000
     assert cfg.allowed_hosts == ['rs.example', 'localhost:*']
+    assert cfg.allowed_origins == ['https://app.example', 'https://other.example']
 
 
 def test_unknown_transport_raises(monkeypatch):

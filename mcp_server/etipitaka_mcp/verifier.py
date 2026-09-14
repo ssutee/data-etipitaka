@@ -50,6 +50,7 @@ class DjangoTokenVerifier:
         try:
             body = resp.json()
             if not body.get('active'):
+                log.warning('token verify got inactive for %s…', key[:8])
                 return None
             user_id = body.get('user_id')
             access = AccessToken(

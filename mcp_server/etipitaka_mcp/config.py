@@ -24,6 +24,12 @@ class Config:
     http_host: str = '0.0.0.0'
     http_port: int = 8001
     allowed_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+    # Browser-based MCP clients send an `Origin` header and need their site
+    # listed here to pass the SDK's DNS-rebinding check; a native client
+    # (this deployment's intended audience) sends no `Origin` and is
+    # unaffected either way. The empty default admits only such
+    # no-`Origin` clients — it does not open anything up.
+    allowed_origins: list[str] = field(default_factory=list)
 
 
 def _csv(value):
@@ -44,7 +50,7 @@ def load_config():
     try:
         http_port = int(raw_port)
     except ValueError:
-        raise ValueError(f'ETIPITAKA_HTTP_PORT must be an integer, got {raw_port!r}')
+        raise ValueError(f'ETIPITAKA_HTTP_PORT must be an integer, got {raw_port!r}') from None
 
     return Config(
         base_url=os.environ.get('ETIPITAKA_BASE_URL', 'https://data.etipitaka.com'),
@@ -59,4 +65,5 @@ def load_config():
         http_port=http_port,
         allowed_hosts=_csv(os.environ.get('ETIPITAKA_ALLOWED_HOSTS',
                                           ','.join(DEFAULT_ALLOWED_HOSTS))),
+        allowed_origins=_csv(os.environ.get('ETIPITAKA_ALLOWED_ORIGINS', '')),
     )

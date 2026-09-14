@@ -60,7 +60,8 @@ if cfg.transport == 'http':
         streamable_http_path='/mcp',
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=cfg.allowed_hosts),
+            allowed_hosts=cfg.allowed_hosts,
+            allowed_origins=cfg.allowed_origins),
     )
     _content = ContentClient(cfg.base_url, _request_token, scheme='Bearer')
 else:
