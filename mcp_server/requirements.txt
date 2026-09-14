@@ -2,7 +2,13 @@
 # session-owner binding, transport security, resource-validation) rests on
 # mcp SDK internals verified empirically against these versions, not on any
 # documented contract. They must not drift between image builds.
+# anyio is pinned here too: server.py imports anyio.to_thread directly, and
+# anyio.to_thread.run_sync's context copying is what keeps each caller's
+# bearer token bound to its own tool call across the worker-thread boundary
+# -- otherwise it would only reach the image transitively via the mcp SDK's
+# unbounded anyio>=4.5 floor.
 # Transitive dependencies are left to the resolver.
 mcp==1.30.0
 httpx==0.28.1
 uvicorn==0.52.4
+anyio==4.15.1

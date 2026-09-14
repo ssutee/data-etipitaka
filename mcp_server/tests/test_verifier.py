@@ -72,7 +72,7 @@ async def test_inactive_body_is_logged(httpx_mock, caplog):
     httpx_mock.add_response(url=VERIFY_URL, json={'active': False})
     with caplog.at_level('WARNING'):
         assert await DjangoTokenVerifier('http://d').verify_token('abc') is None
-    assert any('active' in rec.message for rec in caplog.records)
+    assert any('inactive' in rec.message for rec in caplog.records)
 
 
 async def test_server_error_is_none_and_logged(httpx_mock, caplog):
