@@ -78,6 +78,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_THROTTLE_RATES': {
         'login': '10/min',
+        'passkey': '20/min',
     },
 }
 
@@ -131,6 +132,23 @@ OAUTH2_PROVIDER = {
     'OAUTH2_RESPONSE_TYPES_SUPPORTED': ['code'],
     'OAUTH2_GRANT_TYPES_SUPPORTED': ['authorization_code', 'refresh_token'],
 }
+
+# Passkeys (WebAuthn). The relying-party ID and web origin default to the
+# public issuer; local browser testing overrides both (localhost) through the
+# gitignored docker-compose.override.yml, never the tracked .env. Android
+# values are set the same way in production. See
+# docs/superpowers/specs/2026-09-14-passkey-login-design.md.
+def _env_list(name, default=''):
+    return [v.strip() for v in os.environ.get(name, default).split(',') if v.strip()]
+
+
+PASSKEY_RP_ID = os.environ.get('PASSKEY_RP_ID', '')
+PASSKEY_WEB_ORIGIN = os.environ.get('PASSKEY_WEB_ORIGIN', '')
+PASSKEY_RP_NAME = 'E-Tipitaka'
+PASSKEY_IOS_APP_IDS = _env_list('PASSKEY_IOS_APP_IDS', 'A6DJDJ7527.com.watnapp.E-Tipitaka-Plus')
+PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')
+PASSKEY_ANDROID_CERT_SHA256 = _env_list('PASSKEY_ANDROID_CERT_SHA256')
+PASSKEY_CHALLENGE_TTL = 300  # seconds
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
@@ -250,3 +268,4 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
     # Disable login throttling under tests — the in-process throttle cache
     # would otherwise accumulate across test cases and trip false 429s.
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'] = None
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey'] = None
