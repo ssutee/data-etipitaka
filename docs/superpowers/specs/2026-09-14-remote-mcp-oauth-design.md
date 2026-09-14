@@ -191,7 +191,20 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
 requesting client's name and the human scope description in the site's i18n
 (Thai default, English via the existing `django_language` cookie), with
 Allow / Deny. DOT's `AuthorizationView` is login-required and redirects to the
-existing `/login/` (`LOGIN_URL`), so no new login UI.
+existing `/login/` (`LOGIN_URL`), so no new login UI. Details that matter:
+- The template extends the site's `base.html`, which boots AngularJS on
+  `<html>` with `<[ ]>` interpolation delimiters. Angular interpolates DOM
+  text after entity decoding, so autoescaping alone does not stop a
+  DCR-registered `client_name` such as `<[7*7]>` from being evaluated in the
+  consenting user's session. The consent container is therefore
+  `ng-non-bindable`, and a test registers such a client and asserts the name
+  is shown verbatim.
+- Deny is first in the DOM (Enter never grants); `form.errors` is rendered so
+  a tampered hidden field explains itself.
+- The six template strings and the scope description (`gettext_lazy` in
+  `OAUTH2_PROVIDER['SCOPES']`) have entries in the Thai catalog
+  (`app/locale/th/LC_MESSAGES/django.po`; `.mo` compiled by hand with
+  `msgfmt` and committed, as for the rest of the site).
 
 **Depends on:** the existing `User` model and login flow; DOT.
 
@@ -473,6 +486,9 @@ run `whoami` and `list_bookmarks`.
 - Restricting the `client_credentials` and device-code grants server-side —
   they stay enabled inside DOT (and registrable via DCR); the metadata simply
   does not advertise them.
+- Scoping `ng-app` in `base.html` to the pages that actually use AngularJS —
+  until then every template that extends it and renders free text must opt
+  out with `ng-non-bindable` (the consent page does).
 - `registration_client_uri` in DCR responses is request-derived; forwarding
   `X-Forwarded-Proto` from the TLS terminator plus `SECURE_PROXY_SSL_HEADER`
   would make it `https`. Unused by the MCP flow, so cosmetic.
