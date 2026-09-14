@@ -90,7 +90,8 @@ endpoint for the resource server.
 
 **Files:** `app/etipitaka_auth/settings.py`, `app/etipitaka_auth/urls.py`,
 `app/requirements.txt`, new `app/user_data/oauth_views.py`,
-`app/user_data/oauth_permissions.py`, template
+`app/user_data/oauth_authentication.py`, `app/user_data/oauth_permissions.py`,
+template
 `app/templates/oauth2_provider/authorize.html`.
 
 **Dependency:** `django-oauth-toolkit` — pin the current 3.x release that
@@ -165,7 +166,8 @@ version installs on Python 3.13 / Django 5.2 and exposes `/o/register/`).
   view. The view also sends `Access-Control-Allow-Origin: *`.
 - `GET /api/oauth/verify/` → `oauth_views.verify` — the resource server's
   token check (Component 3 calls it). Authentication:
-  `ActiveUserOAuth2Authentication` only — DOT's `OAuth2Authentication`
+  `ActiveUserOAuth2Authentication` (in `oauth_authentication.py`, shared
+  with Component 2) only — DOT's `OAuth2Authentication`
   subclassed to also reject tokens not bound to an active user: a user set
   inactive after consenting (DOT validates the token, not the account;
   without this a deactivated user could keep verifying and refreshing for the
@@ -215,7 +217,8 @@ session authenticate `/api/content/*`, without breaking the existing DRF-token
 (stdio/desktop) and session paths.
 
 **Files:** `app/user_data/content_views.py`, new
-`app/user_data/oauth_permissions.py`, tests.
+`app/user_data/oauth_permissions.py`, `app/user_data/oauth_authentication.py`
+(the authenticator Component 1's verify endpoint uses), tests.
 
 **Change:**
 - `authentication_classes = (ActiveUserOAuth2Authentication,
