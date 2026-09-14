@@ -1,8 +1,11 @@
+import json
+
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from user_data.models import UserData, SyncData, Sharing
 from user_data.tests.conftest import make_syncdata, make_userdata
+from user_data.tests.test_oauth import DCR_BODY, _authz_params, _pkce
 
 pytestmark = pytest.mark.django_db
 
@@ -332,6 +335,113 @@ def test_login_view_get_with_email_param(api):
     resp = api.get('/login/?email=confirm')
     assert resp.status_code == 200
     assert resp.context['confirm_email'] is True
+
+
+# --- login_view: honouring `next` (open-redirect safe) ---
+
+def test_login_view_post_with_safe_next_redirects_there(api, alice):
+    next_url = '/o/authorize/?client_id=abc123&response_type=code'
+    resp = api.post('/login/', {
+        'username': 'alice', 'password': 'alicepass123', 'next': next_url,
+    })
+    assert resp.status_code == 302
+    assert resp['Location'] == next_url
+
+
+def test_login_view_post_with_external_next_falls_back_to_root(api, alice):
+    resp = api.post('/login/', {
+        'username': 'alice', 'password': 'alicepass123',
+        'next': 'https://evil.example/steal',
+    })
+    assert resp.status_code == 302
+    assert resp['Location'] == '/'
+
+
+def test_login_view_post_without_next_redirects_root(api, alice):
+    resp = api.post('/login/', {'username': 'alice', 'password': 'alicepass123'})
+    assert resp.status_code == 302
+    assert resp['Location'] == '/'
+
+
+def test_login_view_invalid_credentials_preserves_next(api, alice):
+    resp = api.post('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc', {
+        'username': 'alice', 'password': 'wrong',
+    })
+    assert resp.status_code == 200
+    assert resp.context['invalid_login'] is True
+    assert resp.context['next'] == '/o/authorize/?client_id=abc'
+
+
+def test_login_view_disabled_account_preserves_next(api, monkeypatch):
+    from django.contrib.auth.models import User
+    from user_data import views as views_module
+    user = User(username='pending', email='p@example.com', is_active=False)
+    user.set_password('pw12345678')
+    user.save()
+    monkeypatch.setattr(views_module, 'authenticate', lambda **kw: user)
+    resp = api.post('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc', {
+        'username': 'pending', 'password': 'pw12345678',
+    })
+    assert resp.status_code == 200
+    assert resp.context['disabled_account'] is True
+    assert resp.context['next'] == '/o/authorize/?client_id=abc'
+
+
+def test_login_view_get_preserves_next_in_context(api):
+    resp = api.get('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc')
+    assert resp.status_code == 200
+    assert resp.context['next'] == '/o/authorize/?client_id=abc'
+
+
+def _login_form_html(resp):
+    # base.html's language-switcher form also has a hidden `name="next"`
+    # field (unrelated, always present), so scope the check to the actual
+    # login form (`id="signup"`) rather than the whole rendered page.
+    content = resp.content.decode()
+    start = content.index('id="signup"')
+    end = content.index('</form>', start)
+    return content[start:end]
+
+
+def test_login_form_renders_hidden_next_field_when_present(api):
+    resp = api.get('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc')
+    assert resp.status_code == 200
+    form_html = _login_form_html(resp)
+    assert 'name="next"' in form_html
+    assert '/o/authorize/?client_id=abc' in form_html
+
+
+def test_login_form_omits_hidden_next_field_when_absent(api):
+    resp = api.get('/login/')
+    assert resp.status_code == 200
+    assert 'name="next"' not in _login_form_html(resp)
+
+
+def test_anonymous_authorize_then_login_lands_back_on_authorize(client, alice):
+    # The ordering the current suite misses: an anonymous GET of /o/authorize/
+    # redirects to login carrying the full authorization request in `next`;
+    # logging in from there must land back on /o/authorize/, not on /.
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    _, challenge = _pkce()
+    params = _authz_params(cid, challenge)
+
+    anon = client.get('/o/authorize/', params)
+    assert anon.status_code == 302
+    assert anon['Location'].startswith('/login/?next=')
+
+    login_page = client.get(anon['Location'])
+    assert login_page.status_code == 200
+    next_value = login_page.context['next']
+    assert next_value.startswith('/o/authorize/')
+
+    logged_in = client.post('/login/', {
+        'username': 'alice', 'password': 'alicepass123', 'next': next_value,
+    })
+    assert logged_in.status_code == 302
+    assert logged_in['Location'].startswith('/o/authorize/')
+    assert logged_in['Location'] != '/'
 
 
 def _write_media(media_root, rel_name, content):

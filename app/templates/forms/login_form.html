@@ -1,6 +1,9 @@
 {% load i18n %}
 <div>
 <form class="form-horizontal" id="signup" role="form" method="post" action="/login/">{% csrf_token %}
+  {% if next %}
+  <input type="hidden" name="next" value="{{ next }}">
+  {% endif %}
   {% if confirm_email %}
   <div class="form-group row">
     <div class="col-sm-offset-2 col-sm-10">

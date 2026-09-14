@@ -5,6 +5,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.core import serializers
 from django.db.models import Q
+from django.utils.http import url_has_allowed_host_and_scheme
 
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
@@ -217,21 +218,42 @@ def index_view(request):
         return HttpResponseRedirect('/user_data/')
     return render(request, 'index.html', {})
 
+def _safe_redirect_target(request, next_url):
+    """Validate `next` against the current host; unsafe or absent falls back to '/'.
+
+    This is the only thing standing between this view and an open redirect,
+    so it is deliberately strict: relative paths and same-host absolute URLs
+    only, matching the request's own scheme requirement.
+    """
+    if next_url and url_has_allowed_host_and_scheme(
+            next_url, allowed_hosts={request.get_host()},
+            require_https=request.is_secure()):
+        return next_url
+    return '/'
+
+
 def login_view(request):
+    # /o/authorize/ is login-required, so an unauthenticated user arrives here
+    # via Django's login_required redirect carrying the whole authorization
+    # request in `next`. Honour it (safely) so the first connection attempt
+    # from a logged-out client doesn't dead-end at '/'.
+    next_url = request.POST.get('next') or request.GET.get('next') or ''
     if request.method == 'POST':
         username = request.POST['username']
         password = request.POST['password']
         user = authenticate(username=username, password=password)
         if user is not None:
             if user.is_active:
-                login(request, user) 
-                return HttpResponseRedirect('/')
+                login(request, user)
+                return HttpResponseRedirect(_safe_redirect_target(request, next_url))
             else:
-                return render(request, 'login.html', {'disabled_account': True})
+                return render(request, 'login.html', {'disabled_account': True, 'next': next_url})
         else:
-            return render(request, 'login.html', {'invalid_login': True})
+            return render(request, 'login.html', {'invalid_login': True, 'next': next_url})
 
     context = {}
     if request.GET.get('email'):
         context['confirm_email'] = True
+    if next_url:
+        context['next'] = next_url
     return render(request, 'login.html', context)
