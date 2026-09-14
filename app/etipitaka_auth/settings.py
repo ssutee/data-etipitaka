@@ -32,6 +32,18 @@ FILE_SERVER = 'data.etipitaka.com'
 
 ALLOWED_HOSTS = ['data.etipitaka.com', '128.199.181.198', 'localhost', '127.0.0.1', 'web']
 
+# Trust the X-Forwarded-Proto header set by the reverse proxy to determine
+# whether a request is secure (affects request.is_secure(), redirects, and
+# oauth2_provider's registration_client_uri for dynamic client registration).
+# Off by default: enable only when the front-most proxy unconditionally
+# overwrites X-Forwarded-Proto (never passes through a client-supplied
+# value) -- otherwise a client can spoof this header and trick Django into
+# treating an insecure request as secure. Production opts in via its own
+# compose override once that proxy behaviour is confirmed.
+TRUST_PROXY_PROTO = os.environ.get('TRUST_PROXY_PROTO', '') == 'True'
+if TRUST_PROXY_PROTO:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 
 # Application definition
 
