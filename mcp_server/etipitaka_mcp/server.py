@@ -49,7 +49,9 @@ if cfg.transport == 'http':
             issuer_url=cfg.issuer_url,
             resource_server_url=cfg.resource_url,
             required_scopes=[REQUIRED_SCOPE],
-            # v1 relies on scope + issuer; DOT tokens carry no resource claim.
+            # This deployment's clients never send a `resource` parameter and
+            # the verify endpoint returns none, so there's nothing to
+            # propagate; set AccessToken.resource and flip this if that changes.
             validate_token_resource=False,
         ),
         token_verifier=DjangoTokenVerifier(cfg.base_url),

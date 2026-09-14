@@ -1,6 +1,10 @@
 import httpx
 
 
+class ContentAPIError(RuntimeError):
+    """A Content API call failed. Carries no internal URL."""
+
+
 class ContentClient:
     """Calls the Django Content REST API with a caller-supplied credential.
 
@@ -29,7 +33,15 @@ class ContentClient:
         if resp.status_code == 401 and self.refresh is not None:
             resp = httpx.get(url, params=clean, headers=self._headers(self.refresh()),
                              timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            if resp.status_code == 401:
+                raise ContentAPIError(
+                    '%s: the access token was rejected (401); refresh it '
+                    'and retry.' % path) from None
+            raise ContentAPIError(
+                '%s: request failed (status %d).' % (path, resp.status_code)) from None
         return resp.json()
 
     def list_bookmarks(self, **params):

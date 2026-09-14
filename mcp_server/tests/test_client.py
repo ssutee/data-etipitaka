@@ -1,8 +1,7 @@
-import httpx
 import pytest
 
 from etipitaka_mcp.auth import Authenticator
-from etipitaka_mcp.client import CanonClient, ContentClient
+from etipitaka_mcp.client import CanonClient, ContentAPIError, ContentClient
 
 
 def _auth(tmp_path, token='TOK'):
@@ -35,9 +34,25 @@ def test_refreshes_once_on_401(tmp_path, httpx_mock):
 def test_bearer_scheme_without_refresh_raises_on_401(httpx_mock):
     httpx_mock.add_response(url='http://x/api/content/summary/', status_code=401)
     client = ContentClient('http://x', lambda: 'ACCESS', scheme='Bearer')
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(ContentAPIError) as exc_info:
         client.get_summary()
     assert httpx_mock.get_requests()[0].headers['Authorization'] == 'Bearer ACCESS'
+    msg = str(exc_info.value)
+    assert 'refresh' in msg.lower()
+    assert 'http://' not in msg
+    assert 'x' not in msg
+
+
+def test_content_client_500_raises_content_api_error_without_url(httpx_mock):
+    httpx_mock.add_response(url='http://x/api/content/bookmarks/', status_code=500)
+    client = ContentClient('http://x', lambda: 'TOK')
+    with pytest.raises(ContentAPIError) as exc_info:
+        client.list_bookmarks()
+    msg = str(exc_info.value)
+    assert '500' in msg
+    assert '/api/content/bookmarks/' in msg
+    assert 'http://' not in msg
+    assert 'x' not in msg
 
 
 def test_canon_client_no_auth_header_and_drops_none(httpx_mock):

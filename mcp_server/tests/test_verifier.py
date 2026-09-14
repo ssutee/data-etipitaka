@@ -82,3 +82,17 @@ async def test_cache_hit_scopes_are_independent_copies(httpx_mock):
     first.scopes.append('mutated:scope')
     second = await v.verify_token('abc')
     assert second.scopes == ['etipitaka:read']
+
+
+async def test_subject_set_from_user_id(httpx_mock):
+    httpx_mock.add_response(url=VERIFY_URL, json=OK_BODY)
+    tok = await DjangoTokenVerifier('http://d').verify_token('abc')
+    assert tok.subject == '1'
+
+
+async def test_subject_none_when_user_id_absent(httpx_mock):
+    body = {k: v for k, v in OK_BODY.items() if k != 'user_id'}
+    httpx_mock.add_response(url=VERIFY_URL, json=body)
+    tok = await DjangoTokenVerifier('http://d').verify_token('abc')
+    assert tok is not None
+    assert tok.subject is None

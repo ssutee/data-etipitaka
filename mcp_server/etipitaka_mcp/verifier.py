@@ -51,11 +51,13 @@ class DjangoTokenVerifier:
             body = resp.json()
             if not body.get('active'):
                 return None
+            user_id = body.get('user_id')
             access = AccessToken(
                 token=token,
                 client_id=body.get('client_id') or '',
                 scopes=list(body.get('scopes') or []),
                 expires_at=body.get('expires_at'),
+                subject=str(user_id) if user_id is not None else None,
             )
         except Exception as exc:
             log.warning('token verify got malformed body (%s) for %s…',
