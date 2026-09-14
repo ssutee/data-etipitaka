@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Authorize application" %}{% endblock %}
+
+{% block body %}
+<div class="container">
+  {% if not error %}
+  <h1>{% blocktrans with name=application.name %}Allow "{{ name }}" to access your E-Tipitaka data?{% endblocktrans %}</h1>
+  <p>{% trans "The application will be able to:" %}</p>
+  <ul>
+    {% for scope in scopes_descriptions %}<li>{{ scope }}</li>{% endfor %}
+  </ul>
+  <form method="post" action="{% url 'oauth2_provider:authorize' %}">
+    {% csrf_token %}
+    {% for field in form %}{% if field.is_hidden %}{{ field }}{% endif %}{% endfor %}
+    <button type="submit" class="btn btn-primary" name="allow" value="Authorize">{% trans "Allow" %}</button>
+    <button type="submit" class="btn btn-default">{% trans "Deny" %}</button>
+  </form>
+  {% else %}
+  <h1>{% trans "Error" %}: {{ error.error }}</h1>
+  <p>{{ error.description }}</p>
+  {% endif %}
+</div>
+{% endblock %}

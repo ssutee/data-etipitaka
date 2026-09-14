@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """OAuth 2.1 Authorization Server (django-oauth-toolkit) + MCP resource support."""
+import base64
+import hashlib
 import json
+import secrets
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from oauth2_provider.models import Application
@@ -113,3 +117,55 @@ def test_verify_token_without_application_reports_empty_client_id(api, alice):
     api.credentials(HTTP_AUTHORIZATION='Bearer ' + tok.token)
     resp = api.get('/api/oauth/verify/')
     assert resp.status_code == 200 and resp.json()['client_id'] == ''
+
+
+def _pkce():
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
+    return verifier, challenge
+
+
+def test_authorization_code_pkce_flow(client, alice):
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    verifier, challenge = _pkce()
+    params = {
+        'response_type': 'code', 'client_id': cid,
+        'redirect_uri': 'https://app.example/cb', 'scope': 'etipitaka:read',
+        'state': 'xyz', 'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+    }
+    # Anonymous -> redirected to the site login page.
+    anon = client.get('/o/authorize/', params)
+    assert anon.status_code == 302 and anon['Location'].startswith('/login/')
+
+    client.force_login(alice)
+    page = client.get('/o/authorize/', params)
+    assert page.status_code == 200
+    assert b'test-client' in page.content and b'name="allow"' in page.content
+
+    allowed = client.post('/o/authorize/', {**params, 'allow': 'Authorize'})
+    assert allowed.status_code == 302
+    loc = urlparse(allowed['Location'])
+    assert loc.netloc == 'app.example'
+    qs = parse_qs(loc.query)
+    assert qs['state'] == ['xyz']
+    code = qs['code'][0]
+
+    tok = client.post('/o/token/', {
+        'grant_type': 'authorization_code', 'code': code,
+        'redirect_uri': 'https://app.example/cb', 'client_id': cid,
+        'code_verifier': verifier,
+    })
+    assert tok.status_code == 200, tok.content
+    body = tok.json()
+    assert body['token_type'].lower() == 'bearer'
+    assert body['scope'] == 'etipitaka:read'
+    assert body['access_token'] and body['refresh_token']
+
+    # The issued token is accepted by the verify endpoint.
+    ok = client.get('/api/oauth/verify/',
+                    HTTP_AUTHORIZATION='Bearer ' + body['access_token'])
+    assert ok.status_code == 200 and ok.json()['username'] == 'alice'
