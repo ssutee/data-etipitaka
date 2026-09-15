@@ -277,7 +277,10 @@ def check_password(user, password):
     non-str value (e.g. an int from a loosely-typed JSON body), an empty
     string, or a lone UTF-16 surrogate -- valid JSON decodes straight into
     such a str, but str.encode('utf-8') on it raises UnicodeEncodeError deep
-    inside the password hasher. Also used by passkey_manage.remove_password.
+    inside the password hasher. Public (no underscore) because
+    passkey_manage.remove_password must call this too, rather than
+    checking the password itself, so the two places that can prove
+    possession of the password can't drift apart.
     """
     if not isinstance(password, str) or not password:
         return False
@@ -297,24 +300,41 @@ def begin_login():
         user_verification=UserVerificationRequirement.REQUIRED))
 
 
-def _log_assertion_failure(passkey, exc):
+def _log_assertion_failure(exc, passkey, parsed, challenge, rp_id, expected_origin):
     """Log a rejected assertion.
 
     A non-increasing sign counter can mean a cloned authenticator and is
-    worth an operator's attention, so it alone is logged at WARNING --
-    matched by the library's own message prefix, since equality would
-    require trusting the (at that point still unverified) counter values.
-    The message is truncated before logging because the counter check runs
-    before the signature is checked, so it can still embed attacker-chosen
-    numbers. Every other rejection is routine and gets INFO with just the
-    exception's type name, never its message.
+    worth an operator's attention -- but py_webauthn checks the counter
+    before the signature, so a forged assertion (a different key, the
+    victim's credential id and user handle, and a low counter) trips the
+    very same message without the signature ever being checked, let alone
+    proving who signed it. So WARNING is only logged once the signature is
+    independently confirmed genuine, by re-running verification with
+    credential_current_sign_count=0 so the counter check cannot fail a
+    second time; that re-verify is wrapped in the same wide except tuple as
+    the first, since a corrupt stored key could still make it raise too.
+    Once the signature is confirmed, the counter values in `exc` are known
+    genuine (they are part of the signed authenticatorData) and safe to
+    log. Every other outcome -- including a re-verify that itself fails --
+    is routine and gets INFO with just the exception's type name, never a
+    message that could otherwise embed attacker-chosen numbers.
     """
     if isinstance(exc, WebAuthnException) and str(exc).startswith(_COUNTER_REGRESSION_PREFIX):
-        log.warning('passkey assertion rejected for passkey %s: possible cloned '
-                    'authenticator (%r)', passkey.pk, str(exc)[:200])
-    else:
-        log.info('passkey assertion rejected for passkey %s: %s',
-                 passkey.pk, type(exc).__name__)
+        try:
+            verify_authentication_response(
+                credential=parsed, expected_challenge=challenge,
+                expected_rp_id=rp_id, expected_origin=expected_origin,
+                credential_public_key=bytes(passkey.public_key),
+                credential_current_sign_count=0, require_user_verification=True)
+        except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
+                AttributeError):
+            pass
+        else:
+            log.warning('passkey assertion rejected for passkey %s: possible cloned '
+                        'authenticator (%s)', passkey.pk, exc)
+            return
+    log.info('passkey assertion rejected for passkey %s: %s',
+             passkey.pk, type(exc).__name__)
 
 
 def _verify_assertion(challenge_id, credential, owner=None):
@@ -373,20 +393,29 @@ def _verify_assertion(challenge_id, credential, owner=None):
             require_user_verification=True)
     except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
             AttributeError) as exc:
-        _log_assertion_failure(passkey, exc)
+        _log_assertion_failure(exc, passkey, parsed, row.challenge, rp_id, expected_origin)
         raise InvalidCredentials() from exc
-    # A conditional update, not passkey.save(): two concurrent assertions
-    # must not let whichever reaches here later lower a counter the other
-    # already advanced, and if the row was deleted between the lookup above
-    # and here (e.g. a concurrent passkey removal), save() could silently
-    # re-INSERT it -- update() instead affects zero rows and we can tell.
+    # A conditional update, not passkey.save(update_fields=...): two
+    # concurrent assertions must not let whichever reaches here later lower
+    # a counter the other already advanced, and if the row was deleted
+    # between the lookup above and here (e.g. a concurrent passkey
+    # removal), save(update_fields=...) would raise DatabaseError (a 500)
+    # instead of the clean InvalidCredentials a vanished credential
+    # deserves -- update() instead affects zero rows and we can tell.
     now = timezone.now()
     updated = Passkey.objects.filter(pk=passkey.pk).update(
         sign_count=Greatest(F('sign_count'), verified.new_sign_count),
         backed_up=verified.credential_backed_up, last_used_at=now)
     if not updated:
         raise InvalidCredentials()
-    passkey.refresh_from_db(fields=['sign_count', 'backed_up', 'last_used_at'])
+    # Set the fields locally rather than refresh_from_db(): the row could
+    # be deleted between the update above and a refresh, which would raise
+    # Passkey.DoesNotExist instead of the InvalidCredentials this function
+    # promises. Greatest() is mirrored here with max() so the in-memory
+    # value matches what was actually written.
+    passkey.sign_count = max(passkey.sign_count, verified.new_sign_count)
+    passkey.backed_up = verified.credential_backed_up
+    passkey.last_used_at = now
     return passkey
 
 
@@ -396,7 +425,10 @@ def finish_login(challenge_id, credential):
     if not user.is_active:
         raise InactiveUser()
     # A plain queryset update, not update_last_login()'s user.save(): if the
-    # user row were ever deleted concurrently, save() could re-INSERT it.
+    # user row were ever deleted concurrently, save(update_fields=...)
+    # would raise DatabaseError instead of just not recording the login.
+    # _verify_assertion already returned this passkey/user without
+    # re-reading either row, so nothing here re-reads the passkey either.
     now = timezone.now()
     get_user_model().objects.filter(pk=user.pk).update(last_login=now)
     user.last_login = now

@@ -12,7 +12,7 @@ from user_data.models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from user_data.passkey_config import android_origin
 
 from .conftest import add_passkey, login_assertion
-from .soft_authenticator import SoftAuthenticator, b64url
+from .soft_authenticator import SoftAuthenticator, b64url, unb64url
 
 pytestmark = pytest.mark.django_db
 
@@ -510,17 +510,19 @@ def test_finish_login_failed_verify_still_consumes_challenge(alice, authenticato
         service.finish_login(challenge_id, good_credential)
 
 
-def test_finish_login_rejects_challenge_of_wrong_purpose_when_user_matches(authenticator):
-    """The purpose column alone must gate a login challenge. A signup
-    challenge is, like a login challenge, issued with user=None, so this
-    isolates the purpose filter from the separate user filter that
-    test_register_challenge_cannot_finish_login also exercises (a register
-    challenge belongs to a user, which is a second reason it should fail)."""
+def test_finish_login_rejects_challenge_of_wrong_purpose_when_user_matches(alice, authenticator):
+    """The purpose column alone must gate a login challenge. The passkey is
+    genuinely registered and the assertion uses the authenticator's real
+    (matching) user handle, so everything else about this attempt would
+    succeed -- isolating the purpose filter from the separate user filter
+    that test_register_challenge_cannot_finish_login also exercises (a
+    register challenge belongs to a user, a second reason it fails). A
+    signup challenge is, like a login challenge, issued with user=None."""
+    add_passkey(alice, authenticator)
     row = challenges.create(WebAuthnChallenge.SIGNUP)
     options = {'challenge': b64url(bytes(row.challenge)), 'rpId': 'data.etipitaka.com'}
-    credential = authenticator.assert_(options, user_handle=secrets.token_bytes(32))
     with pytest.raises(service.InvalidCredentials):
-        service.finish_login(row.id, credential)
+        service.finish_login(row.id, authenticator.assert_(options))
 
 
 # --- crafted / hostile login assertions --------------------------------
@@ -611,10 +613,11 @@ def test_finish_login_rejects_very_long_credential_id(alice, authenticator):
 
 # --- usage recording is race-safe -------------------------------------------
 # The sign_count/backed_up/last_used_at update, and the last_login update,
-# go through a conditional queryset .update() rather than instance.save():
-# a concurrent request must not be able to lower the counter, and a row
-# deleted between verification and the update must not be silently
-# resurrected by save()'s fall-back-to-insert-on-zero-rows behaviour.
+# go through a conditional queryset .update() rather than
+# instance.save(update_fields=...): a concurrent request must not be able
+# to lower the counter, and a row deleted between verification and the
+# update must raise this module's own InvalidCredentials, not the raw
+# DatabaseError save(update_fields=...) would raise for a zero-row update.
 
 def test_finish_login_race_deleted_passkey_raises_invalid_credentials(alice, authenticator,
                                                                        monkeypatch):
@@ -664,6 +667,31 @@ def test_finish_login_logs_counter_regression_at_warning(alice, authenticator, c
         with pytest.raises(service.InvalidCredentials):
             service.finish_login(*login_assertion(authenticator, sign_count=3))
     assert any(r.levelname == 'WARNING' for r in caplog.records)
+
+
+def test_finish_login_forged_counter_regression_does_not_log_warning(alice, authenticator,
+                                                                      caplog):
+    """py_webauthn checks the counter before the signature, so a forged
+    assertion -- a different key, the victim's real credential id and user
+    handle, and a low counter -- trips the exact same counter-regression
+    message the genuine case does, without its signature ever being
+    genuine. It must still be rejected, but only ever logged at INFO."""
+    passkey = add_passkey(alice, authenticator)
+    service.finish_login(*login_assertion(authenticator))  # bumps sign_count above 0
+    passkey.refresh_from_db()
+    assert passkey.sign_count > 0
+
+    forger = SoftAuthenticator()  # a different private key than alice's real passkey
+    forger.credential_id = unb64url(passkey.credential_id)
+    forger.user_handle = bytes(PasskeyUserHandle.objects.get(user=alice).handle)
+    challenge_id, options = service.begin_login()
+    forged_credential = forger.assert_(options, sign_count=0)
+
+    with caplog.at_level('INFO', logger='user_data.passkey_service'):
+        with pytest.raises(service.InvalidCredentials):
+            service.finish_login(challenge_id, forged_credential)
+    assert not any(r.levelname == 'WARNING' for r in caplog.records)
+    assert any(r.levelname == 'INFO' for r in caplog.records)
 
 
 def test_finish_login_bad_signature_does_not_log_warning(alice, authenticator, caplog):
