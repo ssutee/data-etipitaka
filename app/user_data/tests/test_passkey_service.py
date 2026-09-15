@@ -794,3 +794,140 @@ def test_step_up_rejects_other_users_passkey(alice, bob, authenticator):
 def test_step_up_rejects_missing_or_bad_assertion(alice, assertion):
     with pytest.raises(service.StepUpFailed):
         service.verify_step_up(alice, assertion=assertion)
+
+
+# --- signup -----------------------------------------------------------------
+
+def _signup(authenticator, username='newbie', email='n@example.com', **tamper):
+    challenge_id, options = service.begin_signup(username, email)
+    return service.finish_signup(challenge_id, authenticator.register(options, **tamper),
+                                 name='Phone')
+
+
+def test_begin_signup_creates_no_user():
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    assert options['user']['name'] == 'newbie'
+    assert not User.objects.filter(username='newbie').exists()
+    assert WebAuthnChallenge.objects.get(pk=challenge_id).payload['email'] == 'n@example.com'
+
+
+def test_begin_signup_rejects_invalid_identity(alice):
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('alice', 'not-an-email')
+    assert set(exc.value.errors) == {'username', 'email'}
+    assert all(isinstance(m, str) for msgs in exc.value.errors.values() for m in msgs)
+
+
+@pytest.mark.parametrize('bad_email', [123, {'a': 1}, ['x'], None],
+                         ids=['int', 'dict', 'list', 'none'])
+def test_begin_signup_rejects_non_string_email(bad_email):
+    """A non-string email must never crash begin_signup: DRF's CharField
+    only coerces str/int/float, so an int is stringified and then fails
+    EmailField's format validator; a dict/list fails the type check
+    outright and None fails the required-field check. All three end as
+    SignupInvalid, never a raw exception."""
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('newbie', bad_email)
+    assert 'email' in exc.value.errors
+
+
+@pytest.mark.parametrize('bad_username', [{'a': 1}, ['x'], None],
+                         ids=['dict', 'list', 'none'])
+def test_begin_signup_rejects_non_string_username(bad_username):
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup(bad_username, 'n@example.com')
+    assert 'username' in exc.value.errors
+
+
+def test_begin_signup_coerces_numeric_username():
+    """Unlike dict/list/None, an int username is not rejected: DRF's
+    CharField coerces basic numerics to their string form (the same
+    leniency the password-signup endpoint already had). It must not
+    crash, and the resulting options carry the stringified value."""
+    _challenge_id, options = service.begin_signup(12345, 'n@example.com')
+    assert options['user']['name'] == '12345'
+
+
+def test_finish_signup_creates_inactive_passkey_only_user(authenticator):
+    user = _signup(authenticator)
+    assert user.is_active is False
+    assert user.has_usable_password() is False
+    assert user.email == 'n@example.com'
+    assert user.passkeys.get().name == 'Phone'
+    assert bytes(PasskeyUserHandle.objects.get(user=user).handle) == authenticator.user_handle
+    assert mail.outbox == []  # the view sends the verification email
+
+
+def test_signup_user_can_log_in_after_activation(authenticator):
+    user = _signup(authenticator)
+    with pytest.raises(service.InactiveUser):
+        service.finish_login(*login_assertion(authenticator))
+    user.is_active = True
+    user.save()
+    assert service.finish_login(*login_assertion(authenticator)) == user
+
+
+def test_finish_signup_rejects_username_taken_since_begin(authenticator):
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    User.objects.create_user('newbie', 'other@example.com', 'pw12345678')
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.finish_signup(challenge_id, authenticator.register(options))
+    assert 'username' in exc.value.errors
+    assert Passkey.objects.count() == 0
+
+
+def test_finish_signup_integrity_race_reports_username(authenticator, monkeypatch):
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    User.objects.create_user('newbie', 'other@example.com', 'pw12345678')
+
+    class AlwaysValid:
+        errors = {}
+
+        def __init__(self, data):
+            pass
+
+        def is_valid(self):
+            return True
+
+    monkeypatch.setattr(service, 'AccountIdentitySerializer', AlwaysValid)
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.finish_signup(challenge_id, authenticator.register(options))
+    assert 'username' in exc.value.errors
+
+
+def test_finish_signup_rejects_bad_response(authenticator):
+    with pytest.raises(service.RegistrationFailed):
+        _signup(authenticator, uv=False)
+    assert not User.objects.filter(username='newbie').exists()
+
+
+def test_finish_signup_duplicate_credential_rolls_back_user(alice, authenticator):
+    add_passkey(alice, authenticator)
+    with pytest.raises(service.RegistrationFailed):
+        _signup(authenticator)
+    assert not User.objects.filter(username='newbie').exists()
+
+
+@pytest.mark.parametrize('credential', [None, 'x', [], {}])
+def test_finish_signup_rejects_malformed_credential(credential):
+    challenge_id, _options = service.begin_signup('newbie', 'n@example.com')
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_signup(challenge_id, credential)
+    assert not User.objects.filter(username='newbie').exists()
+
+
+@pytest.mark.parametrize('purpose', [WebAuthnChallenge.LOGIN, WebAuthnChallenge.REGISTER])
+def test_finish_signup_rejects_challenge_of_wrong_purpose(authenticator, purpose):
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    WebAuthnChallenge.objects.filter(pk=challenge_id).update(purpose=purpose)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_signup(challenge_id, authenticator.register(options), name='Phone')
+    assert not User.objects.filter(username='newbie').exists()
+
+
+def test_finish_signup_rejects_reused_challenge(authenticator):
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    service.finish_signup(challenge_id, authenticator.register(options), name='Phone')
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_signup(challenge_id, SoftAuthenticator().register(options))
+    assert User.objects.filter(username='newbie').count() == 1

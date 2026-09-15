@@ -40,6 +40,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 from . import passkey_challenges as challenges
 from . import passkey_config as config
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
+from .serializers import AccountIdentitySerializer
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,14 @@ class InactiveUser(PasskeyError):
 
 class StepUpFailed(PasskeyError):
     """Neither a password nor a passkey assertion proved the account holder."""
+
+
+class SignupInvalid(PasskeyError):
+    """Username/email invalid or taken; `errors` maps field -> messages."""
+
+    def __init__(self, errors):
+        super().__init__(errors)
+        self.errors = errors
 
 
 def clean_name(name):
@@ -455,3 +464,55 @@ def verify_step_up(user, password=None, assertion=None):
             raise StepUpFailed() from exc
         return
     raise StepUpFailed()
+
+
+def _plain_errors(errors):
+    return {field: [str(message) for message in messages]
+            for field, messages in errors.items()}
+
+
+def begin_signup(username, email):
+    """Validate a new account's identity and return registration options.
+
+    No User row exists until finish_signup verifies the passkey.
+    """
+    serializer = AccountIdentitySerializer(data={'username': username, 'email': email})
+    if not serializer.is_valid():
+        raise SignupInvalid(_plain_errors(serializer.errors))
+    data = serializer.validated_data
+    handle = secrets.token_bytes(32)
+    row = challenges.create(WebAuthnChallenge.SIGNUP, payload={
+        'username': data['username'], 'email': data['email'],
+        'handle': bytes_to_base64url(handle)})
+    return row.id, _registration_options(row.challenge, data['username'], handle, [])
+
+
+def finish_signup(challenge_id, credential, name=None):
+    """Create the inactive, passwordless account with its first passkey.
+
+    The caller sends the verification email. Ordering matters: the
+    challenge is consumed and the response cryptographically verified
+    before either the identity is re-checked or any row is written, so a
+    crafted or replayed request never reaches user creation. The identity
+    is re-validated here (not just in begin_signup) because the username or
+    email may have been taken by someone else in between.
+    """
+    row = _consume(challenge_id, WebAuthnChallenge.SIGNUP, None, RegistrationFailed)
+    verified = _verify_registration(row.challenge, credential)
+    payload = row.payload
+    serializer = AccountIdentitySerializer(data={'username': payload['username'],
+                                                 'email': payload['email']})
+    if not serializer.is_valid():  # taken since begin_signup
+        raise SignupInvalid(_plain_errors(serializer.errors))
+    try:
+        with transaction.atomic():
+            user = get_user_model()(username=payload['username'], email=payload['email'],
+                                    is_active=False)
+            user.set_unusable_password()
+            user.save()
+            PasskeyUserHandle.objects.create(user=user,
+                                             handle=base64url_to_bytes(payload['handle']))
+            _store_passkey(user, verified, credential, name)
+    except IntegrityError as exc:  # username taken between the check and the insert
+        raise SignupInvalid({'username': [_('A user with that username already exists.')]}) from exc
+    return user
