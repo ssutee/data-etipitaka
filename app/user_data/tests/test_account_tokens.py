@@ -1,4 +1,6 @@
-"""Tests for user_data.account_tokens.revoke_all_tokens."""
+"""Tests for user_data.account_tokens: revoke_all_tokens and lock_user_tokens."""
+import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -6,7 +8,7 @@ from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_K
 from django.contrib.sessions.backends.db import SessionStore
 from django.contrib.sessions.models import Session
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connection
+from django.db import connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
@@ -15,7 +17,7 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
 from rest_framework.authtoken.models import Token
 
 from user_data import account_tokens
-from user_data.account_tokens import delete_user_sessions, revoke_all_tokens
+from user_data.account_tokens import delete_user_sessions, lock_user_tokens, revoke_all_tokens
 
 from .conftest import make_oauth_token
 
@@ -118,6 +120,95 @@ def test_revoke_all_tokens_deletes_grant_before_refresh_and_access(alice):
                 seen.append(label)
                 break
     assert seen == ['token', 'grant', 'refresh', 'access', 'idtoken']
+
+
+# --- lock_user_tokens ---------------------------------------------------------
+
+@pytest.mark.django_db(transaction=True)
+def test_lock_user_tokens_requires_an_atomic_block(alice):
+    """Taken in autocommit, pg_advisory_xact_lock releases before the
+    caller's next statement even runs -- transaction=True (no wrapping
+    atomic() of its own, unlike the plain `db` fixture) is what lets this
+    test actually observe that, rather than always passing because
+    pytest-django's own test-isolation transaction is open."""
+    with pytest.raises(RuntimeError):
+        lock_user_tokens(alice.pk)
+
+
+def test_lock_user_tokens_issues_the_advisory_lock(alice):
+    with CaptureQueriesContext(connection) as ctx:
+        with transaction.atomic():
+            lock_user_tokens(alice.pk)
+    assert any('pg_advisory_xact_lock' in q['sql'] and str(alice.pk) in q['sql']
+              for q in ctx.captured_queries)
+
+
+def test_revoke_all_tokens_locks_before_any_delete(alice):
+    access = make_oauth_token(alice)
+    RefreshToken.objects.create(user=alice, application=access.application,
+                                token='r-lock', access_token=access)
+
+    with CaptureQueriesContext(connection) as ctx:
+        revoke_all_tokens(alice)
+
+    statements = [q['sql'] for q in ctx.captured_queries]
+    lock_index = next(i for i, sql in enumerate(statements) if 'pg_advisory_xact_lock' in sql)
+    delete_indexes = [i for i, sql in enumerate(statements) if sql.startswith('DELETE')]
+    assert delete_indexes  # sanity: there is something to compare the lock against
+    assert lock_index < min(delete_indexes)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lock_user_tokens_serialises_per_user_locks(alice, bob):
+    """A second connection's revoke_all_tokens(alice) must block for as
+    long as a first connection holds alice's own advisory lock open --
+    proving the lock actually serialises entry, not just runs a query
+    Postgres ignores -- while revoke_all_tokens(bob), a different lock
+    key, must be completely unaffected."""
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    outcome = {}
+
+    def _hold_alices_lock():
+        try:
+            with transaction.atomic():
+                lock_user_tokens(alice.pk)
+                holder_ready.set()
+                release_holder.wait(timeout=5)
+        finally:
+            connection.close()
+
+    def _probe(name, user):
+        try:
+            holder_ready.wait(timeout=5)
+            start = time.monotonic()
+            revoke_all_tokens(user)
+            outcome[name] = time.monotonic() - start
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=_hold_alices_lock)
+    alice_prober = threading.Thread(target=_probe, args=('alice', alice))
+    bob_prober = threading.Thread(target=_probe, args=('bob', bob))
+    holder.start()
+    alice_prober.start()
+    bob_prober.start()
+    try:
+        bob_prober.join(timeout=5)
+        assert 'bob' in outcome  # a different user's lock never blocks on alice's
+        assert outcome['bob'] < 1.0
+
+        time.sleep(0.3)
+        assert 'alice' not in outcome  # still waiting on alice's held lock
+
+        release_holder.set()
+        alice_prober.join(timeout=5)
+        assert 'alice' in outcome
+    finally:
+        release_holder.set()  # in case an assertion above failed first
+        holder.join(timeout=5)
+        alice_prober.join(timeout=5)
+        bob_prober.join(timeout=5)
 
 
 # --- delete_user_sessions ----------------------------------------------------

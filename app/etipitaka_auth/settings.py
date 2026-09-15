@@ -111,6 +111,13 @@ OAUTH2_PROVIDER = {
     'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,
     'ROTATE_REFRESH_TOKEN': True,
     'RESOURCE_SERVER_TOKEN_RESOURCE_VALIDATOR': 'user_data.oauth_resource.validate_mcp_audience',
+    # Every OAuth token write (issuance, refresh-token rotation, a
+    # reuse-triggered family revoke, RFC 7009 revocation) takes a per-user
+    # Postgres advisory lock before touching a row -- see
+    # user_data.account_tokens.lock_user_tokens -- so it can never deadlock
+    # against passkey recovery's own token revocation, which takes the same
+    # lock.
+    'OAUTH2_VALIDATOR_CLASS': 'user_data.oauth_validators.EtipitakaOAuth2Validator',
     # Enforce the OAuth 2.1 / RFC 9700 posture the server metadata advertises:
     # S256-only PKCE, no implicit/password grants, tokens only in headers,
     # RFC 9207 `iss` in the authorization response, and refresh-token reuse

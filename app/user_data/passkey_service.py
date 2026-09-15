@@ -655,29 +655,41 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     FOR UPDATE lock (which _store_passkey takes) while it still has to
     touch a Grant/RefreshToken/AccessToken/IDToken row (which
     revoke_all_tokens does) can deadlock against a concurrent OAuth
-    refresh-token rotation. django-oauth-toolkit 3.4.1's own
-    _save_bearer_token takes FOR UPDATE on the RefreshToken row being
-    rotated, then FOR UPDATE on its paired AccessToken row, before it ever
-    inserts the new access/refresh pair -- and that insert's COMMIT is what
-    needs a KEY SHARE lock on the user row (Postgres declares every FK
-    DEFERRABLE INITIALLY DEFERRED, so the check happens at COMMIT, not at
-    INSERT). A single earlier fix pre-locked the token rows before the
-    user row inside one transaction (lock_user_tokens, since removed) --
-    but that only narrowed the race: several SELECTs are not one atomic
-    step, so a rotation could still commit a fresh refresh/access pair in
-    the gap between them, leaving recovery holding the *new* AccessToken
-    row and waiting on the *new* RefreshToken row DOT held, while that
-    same rotation's commit waited on the user row recovery held -- the
-    same cycle, re-formed with newer rows, on every retry. Splitting into
-    two transactions removes the cycle instead of narrowing it: A
-    (revoke_all_tokens) never locks the user row at all, and B
-    (_store_passkey, then delete_user_sessions) never touches a
-    token-table row at all, so neither transaction is ever simultaneously
-    the thing a rotation is waiting on and the thing waiting on a
-    rotation. A's own delete order (Grant, then RefreshToken, then
-    AccessToken, then IDToken -- see the account_tokens module docstring)
-    already matches DOT's own lock order for the tables that order can
-    matter for, so A alone cannot form a new cycle with a rotation either.
+    refresh-token rotation, whose commit needs a KEY SHARE lock on that
+    same user row (Postgres declares every FK DEFERRABLE INITIALLY
+    DEFERRED, so the check happens then, not at INSERT). Two earlier
+    fixes tried to prevent this with row-lock *ordering* alone --
+    pre-locking the token rows before the user row inside one transaction
+    (lock_user_tokens as it first existed), then splitting into two
+    transactions on the theory that A's own delete order already matched
+    django-oauth-toolkit's row-lock order closely enough to rule out a
+    deadlock on its own -- and both turned out to be wrong under load.
+    The second one specifically: Django's delete collector locks
+    AccessToken rows, to null their reverse SET_NULL pointer, *before* it
+    deletes the RefreshToken rows in revoke_all_tokens, regardless of
+    what order those DELETE statements are written in -- the opposite of
+    DOT's own explicit RefreshToken-then-AccessToken FOR UPDATE order
+    during rotation. No ordering choice on either side can reconcile
+    that, because the collector's internal order isn't this codebase's to
+    choose. What actually closes it is account_tokens.lock_user_tokens: a
+    per-user Postgres advisory lock, taken by revoke_all_tokens (so by
+    transaction A here) and by every django-oauth-toolkit write path
+    (user_data/oauth_validators.py) before either side touches a single
+    token row. An advisory lock isn't a row lock at all, so it sidesteps
+    the ordering problem outright by serialising *entry*: whichever
+    writer takes it first finishes its whole sequence of row locks,
+    releasing them at commit, before the next writer takes any lock of
+    its own.
+
+    The split into two transactions is kept anyway, alongside the
+    advisory lock, for a property the lock alone doesn't give: B
+    (_store_passkey, then delete_user_sessions) never takes
+    lock_user_tokens and never touches a token-table row, so B can never
+    be one side of a cycle involving OAuth token writes at all, no matter
+    what Django's collector or a future DOT version does internally. A
+    concurrent rotation's commit can still simply wait for B's user-row
+    lock to release -- that's an ordinary queue, not a cycle, since B
+    never in turn waits on anything the rotation holds.
 
     Both A and B are run through _run_with_retry, independently retried up
     to _MAX_RECOVERY_ATTEMPTS times each on a deadlock or serialization
@@ -711,9 +723,10 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     since its signature covers the newest passkey's pk, which a failed B
     never changed.
 
-    revoke_all_tokens runs a third time (once in A, then this one) after B
-    commits. DOT validates a Grant or a refresh token with a plain,
-    unlocked SELECT (see the account_tokens module docstring), so a
+    revoke_all_tokens runs a second time (once in A, then this one) after
+    B commits. DOT validates a Grant or a refresh token with a plain,
+    unlocked SELECT (see the account_tokens module docstring) -- reading,
+    not writing, so it never needs lock_user_tokens' lock at all -- so a
     request racing A or B can still mint a brand-new token at any point
     and have that mint survive untouched -- A's revoke only narrows this
     window, it cannot close it. This post-commit sweep is best-effort,

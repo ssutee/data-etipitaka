@@ -54,11 +54,25 @@ mint a brand-new Grant/AccessToken/RefreshToken that our own deletes never
 see. Callers doing something security-sensitive with revoke_all_tokens
 (passkey recovery is the current one) are expected to call it again after
 their transaction commits, to sweep up whatever slipped through during it.
+
+The delete order above is unrelated to, and cannot substitute for,
+lock_user_tokens' advisory lock (taken first, below). An earlier version
+of this module claimed the order already matched django-oauth-toolkit's
+own row-lock order closely enough to rule out a deadlock; that was wrong.
+Django's delete collector locks AccessToken rows -- to null their reverse
+SET_NULL pointer -- *before* it deletes the RefreshToken rows below,
+regardless of what order these DELETE statements are written in, which is
+the opposite of DOT's own explicit RefreshToken-then-AccessToken FOR
+UPDATE order during a refresh-token rotation. No ordering choice made
+here can fix that, because the collector's own internal order isn't
+something this module chooses. See lock_user_tokens for what actually
+closes it.
 """
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.db import connection, transaction
 from django.utils import timezone
 from oauth2_provider.models import (get_access_token_model, get_grant_model,
                                     get_id_token_model, get_refresh_token_model)
@@ -72,19 +86,91 @@ _DB_SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 # unbounded SQL IN clause.
 _SESSION_DELETE_CHUNK = 500
 
+# Arbitrary fixed int4, the first argument to pg_advisory_xact_lock: fixes
+# the namespace this application's advisory locks live in, so a user pk
+# (the second argument) can never collide with some unrelated advisory
+# lock elsewhere in this codebase or a future one that reuses the pattern.
+_ADVISORY_NAMESPACE = 0x70_6B
+
+
+def lock_user_tokens(user_id):
+    """Take a per-user Postgres advisory lock: pg_advisory_xact_lock(namespace, user_id).
+
+    This is the one thing that actually serialises every writer of a
+    user's OAuth token rows against every other one -- not a row-lock
+    ordering discipline on Grant/RefreshToken/AccessToken/IDToken, which
+    cannot do this job. Django's delete collector locks AccessToken rows
+    (nulling their reverse SET_NULL pointer) *before* it deletes
+    RefreshToken rows in revoke_all_tokens below, regardless of DELETE
+    statement order; django-oauth-toolkit's own refresh-token rotation
+    takes FOR UPDATE on the RefreshToken row *before* the AccessToken row.
+    Those are opposite row-lock orders that no amount of reordering this
+    codebase's own statements can reconcile, since the collector's
+    internal order belongs to Django, not to this module. Two
+    transactions taking the same two row locks in opposite orders is a
+    textbook deadlock, and it reproduced under load: recovery's revoke
+    racing a live refresh-token rotation loop.
+
+    An advisory lock sidesteps the row-lock-ordering problem entirely by
+    not being a row lock on either table at all: it just serialises
+    *entry*. Whichever writer -- a rotation, a revocation, a
+    reuse-triggered family revoke -- takes this lock first runs its
+    entire sequence of row locks and releases them (via commit) before
+    the next writer takes any lock of its own, so the two sequences can
+    never interleave into a cycle.
+
+    Every writer of a user's OAuth tokens must call this, inside its own
+    transaction, before it touches a single token row:
+    - revoke_all_tokens below (so passkey recovery's own revocation, both
+      its dedicated transaction and its post-commit sweep, and any other
+      caller, are all covered automatically);
+    - EtipitakaOAuth2Validator's save_bearer_token, validate_refresh_token
+      and revoke_token (user_data/oauth_validators.py), django-oauth-
+      toolkit's own three writers.
+    Miss one and that writer is back to racing the others on raw row
+    locks, with all the same ordering problems described above.
+
+    pg_advisory_xact_lock is transaction-scoped: Postgres releases it
+    automatically at COMMIT or ROLLBACK, so a caller never has to release
+    it explicitly, and cannot leak it by forgetting to.
+
+    Raises RuntimeError outside a transaction.atomic() block. Taken in
+    autocommit, an xact-scoped advisory lock is released the instant the
+    single implicit statement-transaction that acquired it ends -- before
+    the caller's very next statement even runs -- so it would serialise
+    nothing at all while looking exactly like a working lock. Failing
+    loudly here is better than that.
+    """
+    if not connection.in_atomic_block:
+        raise RuntimeError(
+            'lock_user_tokens() must run inside transaction.atomic(): taken in '
+            'autocommit, pg_advisory_xact_lock is released before the next '
+            'statement runs and would serialise nothing.')
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)', [_ADVISORY_NAMESPACE, user_id])
+
 
 def revoke_all_tokens(user):
     """Delete every DRF and OAuth credential belonging to `user`.
 
-    Order matters -- see the module docstring -- so do not reorder these
-    without re-reading it: Token, then Grant, then RefreshToken, then
-    AccessToken, then IDToken.
+    Takes lock_user_tokens(user.pk) first, inside the same transaction as
+    every delete below -- see that function's docstring for why this,
+    not delete-statement order, is what actually prevents a deadlock
+    against django-oauth-toolkit's own writers.
+
+    Delete order among the four OAuth tables still matters for the
+    reasons the module docstring gives (closing read races against DOT's
+    own unlocked SELECTs, unrelated to the deadlock lock_user_tokens
+    closes) -- so do not reorder these without re-reading it: Token, then
+    Grant, then RefreshToken, then AccessToken, then IDToken.
     """
-    Token.objects.filter(user=user).delete()
-    get_grant_model().objects.filter(user=user).delete()
-    get_refresh_token_model().objects.filter(user=user).delete()
-    get_access_token_model().objects.filter(user=user).delete()
-    get_id_token_model().objects.filter(user=user).delete()
+    with transaction.atomic():
+        lock_user_tokens(user.pk)
+        Token.objects.filter(user=user).delete()
+        get_grant_model().objects.filter(user=user).delete()
+        get_refresh_token_model().objects.filter(user=user).delete()
+        get_access_token_model().objects.filter(user=user).delete()
+        get_id_token_model().objects.filter(user=user).delete()
 
 
 def check_session_engine():
