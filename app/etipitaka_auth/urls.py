@@ -15,6 +15,7 @@ from user_data import views, auth_views
 from user_data import content_views
 from user_data import canon_views
 from user_data import oauth_views
+from user_data import passkey_views
 from user_data.auth_urls import rest_auth_patterns
 
 # Explicit allow-list, not oauth2_provider.urls.base_urlpatterns: that also
@@ -60,6 +61,10 @@ urlpatterns = [
     path('api/canon/passage/', canon_views.passage),
     path('api/canon/resolve/', canon_views.resolve),
     path('api/canon/dictionary/', canon_views.dictionary),
+    path('api/passkeys/login/begin/', passkey_views.login_begin),
+    path('api/passkeys/login/finish/', passkey_views.login_finish),
+    path('api/passkeys/signup/begin/', passkey_views.signup_begin),
+    path('api/passkeys/signup/finish/', passkey_views.signup_finish),
     path('o/', include((oauth2_base_urlpatterns + oauth2_urls.dcr_urlpatterns,
                         'oauth2_provider'), namespace='oauth2_provider')),
     path('.well-known/oauth-authorization-server', OAuthServerMetadataView.as_view()),
