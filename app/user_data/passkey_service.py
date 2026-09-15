@@ -39,7 +39,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
-from .account_tokens import revoke_all_tokens
+from .account_tokens import delete_user_sessions, revoke_all_tokens
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -539,7 +539,7 @@ def begin_recover(user):
     return _begin_registration(user, WebAuthnChallenge.RECOVER)
 
 
-def finish_recover(user, challenge_id, credential, name=None):
+def finish_recover(user, challenge_id, credential, name=None, *, keep_session_key=None):
     """Store the new passkey and sign every other device out.
 
     A password-reset-driven recovery is meant for an account an attacker
@@ -560,13 +560,24 @@ def finish_recover(user, challenge_id, credential, name=None):
     derived from the password, not anything stored in the session itself.
     For a passkey-only user (no usable password to leave alone), rotating
     to a fresh unusable-password hash changes that hash and so signs out
-    every existing session the same way a password change would. This
-    deliberately does nothing yet for a user who still has a usable
-    password -- pending a decision on whether recovery should also force a
-    password change for them. set_unusable_password() only touches the
-    in-memory `user` object's .password attribute, so the same object this
-    function was called with (and returns via passkey.user) stays valid
-    for a caller's later login() call.
+    every existing session the same way a password change would; this
+    also covers a non-DB-backed session store, which delete_user_sessions
+    below cannot. It deliberately does nothing yet for a user who still
+    has a usable password -- pending a decision on whether recovery should
+    also force a password change for them. set_unusable_password() only
+    touches the in-memory `user` object's .password attribute, so the same
+    object this function was called with (and returns via passkey.user)
+    stays valid for a caller's later login() call.
+
+    delete_user_sessions is what actually signs every device out for
+    EVERY user, password or passkey-only alike: it does not depend on the
+    password changing at all, just on deleting the session row itself. Its
+    `keep_session_key` lets the caller spare its own session -- pass
+    request.session.session_key when the browser driving recovery is
+    itself already logged in as the account being recovered, or that
+    request's own session row disappears out from under it and saving the
+    response's session fails. (Alternatively, cycle_key() first and keep
+    the new key.) See Task 16.
     """
     verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
     with transaction.atomic():
@@ -575,5 +586,6 @@ def finish_recover(user, challenge_id, credential, name=None):
         if not user.has_usable_password():
             user.set_unusable_password()
             user.save(update_fields=['password'])
+        delete_user_sessions(user, keep_session_key=keep_session_key)
     _send_passkey_added_email(user, passkey)
     return passkey

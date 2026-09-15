@@ -1104,9 +1104,11 @@ def test_finish_recover_signs_out_existing_sessions_for_passkey_only_user(alice,
     assert new_client.get('/user_data/').status_code == 200
 
 
-def test_finish_recover_leaves_session_hash_alone_for_password_user(alice, authenticator):
-    """Recovery must not touch the session auth hash for a user who still
-    has a usable password -- that behaviour is deliberately deferred."""
+def test_finish_recover_signs_out_existing_sessions_for_password_user(alice, authenticator):
+    """A password user's session does not carry a stale auth hash the way
+    revoke_all_tokens or a passkey-only user's hash rotation would catch --
+    recovery deliberately leaves their password untouched -- so
+    delete_user_sessions is what has to sign this browser out instead."""
     old_client = Client()
     old_client.force_login(alice)
     assert old_client.get('/user_data/').status_code == 200
@@ -1114,7 +1116,33 @@ def test_finish_recover_leaves_session_hash_alone_for_password_user(alice, authe
     challenge_id, options = service.begin_recover(alice)
     service.finish_recover(alice, challenge_id, authenticator.register(options))
 
-    assert old_client.get('/user_data/').status_code == 200
+    resp = old_client.get('/user_data/')
+    assert resp.status_code == 302
+    assert resp['Location'].startswith('/login/')
+    # the password itself is untouched -- only the session row was deleted
+    assert alice.check_password('alicepass123')
+
+
+def test_finish_recover_keep_session_key_preserves_that_session(alice, authenticator):
+    """The recovering browser's own session, when it's already logged in
+    as the account being recovered, must survive if the caller says so --
+    every other session for the same user still goes."""
+    kept_client = Client()
+    kept_client.force_login(alice)
+    keep_key = kept_client.session.session_key
+    other_client = Client()
+    other_client.force_login(alice)
+    assert kept_client.get('/user_data/').status_code == 200
+    assert other_client.get('/user_data/').status_code == 200
+
+    challenge_id, options = service.begin_recover(alice)
+    service.finish_recover(alice, challenge_id, authenticator.register(options),
+                           keep_session_key=keep_key)
+
+    assert kept_client.get('/user_data/').status_code == 200
+    other_resp = other_client.get('/user_data/')
+    assert other_resp.status_code == 302
+    assert other_resp['Location'].startswith('/login/')
 
 
 def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monkeypatch):
@@ -1128,6 +1156,25 @@ def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monke
         raise RuntimeError('boom')
 
     monkeypatch.setattr(service, 'revoke_all_tokens', _boom)
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(RuntimeError):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert Passkey.objects.count() == 0
+    assert Token.objects.filter(user=alice).exists()
+    assert AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_finish_recover_rolls_back_when_delete_sessions_fails(alice, authenticator, monkeypatch):
+    """Same atomicity guarantee, for the session-deletion step: a failure
+    there must not leave a stored passkey or already-revoked tokens behind
+    either, and no passkey-added email should go out."""
+    make_oauth_token(alice)
+
+    def _boom(_user, keep_session_key=None):
+        raise RuntimeError('boom')
+
+    monkeypatch.setattr(service, 'delete_user_sessions', _boom)
     challenge_id, options = service.begin_recover(alice)
     with pytest.raises(RuntimeError):
         service.finish_recover(alice, challenge_id, authenticator.register(options))

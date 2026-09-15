@@ -2,6 +2,10 @@
 from datetime import timedelta
 
 import pytest
+from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
+from django.contrib.sessions.backends.db import SessionStore
+from django.contrib.sessions.models import Session
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -10,7 +14,7 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
                                     get_id_token_model, get_refresh_token_model)
 from rest_framework.authtoken.models import Token
 
-from user_data.account_tokens import revoke_all_tokens
+from user_data.account_tokens import delete_user_sessions, revoke_all_tokens
 
 from .conftest import make_oauth_token
 
@@ -113,3 +117,64 @@ def test_revoke_all_tokens_deletes_grant_before_refresh_and_access(alice):
                 seen.append(label)
                 break
     assert seen == ['token', 'grant', 'refresh', 'access', 'idtoken']
+
+
+# --- delete_user_sessions ----------------------------------------------------
+
+def _login_session(user, expiry_seconds=1209600):
+    """A real, decodable session row carrying the same keys
+    django.contrib.auth.login() would set -- not a Client(), so tests can
+    freely create more than one session per user and control expiry."""
+    store = SessionStore()
+    store[SESSION_KEY] = str(user.pk)
+    store[BACKEND_SESSION_KEY] = 'django.contrib.auth.backends.ModelBackend'
+    store[HASH_SESSION_KEY] = user.get_session_auth_hash()
+    store.set_expiry(expiry_seconds)
+    store.save()
+    return store.session_key
+
+
+def test_delete_user_sessions_deletes_only_that_users_sessions(alice, bob):
+    alice_key1 = _login_session(alice)
+    alice_key2 = _login_session(alice)
+    bob_key = _login_session(bob)
+
+    delete_user_sessions(alice)
+
+    assert not Session.objects.filter(session_key=alice_key1).exists()
+    assert not Session.objects.filter(session_key=alice_key2).exists()
+    assert Session.objects.filter(session_key=bob_key).exists()
+
+
+def test_delete_user_sessions_keeps_the_given_session_key(alice):
+    keep_key = _login_session(alice)
+    drop_key = _login_session(alice)
+
+    delete_user_sessions(alice, keep_session_key=keep_key)
+
+    assert Session.objects.filter(session_key=keep_key).exists()
+    assert not Session.objects.filter(session_key=drop_key).exists()
+
+
+def test_delete_user_sessions_ignores_expired_and_corrupt_rows(alice):
+    live_key = _login_session(alice)
+    expired_key = _login_session(alice)
+    Session.objects.filter(session_key=expired_key).update(
+        expire_date=timezone.now() - timedelta(days=1))
+    corrupt = Session.objects.create(
+        session_key='not-a-real-session-key', session_data='garbage-not-signed-data',
+        expire_date=timezone.now() + timedelta(days=1))
+
+    delete_user_sessions(alice)  # must not raise
+
+    assert not Session.objects.filter(session_key=live_key).exists()
+    # the expired row is outside the live-session scan and the corrupt one
+    # decodes to {} (never matches alice's pk) -- both are left alone
+    assert Session.objects.filter(session_key=expired_key).exists()
+    assert Session.objects.filter(pk=corrupt.pk).exists()
+
+
+def test_delete_user_sessions_requires_db_backed_engine(alice, settings):
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+    with pytest.raises(ImproperlyConfigured):
+        delete_user_sessions(alice)
