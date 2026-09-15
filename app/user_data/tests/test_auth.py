@@ -45,6 +45,15 @@ def test_register_rejects_duplicate_username(api):
     assert 'username' in resp.json()
 
 
+def test_register_rejects_email_too_long(api):
+    """User.email is a varchar(254); an over-length address must be a
+    clean 400 from serializer validation, not a raw DataError 500 from
+    the database when the row is saved."""
+    resp = _register(api, email='a' * 250 + '@example.com')
+    assert resp.status_code == 400
+    assert 'email' in resp.json()
+
+
 def test_login_returns_token_for_active_user(api):
     user = User.objects.create_user('active', 'a@example.com', 'pw12345678')
     resp = api.post('/rest-auth/login/', {'username': 'active', 'password': 'pw12345678'})

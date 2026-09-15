@@ -101,3 +101,20 @@ def test_register_serializer_rejects_invalid_username():
                                  'password1': 'pw12345678', 'password2': 'pw12345678'})
     assert not s.is_valid()
     assert 'username' in s.errors
+
+
+def test_identity_email_accepts_max_length():
+    # User.email is a varchar(254); build a syntactically valid address of
+    # exactly that length ('@example.com' is 12 chars).
+    email = 'a' * 242 + '@example.com'
+    assert len(email) == 254
+    s = AccountIdentitySerializer(data={'email': email, 'username': 'newbie'})
+    assert s.is_valid(), s.errors
+
+
+def test_identity_email_rejects_over_max_length():
+    email = 'a' * 243 + '@example.com'
+    assert len(email) == 255
+    s = AccountIdentitySerializer(data={'email': email, 'username': 'newbie'})
+    assert not s.is_valid()
+    assert 'email' in s.errors

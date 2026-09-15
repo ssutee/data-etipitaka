@@ -893,6 +893,34 @@ def test_finish_signup_integrity_race_reports_username(authenticator, monkeypatc
     with pytest.raises(service.SignupInvalid) as exc:
         service.finish_signup(challenge_id, authenticator.register(options))
     assert 'username' in exc.value.errors
+    assert Passkey.objects.count() == 0
+    assert not PasskeyUserHandle.objects.filter(user__username='newbie').exists()
+
+
+def test_begin_signup_rejects_email_too_long():
+    """DRF's EmailField has no max_length of its own and Django's
+    EmailValidator allows up to 320 characters, but User.email is a
+    varchar(254) -- without an explicit max_length this email sails past
+    validation and only blows up as a raw DataError once finish_signup
+    tries to save the row, with the challenge already burnt."""
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('newbie', 'a' * 250 + '@example.com')
+    assert 'email' in exc.value.errors
+
+
+def test_finish_signup_rechecks_email_taken_since_begin(authenticator):
+    """The username/email re-check in finish_signup earns its keep on
+    email, not username: User.email carries no DB uniqueness constraint,
+    so nothing but this re-validation would catch a same-email signup
+    that raced in between begin_signup and finish_signup."""
+    challenge_id, options = service.begin_signup('newbie', 'n@example.com')
+    User.objects.create_user('other', 'n@example.com', 'pw12345678')
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.finish_signup(challenge_id, authenticator.register(options))
+    assert 'email' in exc.value.errors
+    assert not User.objects.filter(username='newbie').exists()
+    assert Passkey.objects.count() == 0
+    assert not PasskeyUserHandle.objects.filter(user__username='newbie').exists()
 
 
 def test_finish_signup_rejects_bad_response(authenticator):

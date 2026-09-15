@@ -9,7 +9,7 @@ from rest_framework import serializers
 
 class AccountIdentitySerializer(serializers.Serializer):
     """Username + email rules shared by password signup and passkey signup."""
-    email = serializers.EmailField()
+    email = serializers.EmailField(max_length=254)
     username = serializers.CharField(max_length=150,
                                      validators=[UnicodeUsernameValidator()])
 
