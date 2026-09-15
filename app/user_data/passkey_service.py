@@ -41,7 +41,8 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
-from .account_tokens import check_session_engine, delete_user_sessions, revoke_all_tokens
+from .account_tokens import (check_session_engine, delete_user_sessions, lock_user_tokens,
+                             revoke_all_tokens)
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -655,18 +656,24 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     anything client-supplied -- so the browser doing the recovering is
     not signed out of its own, freshly-cycled session.
 
-    The atomic block is retried up to _MAX_RECOVERY_ATTEMPTS times on a
-    deadlock or serialization failure (see _is_retryable_db_error):
-    _store_passkey takes the user row's lock first and then
-    revoke_all_tokens waits on token-table rows, and a concurrent OAuth
-    refresh-token rotation can legitimately take that same pair of locks
-    in the opposite order, so Postgres can abort either side to break the
-    cycle. That is expected contention, not corruption -- retrying is
-    safe because the challenge was already consumed and the credential
-    already verified above, outside the block, and a rolled-back attempt
-    undoes the whole block (the passkey insert included), so the next
-    attempt starts clean rather than double-storing or double-revoking.
-    Any other OperationalError, or the final attempt, is re-raised as-is.
+    lock_user_tokens(user) runs first inside the atomic block, before
+    _store_passkey ever locks the user row: see its own docstring for why
+    -- in short, it makes this transaction take the same lock order
+    (token rows, then the user row) that a concurrent OAuth refresh-token
+    rotation takes, which is what actually prevents the deadlock rather
+    than just retrying into it repeatedly.
+
+    The atomic block is still retried, up to _MAX_RECOVERY_ATTEMPTS times,
+    on a deadlock or serialization failure (see _is_retryable_db_error) --
+    a backstop, not the primary defense: Postgres can still report
+    40P01/40001 for reasons other than this specific cycle (a third
+    transaction, a lock-wait-timeout-adjacent story, deadlock detection
+    itself is inherently a race), and retrying is safe regardless of cause
+    because the challenge was already consumed and the credential already
+    verified above, outside the block, and a rolled-back attempt undoes
+    the whole block (the passkey insert included), so the next attempt
+    starts clean rather than double-storing or double-revoking. Any other
+    OperationalError, or the final attempt, is re-raised as-is.
     """
     check_session_engine()
     verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
@@ -674,6 +681,7 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     for attempt in range(1, _MAX_RECOVERY_ATTEMPTS + 1):
         try:
             with transaction.atomic():
+                lock_user_tokens(user)
                 passkey = _store_passkey(user, verified, credential, name)
                 revoke_all_tokens(user)
                 delete_user_sessions(user, keep_session_key=keep_session_key)
@@ -682,7 +690,7 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
             if attempt == _MAX_RECOVERY_ATTEMPTS or not _is_retryable_db_error(exc):
                 raise
             log.warning('finish_recover retrying after a deadlock/serialization '
-                       'failure (attempt %d)', attempt)
+                       'failure for user %s (attempt %d)', user.pk, attempt)
             time.sleep(random.uniform(0.02, 0.1) * attempt)
     try:
         revoke_all_tokens(user)

@@ -73,6 +73,55 @@ _DB_SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 _SESSION_DELETE_CHUNK = 500
 
 
+def lock_user_tokens(user):
+    """Take FOR UPDATE on every OAuth token row belonging to `user`, in
+    DOT's own write order, before anything else in this transaction takes
+    a lock on the user row itself.
+
+    Django's Postgres backend declares every FK DEFERRABLE INITIALLY
+    DEFERRED, so inserting a Grant/RefreshToken/AccessToken/IDToken row
+    that references `user` needs a KEY SHARE lock on that user row -- but
+    only at COMMIT, not when the INSERT itself runs. django-oauth-toolkit
+    3.4.1's refresh-token rotation (oauth2_validators.py
+    OAuth2Validator._save_bearer_token) takes FOR UPDATE on the
+    RefreshToken row being rotated first, then FOR UPDATE on any
+    AccessToken row whose source_refresh_token points at it, then deletes
+    that RefreshToken's own (old) AccessToken via RefreshToken.revoke() --
+    all before it inserts the new AccessToken and RefreshToken rows whose
+    commit finally needs the KEY SHARE lock on the user row. So a
+    transaction that takes FOR UPDATE on the user row FIRST and only
+    later touches a RefreshToken or AccessToken row -- which is exactly
+    what finish_recover's _store_passkey used to do, taking the user
+    row's lock before revoke_all_tokens ever touched a token row -- can
+    deadlock against a concurrent rotation: recovery holds the user row
+    and waits on a RefreshToken/AccessToken row the rotation is holding,
+    while the rotation's own commit waits on the user row recovery holds.
+    An attacker who keeps a refresh-token rotation loop running against
+    the account being recovered can re-form that cycle on every retry.
+
+    Calling this, in this order, before _store_passkey ever locks the
+    user row removes the cycle rather than just narrowing the window a
+    retry has to win: both transactions now agree on one global lock
+    order -- token rows, then the user row -- so Postgres never has
+    reason to abort either side with a deadlock. Grant is included even
+    though the refresh_token grant type never touches it: the
+    authorization_code exchange does (invalidate_authorization_code
+    deletes it), and locking it here costs one more, almost always empty,
+    SELECT to also cover that path. Each set is additionally ordered by
+    pk, so two transactions that both need to lock the same user's rows
+    -- two concurrent recoveries, say -- agree with each other on which
+    row goes first too, rather than only agreeing with DOT.
+
+    list(...values_list('pk', flat=True)) forces the SELECT to execute
+    immediately -- a bare queryset is lazy and would never issue the
+    locking SELECT at all if nothing here consumed it.
+    """
+    for model in (get_grant_model(), get_refresh_token_model(),
+                 get_access_token_model(), get_id_token_model()):
+        list(model.objects.select_for_update().filter(user=user)
+             .order_by('pk').values_list('pk', flat=True))
+
+
 def revoke_all_tokens(user):
     """Delete every DRF and OAuth credential belonging to `user`.
 

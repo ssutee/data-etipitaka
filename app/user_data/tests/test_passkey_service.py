@@ -10,8 +10,9 @@ from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
 from django.db import OperationalError, connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-from oauth2_provider.models import AccessToken, Grant, RefreshToken
+from oauth2_provider.models import AccessToken, Grant, IDToken, RefreshToken
 from rest_framework.authtoken.models import Token
 
 from user_data import passkey_challenges as challenges
@@ -1310,6 +1311,32 @@ def test_finish_recover_logs_when_post_commit_sweep_fails(alice, authenticator, 
     assert Passkey.objects.filter(pk=passkey.pk).exists()
     assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
               for record in caplog.records)
+
+
+# --- recovery locks token rows before the user row ---------------------------
+
+def test_finish_recover_locks_token_rows_before_the_user_row(alice, authenticator):
+    """lock_user_tokens's FOR UPDATE queries against Grant, RefreshToken,
+    AccessToken and IDToken must all land before _store_passkey's own FOR
+    UPDATE on the user row: the fix for the deadlock against a concurrent
+    OAuth refresh-token rotation depends on every writer taking locks in
+    this same order (token rows, then the user row), not just on
+    retrying into the old, opposite order until it happens to succeed."""
+    make_oauth_token(alice)
+    user_table = User._meta.db_table
+    token_tables = [Grant._meta.db_table, RefreshToken._meta.db_table,
+                    AccessToken._meta.db_table, IDToken._meta.db_table]
+
+    challenge_id, options = service.begin_recover(alice)
+    with CaptureQueriesContext(connection) as ctx:
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    for_update_sql = [q['sql'] for q in ctx.captured_queries if 'FOR UPDATE' in q['sql']]
+    user_lock_index = next(i for i, sql in enumerate(for_update_sql) if user_table in sql)
+    token_lock_indexes = [i for i, sql in enumerate(for_update_sql)
+                          if any(table in sql for table in token_tables)]
+    assert len(token_lock_indexes) == 4  # Grant, RefreshToken, AccessToken, IDToken
+    assert max(token_lock_indexes) < user_lock_index
 
 
 # --- recovery retries on deadlock --------------------------------------------

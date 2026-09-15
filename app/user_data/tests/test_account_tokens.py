@@ -1,4 +1,5 @@
-"""Tests for user_data.account_tokens.revoke_all_tokens."""
+"""Tests for user_data.account_tokens: revoke_all_tokens and lock_user_tokens."""
+import threading
 from datetime import timedelta
 
 import pytest
@@ -6,7 +7,7 @@ from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_K
 from django.contrib.sessions.backends.db import SessionStore
 from django.contrib.sessions.models import Session
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connection
+from django.db import OperationalError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
@@ -15,7 +16,7 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
 from rest_framework.authtoken.models import Token
 
 from user_data import account_tokens
-from user_data.account_tokens import delete_user_sessions, revoke_all_tokens
+from user_data.account_tokens import delete_user_sessions, lock_user_tokens, revoke_all_tokens
 
 from .conftest import make_oauth_token
 
@@ -118,6 +119,88 @@ def test_revoke_all_tokens_deletes_grant_before_refresh_and_access(alice):
                 seen.append(label)
                 break
     assert seen == ['token', 'grant', 'refresh', 'access', 'idtoken']
+
+
+# --- lock_user_tokens ---------------------------------------------------------
+
+def test_lock_user_tokens_locks_grant_then_refresh_then_access_then_idtoken(alice):
+    """FOR UPDATE order matters here for the reason lock_user_tokens'
+    own docstring explains: finish_recover calls this before it locks the
+    user row, in the same order django-oauth-toolkit's own refresh-token
+    rotation locks these tables, so the two transactions agree on one
+    global lock order and cannot deadlock against each other."""
+    access = make_oauth_token(alice)
+    RefreshToken.objects.create(user=alice, application=access.application,
+                                token='r-order', access_token=access)
+    _grant(alice, access.application, 'c-order')
+    _id_token(alice, access.application)
+
+    with CaptureQueriesContext(connection) as ctx:
+        lock_user_tokens(alice)
+
+    seen = []
+    for query in ctx.captured_queries:
+        sql = query['sql']
+        if 'FOR UPDATE' not in sql:
+            continue
+        for label, table in _TABLES_IN_EXPECTED_ORDER:
+            if label == 'token':
+                continue  # lock_user_tokens never touches the DRF token row
+            if table in sql and label not in seen:
+                seen.append(label)
+                break
+    assert seen == ['grant', 'refresh', 'access', 'idtoken']
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lock_user_tokens_only_locks_that_users_rows(alice, bob):
+    """Bob's own token rows must stay completely unlocked while Alice's
+    are held -- a busy Bob must never be blocked by an unrelated Alice
+    recovery. Proven with two real connections: a NOWAIT lock on Bob's
+    RefreshToken row from a second connection must succeed immediately
+    while the first connection is still holding Alice's lock_user_tokens
+    lock open, which it could not if lock_user_tokens had locked more
+    than Alice's own rows."""
+    alice_access = make_oauth_token(alice)
+    RefreshToken.objects.create(user=alice, application=alice_access.application,
+                                token='r-alice', access_token=alice_access)
+    bob_access = make_oauth_token(bob)
+    bob_refresh = RefreshToken.objects.create(user=bob, application=bob_access.application,
+                                              token='r-bob', access_token=bob_access)
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    outcome = {}
+
+    def _hold_alices_lock():
+        try:
+            with transaction.atomic():
+                lock_user_tokens(alice)
+                holder_ready.set()
+                release_holder.wait(timeout=5)
+        finally:
+            connection.close()
+
+    def _probe_bobs_row_nowait():
+        try:
+            holder_ready.wait(timeout=5)
+            with transaction.atomic():
+                RefreshToken.objects.select_for_update(nowait=True).get(pk=bob_refresh.pk)
+            outcome['bob'] = 'unlocked'
+        except OperationalError:
+            outcome['bob'] = 'blocked'
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=_hold_alices_lock)
+    prober = threading.Thread(target=_probe_bobs_row_nowait)
+    holder.start()
+    prober.start()
+    prober.join(timeout=10)
+    release_holder.set()
+    holder.join(timeout=10)
+
+    assert outcome.get('bob') == 'unlocked'
 
 
 # --- delete_user_sessions ----------------------------------------------------
