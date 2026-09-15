@@ -5,13 +5,15 @@ import cbor2
 import pytest
 from django.contrib.auth.models import User
 from django.core import mail
+from oauth2_provider.models import AccessToken
+from rest_framework.authtoken.models import Token
 
 from user_data import passkey_challenges as challenges
 from user_data import passkey_service as service
 from user_data.models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from user_data.passkey_config import android_origin
 
-from .conftest import add_passkey, login_assertion
+from .conftest import add_passkey, login_assertion, make_oauth_token
 from .soft_authenticator import SoftAuthenticator, b64url, unb64url
 
 pytestmark = pytest.mark.django_db
@@ -959,3 +961,102 @@ def test_finish_signup_rejects_reused_challenge(authenticator):
     with pytest.raises(service.RegistrationFailed):
         service.finish_signup(challenge_id, SoftAuthenticator().register(options))
     assert User.objects.filter(username='newbie').count() == 1
+
+
+# --- recovery ---------------------------------------------------------------
+
+def test_recover_adds_passkey_and_revokes_tokens(alice, bob, authenticator):
+    make_oauth_token(alice)
+    make_oauth_token(bob)
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert passkey.user == alice
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 1
+    # bob's own tokens must survive an unrelated user's recovery
+    assert Token.objects.filter(user=bob).exists()
+    assert AccessToken.objects.filter(user=bob).exists()
+
+
+def test_register_challenge_cannot_finish_recovery(alice, authenticator):
+    challenge_id, options = service.begin_register(alice)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert Token.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_recover_challenge_cannot_finish_register(alice, authenticator):
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_register(alice, challenge_id, authenticator.register(options))
+    assert Passkey.objects.count() == 0
+
+
+def test_finish_recover_rejects_bad_response(alice, authenticator):
+    """A tampered/failed recovery response must leave everything alone:
+    tokens intact, no email, no passkey stored."""
+    make_oauth_token(alice)
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, authenticator.register(options, uv=False))
+    assert Passkey.objects.count() == 0
+    assert Token.objects.filter(user=alice).exists()
+    assert AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_finish_recover_rejects_wrong_user_and_burns_challenge(alice, bob, authenticator):
+    """A recovery challenge issued to alice can't be finished as bob, and
+    the attempt still burns the challenge (it's gone either way once
+    consumed, successfully or not)."""
+    make_oauth_token(alice)
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(bob, challenge_id, authenticator.register(options))
+    assert Passkey.objects.count() == 0
+    assert Token.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, SoftAuthenticator().register(options))
+
+
+def test_finish_recover_rejects_reused_challenge(alice, authenticator):
+    challenge_id, options = service.begin_recover(alice)
+    service.finish_recover(alice, challenge_id, authenticator.register(options))
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, SoftAuthenticator().register(options))
+    assert Passkey.objects.count() == 1
+    assert len(mail.outbox) == 1
+
+
+def test_finish_recover_works_for_passkey_only_user(alice, authenticator):
+    alice.set_unusable_password()
+    alice.save(update_fields=['password'])
+    make_oauth_token(alice)
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert passkey.user == alice
+    assert not AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 1
+
+
+def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monkeypatch):
+    """Storing the passkey and revoking tokens must be one atomic step: if
+    revocation blows up, the half-finished recovery must not leave a new
+    passkey behind while the attacker's tokens survive, and no
+    passkey-added email should go out for a passkey that got rolled back."""
+    make_oauth_token(alice)
+
+    def _boom(_user):
+        raise RuntimeError('boom')
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _boom)
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(RuntimeError):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert Passkey.objects.count() == 0
+    assert Token.objects.filter(user=alice).exists()
+    assert AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0

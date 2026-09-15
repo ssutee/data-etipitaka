@@ -39,6 +39,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
+from .account_tokens import revoke_all_tokens
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -261,9 +262,20 @@ def _begin_registration(user, purpose):
                                          _handle_for(user), _descriptors(user))
 
 
-def _finish_registration(user, purpose, challenge_id, credential, name):
+def _consume_and_verify(purpose, challenge_id, credential, user):
+    """Burn a registration-shaped challenge and verify the response against it.
+
+    Split out of _finish_registration so finish_recover can run this step
+    -- which already opens and closes its own durable transaction inside
+    _consume -- before opening the separate, non-durable transaction that
+    has to cover both storing the new passkey and revoking every token.
+    """
     row = _consume(challenge_id, purpose, user, RegistrationFailed)
-    verified = _verify_registration(row.challenge, credential)
+    return _verify_registration(row.challenge, credential)
+
+
+def _finish_registration(user, purpose, challenge_id, credential, name):
+    verified = _consume_and_verify(purpose, challenge_id, credential, user)
     return _store_passkey(user, verified, credential, name)
 
 
@@ -516,3 +528,32 @@ def finish_signup(challenge_id, credential, name=None):
     except IntegrityError as exc:  # username taken between the check and the insert
         raise SignupInvalid({'username': [_('A user with that username already exists.')]}) from exc
     return user
+
+
+def begin_recover(user):
+    """Options for creating a passkey from a valid account-recovery session."""
+    return _begin_registration(user, WebAuthnChallenge.RECOVER)
+
+
+def finish_recover(user, challenge_id, credential, name=None):
+    """Store the new passkey and sign every other device out.
+
+    A password-reset-driven recovery is meant for an account an attacker
+    may currently be living inside via stolen tokens, so storing the
+    passkey and revoking every token must be a single atomic step: if
+    revocation raised after the passkey row had already been committed, the
+    attacker's tokens would outlive the very recovery meant to cut them
+    off. Consuming the challenge and verifying the response happen first,
+    exactly like every other ceremony, and outside this transaction --
+    _consume_and_verify already opened and closed its own durable
+    transaction inside _consume, and a durable atomic block can never nest
+    inside a regular one. The email is sent only after the transaction
+    commits, so a failed revoke also means no "passkey added" notice goes
+    out for a passkey that no longer exists.
+    """
+    verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
+    with transaction.atomic():
+        passkey = _store_passkey(user, verified, credential, name)
+        revoke_all_tokens(user)
+    _send_passkey_added_email(user, passkey)
+    return passkey
