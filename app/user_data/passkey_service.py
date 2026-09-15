@@ -245,11 +245,15 @@ def _store_passkey(user, verified, credential, name):
 def _send_passkey_added_email(user, passkey):
     if not user.email:
         return
-    body = render_to_string('email/passkey_added.txt', {
-        'username': user.username, 'passkey_name': passkey.name,
-        'security_url': config.web_origin() + '/account/security/',
-        'reset_url': config.web_origin() + '/password_reset/'})
     try:
+        # Rendering the template can raise too (a broken template, a bad
+        # config.web_origin()) -- everything from here on must stay inside
+        # the same best-effort try as send_mail, so nothing after the
+        # passkey is already committed can turn into an unhandled 500.
+        body = render_to_string('email/passkey_added.txt', {
+            'username': user.username, 'passkey_name': passkey.name,
+            'security_url': config.web_origin() + '/account/security/',
+            'reset_url': config.web_origin() + '/password_reset/'})
         send_mail(_('A passkey was added to your E-Tipitaka account'), body,
                   settings.DEFAULT_FROM_EMAIL, [user.email])
     except Exception:  # a mail outage must not look like a failed registration
@@ -550,10 +554,26 @@ def finish_recover(user, challenge_id, credential, name=None):
     inside a regular one. The email is sent only after the transaction
     commits, so a failed revoke also means no "passkey added" notice goes
     out for a passkey that no longer exists.
+
+    revoke_all_tokens only reaches API credentials -- it cannot touch a
+    browser session, because Django's session auth check compares a hash
+    derived from the password, not anything stored in the session itself.
+    For a passkey-only user (no usable password to leave alone), rotating
+    to a fresh unusable-password hash changes that hash and so signs out
+    every existing session the same way a password change would. This
+    deliberately does nothing yet for a user who still has a usable
+    password -- pending a decision on whether recovery should also force a
+    password change for them. set_unusable_password() only touches the
+    in-memory `user` object's .password attribute, so the same object this
+    function was called with (and returns via passkey.user) stays valid
+    for a caller's later login() call.
     """
     verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
     with transaction.atomic():
         passkey = _store_passkey(user, verified, credential, name)
         revoke_all_tokens(user)
+        if not user.has_usable_password():
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
     _send_passkey_added_email(user, passkey)
     return passkey

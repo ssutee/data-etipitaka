@@ -5,6 +5,7 @@ import cbor2
 import pytest
 from django.contrib.auth.models import User
 from django.core import mail
+from django.test import Client
 from oauth2_provider.models import AccessToken
 from rest_framework.authtoken.models import Token
 
@@ -338,6 +339,20 @@ def test_finish_register_keeps_passkey_when_email_fails(alice, authenticator, mo
     def _boom(*args, **kwargs):
         raise RuntimeError('smtp is down')
     monkeypatch.setattr(service, 'send_mail', _boom)
+    passkey = _register(alice, authenticator)
+    assert Passkey.objects.filter(pk=passkey.pk).exists()
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_finish_register_keeps_passkey_when_email_render_fails(alice, authenticator, monkeypatch,
+                                                                caplog):
+    """A broken email template must not turn a stored passkey into a 500 --
+    render_to_string can raise just as easily as send_mail, and both run
+    after the passkey is already committed."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError('template is broken')
+    monkeypatch.setattr(service, 'render_to_string', _boom)
     passkey = _register(alice, authenticator)
     assert Passkey.objects.filter(pk=passkey.pk).exists()
     assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
@@ -996,7 +1011,9 @@ def test_recover_challenge_cannot_finish_register(alice, authenticator):
 
 def test_finish_recover_rejects_bad_response(alice, authenticator):
     """A tampered/failed recovery response must leave everything alone:
-    tokens intact, no email, no passkey stored."""
+    tokens intact, no email, no passkey stored. The challenge is still
+    burnt on this failed attempt -- a second, valid response against the
+    same challenge id must also be rejected, not silently accepted."""
     make_oauth_token(alice)
     challenge_id, options = service.begin_recover(alice)
     with pytest.raises(service.RegistrationFailed):
@@ -1004,6 +1021,10 @@ def test_finish_recover_rejects_bad_response(alice, authenticator):
     assert Passkey.objects.count() == 0
     assert Token.objects.filter(user=alice).exists()
     assert AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert Passkey.objects.count() == 0
     assert len(mail.outbox) == 0
 
 
@@ -1020,6 +1041,23 @@ def test_finish_recover_rejects_wrong_user_and_burns_challenge(alice, bob, authe
     assert len(mail.outbox) == 0
     with pytest.raises(service.RegistrationFailed):
         service.finish_recover(alice, challenge_id, SoftAuthenticator().register(options))
+
+
+def test_finish_recover_rejects_credential_already_registered_to_another_user(alice, bob, authenticator):
+    """The same physical authenticator can't be used to recover alice's
+    account when its credential is already bob's -- the unique constraint
+    on credential_id must surface as RegistrationFailed, not an
+    IntegrityError, and must not touch alice's own tokens or mail."""
+    add_passkey(bob, authenticator)  # sends bob his own passkey-added email
+    outbox_before = len(mail.outbox)
+    make_oauth_token(alice)
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(service.RegistrationFailed):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert Passkey.objects.filter(user=alice).count() == 0
+    assert Token.objects.filter(user=alice).exists()
+    assert AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == outbox_before
 
 
 def test_finish_recover_rejects_reused_challenge(alice, authenticator):
@@ -1040,6 +1078,43 @@ def test_finish_recover_works_for_passkey_only_user(alice, authenticator):
     assert passkey.user == alice
     assert not AccessToken.objects.filter(user=alice).exists()
     assert len(mail.outbox) == 1
+
+
+def test_finish_recover_signs_out_existing_sessions_for_passkey_only_user(alice, authenticator):
+    """Django's session auth hash is derived from the password hash, so a
+    passkey-only user's existing browser sessions survive token revocation
+    untouched unless recovery also rotates that hash. Rotating it must not
+    stop the returned (same, in-memory) user object from being usable for
+    a fresh login() right after -- Task 16 depends on that."""
+    alice.set_unusable_password()
+    alice.save(update_fields=['password'])
+    old_client = Client()
+    old_client.force_login(alice)
+    assert old_client.get('/user_data/').status_code == 200
+
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    resp = old_client.get('/user_data/')
+    assert resp.status_code == 302
+    assert resp['Location'].startswith('/login/')
+
+    new_client = Client()
+    new_client.force_login(passkey.user)
+    assert new_client.get('/user_data/').status_code == 200
+
+
+def test_finish_recover_leaves_session_hash_alone_for_password_user(alice, authenticator):
+    """Recovery must not touch the session auth hash for a user who still
+    has a usable password -- that behaviour is deliberately deferred."""
+    old_client = Client()
+    old_client.force_login(alice)
+    assert old_client.get('/user_data/').status_code == 200
+
+    challenge_id, options = service.begin_recover(alice)
+    service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert old_client.get('/user_data/').status_code == 200
 
 
 def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monkeypatch):
