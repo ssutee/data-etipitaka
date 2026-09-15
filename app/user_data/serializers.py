@@ -1,16 +1,17 @@
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 
-class RegisterSerializer(serializers.Serializer):
+class AccountIdentitySerializer(serializers.Serializer):
+    """Username + email rules shared by password signup and passkey signup."""
     email = serializers.EmailField()
-    username = serializers.CharField(max_length=150)
-    password1 = serializers.CharField(write_only=True)
-    password2 = serializers.CharField(write_only=True)
+    username = serializers.CharField(max_length=150,
+                                     validators=[UnicodeUsernameValidator()])
 
     def validate_username(self, value):
         if User.objects.filter(username=value).exists():
@@ -21,6 +22,11 @@ class RegisterSerializer(serializers.Serializer):
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError(_("A user with that email already exists."))
         return value
+
+
+class RegisterSerializer(AccountIdentitySerializer):
+    password1 = serializers.CharField(write_only=True)
+    password2 = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
         if attrs['password1'] != attrs['password2']:

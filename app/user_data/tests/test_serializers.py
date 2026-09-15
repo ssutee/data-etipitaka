@@ -72,3 +72,32 @@ def test_login_rejects_authenticated_inactive_user(monkeypatch):
     s = LoginSerializer(data={"username": "inactive", "password": "pw12345678"})
     assert not s.is_valid()
     assert "non_field_errors" in s.errors
+
+
+from user_data.serializers import AccountIdentitySerializer
+
+
+@pytest.mark.parametrize('username', ['bad name', 'semi;colon', 'x' * 151])
+def test_identity_rejects_invalid_usernames(username):
+    s = AccountIdentitySerializer(data={'email': 'n@example.com', 'username': username})
+    assert not s.is_valid()
+    assert 'username' in s.errors
+
+
+def test_identity_accepts_valid_new_user():
+    s = AccountIdentitySerializer(data={'email': 'n@example.com', 'username': 'new.user+1'})
+    assert s.is_valid(), s.errors
+
+
+def test_identity_rejects_taken_username_and_email():
+    User.objects.create_user('alice', 'alice@example.com', 'pw12345678')
+    s = AccountIdentitySerializer(data={'email': 'alice@example.com', 'username': 'alice'})
+    assert not s.is_valid()
+    assert set(s.errors) == {'username', 'email'}
+
+
+def test_register_serializer_rejects_invalid_username():
+    s = RegisterSerializer(data={'email': 'n@example.com', 'username': 'bad name',
+                                 'password1': 'pw12345678', 'password2': 'pw12345678'})
+    assert not s.is_valid()
+    assert 'username' in s.errors
