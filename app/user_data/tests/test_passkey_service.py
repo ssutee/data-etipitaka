@@ -3,6 +3,7 @@ import secrets
 
 import cbor2
 import pytest
+from django.contrib.auth.models import User
 from django.core import mail
 
 from user_data import passkey_service as service
@@ -334,7 +335,15 @@ def test_finish_register_keeps_passkey_when_email_fails(alice, authenticator, mo
     monkeypatch.setattr(service, 'send_mail', _boom)
     passkey = _register(alice, authenticator)
     assert Passkey.objects.filter(pk=passkey.pk).exists()
-    assert any(record.levelname == 'ERROR' for record in caplog.records)
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_finish_register_sends_no_email_for_user_without_email(authenticator):
+    user = User.objects.create_user('carol', '', 'carolpass123')
+    passkey = _register(user, authenticator)
+    assert passkey.pk
+    assert len(mail.outbox) == 0
 
 
 # --- clean_name hardening ----------------------------------------------------

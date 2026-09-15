@@ -11,7 +11,6 @@ import logging
 import secrets
 import unicodedata
 
-import cbor2
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
@@ -20,7 +19,8 @@ from django.utils.translation import gettext as _
 from webauthn import generate_registration_options, options_to_json, verify_registration_response
 from webauthn.helpers import (base64url_to_bytes, bytes_to_base64url,
                               decode_credential_public_key,
-                              decoded_public_key_to_cryptography)
+                              decoded_public_key_to_cryptography,
+                              encode_cbor, parse_cbor)
 from webauthn.helpers.exceptions import WebAuthnException
 from webauthn.helpers.structs import (AttestationConveyancePreference,
                                       AuthenticatorSelectionCriteria,
@@ -137,12 +137,16 @@ def _neutralize_attestation(credential):
     one of its own exception types. Keep only authData: RP ID hash, the UV
     flag, and the credential id/public key are all read from it, and none
     of that requires an attestation statement at all.
+
+    parse_cbor/encode_cbor (rather than calling cbor2 directly) wrap every
+    decode failure in WebAuthnException's own InvalidCBORData, and
+    parse_cbor rejects duplicate map keys.
     """
-    attestation_object = cbor2.loads(base64url_to_bytes(credential['response']['attestationObject']))
+    attestation_object = parse_cbor(base64url_to_bytes(credential['response']['attestationObject']))
     auth_data = attestation_object['authData']
     if not isinstance(auth_data, bytes):
         raise TypeError('authData was not bytes')
-    neutral = cbor2.dumps({'fmt': 'none', 'attStmt': {}, 'authData': auth_data})
+    neutral = encode_cbor({'fmt': 'none', 'attStmt': {}, 'authData': auth_data})
     credential = dict(credential)
     credential['response'] = dict(credential['response'])
     credential['response']['attestationObject'] = bytes_to_base64url(neutral)
@@ -164,9 +168,9 @@ def _verify_registration(challenge, credential):
         # without fully guarding against structurally-invalid input, so a
         # crafted response can still raise a raw TypeError/KeyError/
         # IndexError/ValueError (binascii.Error included) or AttributeError
-        # instead of one of its own WebAuthnException subclasses; a
-        # malformed attestationObject can also fail our own cbor2 decode
-        # above with a CBORError.
+        # instead of one of its own WebAuthnException subclasses. A
+        # malformed attestationObject fails parse_cbor above as a clean
+        # InvalidCBORData (a WebAuthnException) instead.
         verified = verify_registration_response(
             credential=credential, expected_challenge=challenge,
             expected_rp_id=rp_id, expected_origin=expected_origin,
@@ -177,7 +181,7 @@ def _verify_registration(challenge, credential):
         decoded_public_key_to_cryptography(
             decode_credential_public_key(verified.credential_public_key))
     except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
-            AttributeError, cbor2.CBORError) as exc:
+            AttributeError) as exc:
         log.info('passkey registration rejected: %s', type(exc).__name__)
         raise RegistrationFailed() from exc
     if len(verified.credential_id) > _MAX_CREDENTIAL_ID_LENGTH:
