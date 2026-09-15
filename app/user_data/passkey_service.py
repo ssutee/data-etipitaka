@@ -238,11 +238,21 @@ def _verify_registration(challenge, credential):
 def _store_passkey(user, verified, credential, name, *, enforce_cap=False):
     """Persist a verified credential as a Passkey row.
 
-    `enforce_cap`, set only for the REGISTER purpose, re-checks
-    PASSKEY_MAX_PER_USER under a select_for_update() lock on the user row,
-    taken inside this same atomic block, so two concurrent finish_register
-    calls racing past begin_register's own early (unlocked) check still
-    cannot together exceed the cap. Recovery and signup never pass it.
+    Always takes a select_for_update() lock on the user row, inside this
+    same atomic block, before inserting -- not only when enforce_cap is
+    set. Every writer (register, signup, recovery) then locks the user row
+    before it can contend on credential_id's unique index, so two
+    ceremonies racing to insert the same credential_id (e.g. one via
+    finish_register, one via finish_recover) always take the two locks in
+    the same order and so can never deadlock against each other. signup's
+    user row was itself just created earlier in the very same transaction,
+    so this lock is a cheap re-acquire there, not a wait.
+
+    `enforce_cap`, set only for the REGISTER purpose, additionally
+    re-checks PASSKEY_MAX_PER_USER while that lock is held, so two
+    concurrent finish_register calls racing past begin_register's own
+    early (unlocked) check still cannot together exceed the cap. Recovery
+    and signup never pass it.
     """
     aaguid = str(verified.aaguid)
     raw_transports = (credential.get('response') or {}).get('transports')
@@ -250,10 +260,9 @@ def _store_passkey(user, verified, credential, name, *, enforce_cap=False):
                   if isinstance(raw_transports, list) else [])
     try:
         with transaction.atomic():
-            if enforce_cap:
-                locked = get_user_model().objects.select_for_update().get(pk=user.pk)
-                if locked.passkeys.count() >= PASSKEY_MAX_PER_USER:
-                    raise TooManyPasskeys()
+            locked = get_user_model().objects.select_for_update().get(pk=user.pk)
+            if enforce_cap and locked.passkeys.count() >= PASSKEY_MAX_PER_USER:
+                raise TooManyPasskeys()
             return Passkey.objects.create(
                 user=user, credential_id=bytes_to_base64url(verified.credential_id),
                 public_key=verified.credential_public_key,

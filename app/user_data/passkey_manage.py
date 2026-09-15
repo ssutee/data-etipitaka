@@ -83,8 +83,14 @@ def rename_passkey(user, passkey_id, name):
     cleaned = clean_name(name)
     if not cleaned:
         raise InvalidName()
+    # A conditional update, not passkey.save(update_fields=...): the row
+    # can be deleted between _own's lookup and here (e.g. a concurrent
+    # delete_passkey), and save(update_fields=...) would raise
+    # DatabaseError (a 500) on a vanished row instead of the clean
+    # NotFound a renamed-out-from-under-you passkey deserves.
+    if not Passkey.objects.filter(pk=passkey.pk, user=user).update(name=cleaned):
+        raise NotFound()
     passkey.name = cleaned
-    passkey.save(update_fields=['name'])
     return passkey
 
 
@@ -95,8 +101,10 @@ def delete_passkey(user, passkey_id):
         passkey = _own(locked, passkey_id)
         if not locked.has_usable_password() and locked.passkeys.count() == 1:
             raise LockoutGuard()
-        # A queryset delete, not passkey.delete(): a concurrent delete of
-        # the same row must not raise here.
+        # A queryset delete, not passkey.delete(): both tolerate the row
+        # already being gone (Model.delete() would too), but filtering by
+        # pk+user here is the explicit statement of what's being deleted,
+        # matching the pk+user lookup _own already did.
         Passkey.objects.filter(pk=passkey.pk, user=locked).delete()
 
 
