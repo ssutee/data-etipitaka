@@ -1097,8 +1097,12 @@ def test_finish_recover_rejects_wrong_user_and_burns_challenge(alice, bob, authe
 def test_finish_recover_rejects_credential_already_registered_to_another_user(alice, bob, authenticator):
     """The same physical authenticator can't be used to recover alice's
     account when its credential is already bob's -- the unique constraint
-    on credential_id must surface as RegistrationFailed, not an
-    IntegrityError, and must not touch alice's own tokens or mail."""
+    on credential_id must surface as RegistrationFailed, from transaction
+    B, never retried (it isn't an OperationalError), and must not touch
+    mail. Transaction A has already committed by the time B fails this
+    way, so alice's own tokens are revoked regardless -- the intended,
+    fail-safe split outcome finish_recover's docstring describes, not a
+    bug: she is signed out of every API client and can simply retry."""
     add_passkey(bob, authenticator)  # sends bob his own passkey-added email
     outbox_before = len(mail.outbox)
     make_oauth_token(alice)
@@ -1106,8 +1110,8 @@ def test_finish_recover_rejects_credential_already_registered_to_another_user(al
     with pytest.raises(service.RegistrationFailed):
         service.finish_recover(alice, challenge_id, authenticator.register(options))
     assert Passkey.objects.filter(user=alice).count() == 0
-    assert Token.objects.filter(user=alice).exists()
-    assert AccessToken.objects.filter(user=alice).exists()
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
     assert len(mail.outbox) == outbox_before
 
 
@@ -1196,11 +1200,13 @@ def test_finish_recover_keep_session_key_preserves_that_session(alice, authentic
     assert other_resp['Location'].startswith('/login/')
 
 
-def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monkeypatch):
-    """Storing the passkey and revoking tokens must be one atomic step: if
-    revocation blows up, the half-finished recovery must not leave a new
-    passkey behind while the attacker's tokens survive, and no
-    passkey-added email should go out for a passkey that got rolled back."""
+def test_finish_recover_never_stores_a_passkey_when_transaction_a_fails(alice, authenticator,
+                                                                        monkeypatch):
+    """Transaction A (revoke_all_tokens) runs, and must fully fail, before
+    transaction B ever starts: a non-retryable error there must propagate
+    immediately, leaving no passkey stored, the account's tokens
+    untouched (this fake never actually deletes anything), and no
+    passkey-added email for a ceremony B never got to."""
     make_oauth_token(alice)
 
     def _boom(_user):
@@ -1216,10 +1222,14 @@ def test_finish_recover_rolls_back_when_revoke_fails(alice, authenticator, monke
     assert len(mail.outbox) == 0
 
 
-def test_finish_recover_rolls_back_when_delete_sessions_fails(alice, authenticator, monkeypatch):
-    """Same atomicity guarantee, for the session-deletion step: a failure
-    there must not leave a stored passkey or already-revoked tokens behind
-    either, and no passkey-added email should go out."""
+def test_finish_recover_keeps_token_revocation_when_transaction_b_fails(alice, authenticator,
+                                                                        monkeypatch):
+    """A session-deletion failure aborts transaction B (no passkey stored,
+    no email), but transaction A has already committed by then -- so,
+    unlike a failure inside A, alice's tokens stay revoked. This is the
+    intended, fail-safe split outcome finish_recover's docstring
+    describes: she is signed out of every API client already and can
+    simply retry the passkey ceremony."""
     make_oauth_token(alice)
 
     def _boom(_user, keep_session_key=None):
@@ -1230,26 +1240,26 @@ def test_finish_recover_rolls_back_when_delete_sessions_fails(alice, authenticat
     with pytest.raises(RuntimeError):
         service.finish_recover(alice, challenge_id, authenticator.register(options))
     assert Passkey.objects.count() == 0
-    assert Token.objects.filter(user=alice).exists()
-    assert AccessToken.objects.filter(user=alice).exists()
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
     assert len(mail.outbox) == 0
 
 
 def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authenticator, monkeypatch):
-    """A session or request live throughout the atomic block can still
-    mint a brand-new Grant/AccessToken/RefreshToken at any point during
-    it -- after the in-transaction Grant delete, the refresh delete, the
-    access delete, even before any of them run -- because DOT validates
-    both a Grant and a refresh token with a plain, unlocked SELECT. That
-    mint survives the commit since it never conflicted with anything the
-    transaction deleted. finish_recover has to sweep again after commit to
-    actually close this, not just narrow it -- so this also pins the
-    sweep's *position*: recording the atomic-block nesting depth on each
-    call catches a regression where the second call moves back inside the
-    block (which would still pass every other assertion here, since a
-    revoke from inside an about-to-commit transaction also happens to
-    delete rows that were only ever created within that same transaction
-    in this particular test)."""
+    """A session or request live throughout transaction A can still mint a
+    brand-new Grant/AccessToken/RefreshToken at any point during it --
+    after the Grant delete, the refresh delete, the access delete, even
+    before any of them run -- because DOT validates both a Grant and a
+    refresh token with a plain, unlocked SELECT. That mint survives A's
+    commit since it never conflicted with anything A deleted.
+    finish_recover has to sweep again after commit to actually close
+    this, not just narrow it -- so this also pins the sweep's *position*:
+    recording the atomic-block nesting depth on each call catches a
+    regression where the second call moves back inside a transaction
+    (which would still pass every other assertion here, since a revoke
+    from inside an about-to-commit transaction also happens to delete
+    rows that were only ever created within that same transaction in this
+    particular test)."""
     real_revoke = service.revoke_all_tokens
     calls = []
     depths = []
@@ -1258,14 +1268,16 @@ def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authe
         calls.append(user)
         # pytest-django wraps the whole test in its own atomic block(s), so
         # 0 is never the baseline -- what matters is that the second call
-        # is shallower than the first, i.e. it runs after finish_recover's
-        # own `with transaction.atomic():` has exited.
+        # is shallower than the first, i.e. it runs after transaction A's
+        # own `with transaction.atomic():` (opened by _run_with_retry) has
+        # exited. revoke_all_tokens is only ever called from A and from
+        # the post-commit sweep -- transaction B never calls it at all.
         depths.append(len(connection.atomic_blocks))
         real_revoke(user)
         if len(calls) == 1:
-            # Stand in for the concurrent mint: whenever the in-transaction
-            # revoke actually runs, a fresh set of credentials appears for
-            # this user, as if a racing request just finished.
+            # Stand in for the concurrent mint: whenever A's own revoke
+            # actually runs, a fresh set of credentials appears for this
+            # user, as if a racing request just finished.
             access = make_oauth_token(user)
             RefreshToken.objects.create(user=user, application=access.application,
                                         token='concurrent-r', access_token=access)
@@ -1280,8 +1292,8 @@ def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authe
     passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
 
     assert passkey.user == alice
-    assert len(calls) == 2  # the in-transaction call, then the post-commit sweep
-    assert depths[1] < depths[0]  # the sweep runs strictly outside finish_recover's atomic block
+    assert len(calls) == 2  # transaction A's own call, then the post-commit sweep
+    assert depths[1] < depths[0]  # the sweep runs strictly outside transaction A
     assert not Token.objects.filter(user=alice).exists()
     assert not AccessToken.objects.filter(user=alice).exists()
     assert not RefreshToken.objects.filter(user=alice).exists()
@@ -1313,48 +1325,101 @@ def test_finish_recover_logs_when_post_commit_sweep_fails(alice, authenticator, 
               for record in caplog.records)
 
 
-# --- recovery locks token rows before the user row ---------------------------
+# --- recovery splits into two separate, lock-ordered transactions ----------
 
-def test_finish_recover_locks_token_rows_before_the_user_row(alice, authenticator):
-    """lock_user_tokens's FOR UPDATE queries against Grant, RefreshToken,
-    AccessToken and IDToken must all land before _store_passkey's own FOR
-    UPDATE on the user row: the fix for the deadlock against a concurrent
-    OAuth refresh-token rotation depends on every writer taking locks in
-    this same order (token rows, then the user row), not just on
-    retrying into the old, opposite order until it happens to succeed."""
-    make_oauth_token(alice)
-    user_table = User._meta.db_table
+@pytest.mark.django_db(transaction=True)
+def test_finish_recover_runs_revoke_and_store_in_separate_transactions(alice, authenticator,
+                                                                        monkeypatch):
+    """Transaction A (revoke_all_tokens) and transaction B (_store_passkey,
+    then delete_user_sessions) must be genuinely separate top-level
+    Postgres transactions -- the whole point of the split (see
+    finish_recover's docstring) is that neither one ever holds a
+    token-table lock and the user-row lock at the same time.
+    connection.atomic_blocks[0] is the currently open outermost Atomic
+    instance for this connection (or the list is empty when nothing is
+    open); recording *the object itself* (not just its id()) at each call
+    site, in a list this test keeps a live reference to throughout, is
+    enough to tell whether two calls shared one top-level transaction,
+    ran in two separate ones, or ran with no transaction open at all --
+    true of the post-commit sweep, which runs after both A and B have
+    already committed. Comparing id() instead would be unsound: A's own
+    Atomic instance is garbage-collected the moment A's `with` block
+    exits, and CPython can and does immediately reuse that exact address
+    for B's -- which is exactly what a first version of this test found,
+    the two id()s equal despite genuinely separate transactions. Keeping
+    the objects alive in `txn_blocks` for the rest of the test and
+    comparing with `is`/`is not` sidesteps that entirely. A second,
+    independent check on the query log proves the stronger property the
+    split exists for: no Grant/RefreshToken/AccessToken/IDToken SQL runs
+    while B is open."""
+    real_revoke = service.revoke_all_tokens
+    real_store = service._store_passkey
+    real_delete_sessions = service.delete_user_sessions
     token_tables = [Grant._meta.db_table, RefreshToken._meta.db_table,
                     AccessToken._meta.db_table, IDToken._meta.db_table]
+    txn_blocks = {}
+    b_bounds = {}
+
+    def _current_block():
+        return connection.atomic_blocks[0] if connection.atomic_blocks else None
+
+    def _revoke(user):
+        txn_blocks.setdefault('revoke', []).append(_current_block())
+        return real_revoke(user)
+
+    def _store(*args, **kwargs):
+        txn_blocks.setdefault('store', []).append(_current_block())
+        b_bounds['start'] = len(ctx.captured_queries)
+        return real_store(*args, **kwargs)
+
+    def _delete_sessions(*args, **kwargs):
+        txn_blocks.setdefault('delete_sessions', []).append(_current_block())
+        result = real_delete_sessions(*args, **kwargs)
+        b_bounds['end'] = len(ctx.captured_queries)
+        return result
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _revoke)
+    monkeypatch.setattr(service, '_store_passkey', _store)
+    monkeypatch.setattr(service, 'delete_user_sessions', _delete_sessions)
 
     challenge_id, options = service.begin_recover(alice)
     with CaptureQueriesContext(connection) as ctx:
         service.finish_recover(alice, challenge_id, authenticator.register(options))
 
-    for_update_sql = [q['sql'] for q in ctx.captured_queries if 'FOR UPDATE' in q['sql']]
-    user_lock_index = next(i for i, sql in enumerate(for_update_sql) if user_table in sql)
-    token_lock_indexes = [i for i, sql in enumerate(for_update_sql)
-                          if any(table in sql for table in token_tables)]
-    assert len(token_lock_indexes) == 4  # Grant, RefreshToken, AccessToken, IDToken
-    assert max(token_lock_indexes) < user_lock_index
+    # A's own call and B's calls never share a top-level transaction; B's
+    # two calls (_store_passkey, delete_user_sessions) share the same one.
+    assert txn_blocks['revoke'][0] is not None
+    assert txn_blocks['store'][0] is not None
+    assert txn_blocks['revoke'][0] is not txn_blocks['store'][0]
+    assert txn_blocks['store'][0] is txn_blocks['delete_sessions'][0]
+    # The post-commit sweep (revoke_all_tokens's second call) runs with no
+    # atomic block open at all -- strictly outside both A and B.
+    assert txn_blocks['revoke'][1] is None
+
+    b_queries = ctx.captured_queries[b_bounds['start']:b_bounds['end']]
+    assert b_queries  # the window is real, not an empty slice
+    assert not any(table in q['sql'] for q in b_queries for table in token_tables)
 
 
 # --- recovery retries on deadlock --------------------------------------------
-# A concurrent OAuth refresh-token rotation can lock the token tables and
-# then the user row in the opposite order from finish_recover's own atomic
-# block (user row in _store_passkey, then token rows in revoke_all_tokens),
-# which Postgres can only resolve by aborting one side with a deadlock
-# (40P01) or, under stricter isolation, a serialization failure (40001).
-# These are exercised by monkeypatching revoke_all_tokens to raise the same
-# shape of error a real driver would, rather than provoking a real deadlock
-# between two threads.
+# A concurrent OAuth refresh-token rotation can lock RefreshToken and then
+# AccessToken rows before its commit needs the user row's key-share lock
+# (see finish_recover's docstring for the full cycle this used to allow).
+# Splitting recovery into transaction A (revoke_all_tokens, never touches
+# the user row) and transaction B (_store_passkey then delete_user_sessions,
+# never touches a token-table row) removes that cycle outright. Both
+# transactions still carry the same retry backstop for whatever contention
+# the split does not itself rule out -- exercised here by monkeypatching
+# the one call each transaction makes to raise the same shape of error a
+# real driver would, rather than provoking a real deadlock between threads.
 
 def _raise_deadlock():
     cause = psycopg.errors.DeadlockDetected('deadlock detected')
     raise OperationalError('deadlock detected') from cause
 
 
-def test_finish_recover_retries_once_on_deadlock_then_succeeds(alice, authenticator, monkeypatch):
+def test_finish_recover_retries_once_in_a_on_deadlock_then_succeeds(alice, authenticator,
+                                                                     monkeypatch):
     make_oauth_token(alice)
     real_revoke = service.revoke_all_tokens
     calls = {'n': 0}
@@ -1372,13 +1437,13 @@ def test_finish_recover_retries_once_on_deadlock_then_succeeds(alice, authentica
     passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
 
     assert passkey.user == alice
-    assert Passkey.objects.filter(user=alice).count() == 1  # the failed attempt rolled back
+    assert Passkey.objects.filter(user=alice).count() == 1  # B only ever ran once
     assert not Token.objects.filter(user=alice).exists()
     assert not AccessToken.objects.filter(user=alice).exists()
     assert len(mail.outbox) == 1
 
 
-def test_finish_recover_gives_up_after_max_deadlock_retries(alice, authenticator, monkeypatch):
+def test_finish_recover_gives_up_after_max_deadlock_retries_in_a(alice, authenticator, monkeypatch):
     calls = {'n': 0}
 
     def _always_deadlocks(_user):
@@ -1393,12 +1458,12 @@ def test_finish_recover_gives_up_after_max_deadlock_retries(alice, authenticator
         service.finish_recover(alice, challenge_id, authenticator.register(options))
 
     assert calls['n'] == service._MAX_RECOVERY_ATTEMPTS
-    assert not Passkey.objects.filter(user=alice).exists()
+    assert not Passkey.objects.filter(user=alice).exists()  # B never even started
     assert len(mail.outbox) == 0
 
 
-def test_finish_recover_does_not_retry_a_non_deadlock_operational_error(alice, authenticator,
-                                                                        monkeypatch):
+def test_finish_recover_does_not_retry_a_non_deadlock_operational_error_in_a(alice, authenticator,
+                                                                             monkeypatch):
     calls = {'n': 0}
 
     def _unrelated_operational_error(_user):
@@ -1414,6 +1479,51 @@ def test_finish_recover_does_not_retry_a_non_deadlock_operational_error(alice, a
 
     assert calls['n'] == 1  # no retry: this is not a deadlock or serialization failure
     assert not Passkey.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_finish_recover_retries_once_in_b_on_deadlock_then_succeeds(alice, authenticator,
+                                                                     monkeypatch):
+    """The same backstop applies to transaction B independently of A: a
+    failed B attempt rolls its own passkey insert back together with the
+    rest of B (delete_user_sessions never having run yet), so the retry
+    starts clean and stores exactly one passkey, never two."""
+    real_delete_sessions = service.delete_user_sessions
+    calls = {'n': 0}
+
+    def _flaky_delete_sessions(user, keep_session_key=None):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            _raise_deadlock()
+        return real_delete_sessions(user, keep_session_key=keep_session_key)
+
+    monkeypatch.setattr(service, 'delete_user_sessions', _flaky_delete_sessions)
+    monkeypatch.setattr(service.time, 'sleep', lambda *_a, **_kw: None)
+
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert passkey.user == alice
+    assert Passkey.objects.filter(user=alice).count() == 1  # the failed B attempt rolled back
+    assert len(mail.outbox) == 1
+
+
+def test_finish_recover_gives_up_after_max_deadlock_retries_in_b(alice, authenticator, monkeypatch):
+    calls = {'n': 0}
+
+    def _always_deadlocks(_user, keep_session_key=None):
+        calls['n'] += 1
+        _raise_deadlock()
+
+    monkeypatch.setattr(service, 'delete_user_sessions', _always_deadlocks)
+    monkeypatch.setattr(service.time, 'sleep', lambda *_a, **_kw: None)
+
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(OperationalError):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert calls['n'] == service._MAX_RECOVERY_ATTEMPTS
+    assert not Passkey.objects.filter(user=alice).exists()  # every attempt's insert rolled back
     assert len(mail.outbox) == 0
 
 

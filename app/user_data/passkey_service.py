@@ -41,8 +41,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
-from .account_tokens import (check_session_engine, delete_user_sessions, lock_user_tokens,
-                             revoke_all_tokens)
+from .account_tokens import check_session_engine, delete_user_sessions, revoke_all_tokens
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -597,6 +596,32 @@ def _is_retryable_db_error(exc):
     return getattr(exc.__cause__, 'sqlstate', None) in _RETRYABLE_SQLSTATES
 
 
+def _run_with_retry(fn, user):
+    """Call fn() inside its own transaction.atomic() block, retried up to
+    _MAX_RECOVERY_ATTEMPTS times on a Postgres deadlock or serialization
+    failure (see _is_retryable_db_error). Any other OperationalError, or
+    the final attempt, propagates immediately -- as does any exception
+    that isn't an OperationalError at all, on the first attempt, with no
+    retry. `user` is used only to name the account in the retry's own
+    warning log.
+
+    finish_recover calls this twice, for two separate transactions (see
+    its own docstring for why they must be separate rather than one):
+    each gets this same backstop independently, so neither transaction's
+    retry budget is spent by contention the other one hit.
+    """
+    for attempt in range(1, _MAX_RECOVERY_ATTEMPTS + 1):
+        try:
+            with transaction.atomic():
+                return fn()
+        except OperationalError as exc:
+            if attempt == _MAX_RECOVERY_ATTEMPTS or not _is_retryable_db_error(exc):
+                raise
+            log.warning('finish_recover retrying after a deadlock/serialization '
+                       'failure for user %s (attempt %d)', user.pk, attempt)
+            time.sleep(random.uniform(0.02, 0.1) * attempt)
+
+
 def begin_recover(user):
     """Options for creating a passkey from a valid account-recovery session.
 
@@ -610,44 +635,96 @@ def begin_recover(user):
 
 
 def finish_recover(user, challenge_id, credential, name=None, *, keep_session_key=None):
-    """Store the new passkey, revoke every token, and sign every other
-    browser session out.
+    """Revoke every token, then store the new passkey and sign every other
+    browser session out -- as two separate, independently retried
+    transactions (A, then B), never one.
 
     check_session_engine() runs before anything else, including consuming
-    the challenge: delete_user_sessions needs it later, inside the atomic
-    block below, and failing before _consume_and_verify means a
-    misconfigured SESSION_ENGINE never burns the caller's one-time
-    challenge for a recovery that couldn't have completed anyway.
+    the challenge: delete_user_sessions needs it later, in transaction B,
+    and failing before _consume_and_verify means a misconfigured
+    SESSION_ENGINE never burns the caller's one-time challenge for a
+    recovery that couldn't have completed anyway.
 
     Consuming the challenge and verifying the response happen next,
-    exactly like every other ceremony, and outside the transaction below
+    exactly like every other ceremony, and outside both transactions below
     -- _consume_and_verify already opened and closed its own durable
     transaction inside _consume, and a durable atomic block can never nest
     inside a regular one.
 
-    Storing the passkey, revoking every token, and deleting every session
-    then happen together in one atomic block: a password-reset-driven
-    recovery is meant for an account an attacker may currently be living
-    inside, so a failure partway through any of the three must not leave
-    the account half-recovered -- a passkey added but the old tokens or
-    sessions still live, for instance.
+    Why two transactions, not one: a transaction that holds the user row's
+    FOR UPDATE lock (which _store_passkey takes) while it still has to
+    touch a Grant/RefreshToken/AccessToken/IDToken row (which
+    revoke_all_tokens does) can deadlock against a concurrent OAuth
+    refresh-token rotation. django-oauth-toolkit 3.4.1's own
+    _save_bearer_token takes FOR UPDATE on the RefreshToken row being
+    rotated, then FOR UPDATE on its paired AccessToken row, before it ever
+    inserts the new access/refresh pair -- and that insert's COMMIT is what
+    needs a KEY SHARE lock on the user row (Postgres declares every FK
+    DEFERRABLE INITIALLY DEFERRED, so the check happens at COMMIT, not at
+    INSERT). A single earlier fix pre-locked the token rows before the
+    user row inside one transaction (lock_user_tokens, since removed) --
+    but that only narrowed the race: several SELECTs are not one atomic
+    step, so a rotation could still commit a fresh refresh/access pair in
+    the gap between them, leaving recovery holding the *new* AccessToken
+    row and waiting on the *new* RefreshToken row DOT held, while that
+    same rotation's commit waited on the user row recovery held -- the
+    same cycle, re-formed with newer rows, on every retry. Splitting into
+    two transactions removes the cycle instead of narrowing it: A
+    (revoke_all_tokens) never locks the user row at all, and B
+    (_store_passkey, then delete_user_sessions) never touches a
+    token-table row at all, so neither transaction is ever simultaneously
+    the thing a rotation is waiting on and the thing waiting on a
+    rotation. A's own delete order (Grant, then RefreshToken, then
+    AccessToken, then IDToken -- see the account_tokens module docstring)
+    already matches DOT's own lock order for the tables that order can
+    matter for, so A alone cannot form a new cycle with a rotation either.
 
-    revoke_all_tokens runs a second time after that transaction commits.
-    DOT validates a Grant or a refresh token with a plain, unlocked SELECT
-    (see the account_tokens module docstring), so a request racing this
-    whole function can still mint a brand-new token at any point during
-    the transaction and have that mint survive the commit untouched --
-    the in-transaction revoke only narrows this window, it cannot close
-    it. This second sweep is best-effort, like the email below: recovery
-    has already committed by the time it runs, so a sweep failure is
-    logged, not raised back at whoever is waiting on this recovery to
-    succeed.
+    Both A and B are run through _run_with_retry, independently retried up
+    to _MAX_RECOVERY_ATTEMPTS times each on a deadlock or serialization
+    failure -- a backstop against contention the split does not itself
+    rule out (a third transaction, a lock-wait-timeout-adjacent story,
+    deadlock detection itself being inherently a race), not the primary
+    defense. Retrying A is safe because it only deletes rows, and a
+    rolled-back attempt undoes exactly that. Retrying B is safe for the
+    same reason storing a passkey has always been safe to retry: the
+    challenge was already consumed and the credential already verified
+    above, outside both transactions, so a rolled-back attempt's passkey
+    insert (and delete_user_sessions call) undo cleanly and the next
+    attempt starts clean rather than double-storing.
+
+    The split changes recovery's failure semantics, deliberately and
+    fail-safe: if A fails outright (retries exhausted, or a non-retryable
+    error), it propagates immediately and B never runs at all -- no
+    passkey stored, no email, and the account's tokens are exactly as they
+    were, since A's own failed transaction rolled back whatever it had
+    done. If B fails outright instead -- a duplicate credential
+    (RegistrationFailed from _store_passkey, never retried, since it is
+    not an OperationalError), a session-deletion error, or B's own
+    retries exhausted -- it also propagates immediately, but A has
+    already committed by then: the account's tokens stay revoked even
+    though no passkey was stored and no email went out. That is safe, not
+    half-finished: the caller is already signed out of every API client
+    and can simply retry the passkey ceremony; the browser sessions from
+    before this attempt are untouched only because B never reached
+    delete_user_sessions, which is no worse than the pre-recovery state;
+    and the password-reset link that got the caller here stays valid,
+    since its signature covers the newest passkey's pk, which a failed B
+    never changed.
+
+    revoke_all_tokens runs a third time (once in A, then this one) after B
+    commits. DOT validates a Grant or a refresh token with a plain,
+    unlocked SELECT (see the account_tokens module docstring), so a
+    request racing A or B can still mint a brand-new token at any point
+    and have that mint survive untouched -- A's revoke only narrows this
+    window, it cannot close it. This post-commit sweep is best-effort,
+    like the email below: both A and B have already committed by the time
+    it runs, so a sweep failure is logged, not raised back at whoever is
+    waiting on this recovery to succeed.
 
     The email is sent last, after the post-commit sweep has been
     attempted -- but a failed sweep is caught and logged above, not
-    raised, so it does not stop the email from going out; only a failure
-    inside the atomic block (store, revoke, or delete_user_sessions) does
-    that, by raising before this line is ever reached.
+    raised, so it does not stop the email from going out; only B failing
+    (which happens before this line could ever be reached) does that.
 
     Task 16: the recovery view should call request.session.cycle_key()
     once it has verified the reset token (before calling this function),
@@ -655,43 +732,20 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     that value, read from the session actually driving the request, never
     anything client-supplied -- so the browser doing the recovering is
     not signed out of its own, freshly-cycled session.
-
-    lock_user_tokens(user) runs first inside the atomic block, before
-    _store_passkey ever locks the user row: see its own docstring for why
-    -- in short, it makes this transaction take the same lock order
-    (token rows, then the user row) that a concurrent OAuth refresh-token
-    rotation takes, which is what actually prevents the deadlock rather
-    than just retrying into it repeatedly.
-
-    The atomic block is still retried, up to _MAX_RECOVERY_ATTEMPTS times,
-    on a deadlock or serialization failure (see _is_retryable_db_error) --
-    a backstop, not the primary defense: Postgres can still report
-    40P01/40001 for reasons other than this specific cycle (a third
-    transaction, a lock-wait-timeout-adjacent story, deadlock detection
-    itself is inherently a race), and retrying is safe regardless of cause
-    because the challenge was already consumed and the credential already
-    verified above, outside the block, and a rolled-back attempt undoes
-    the whole block (the passkey insert included), so the next attempt
-    starts clean rather than double-storing or double-revoking. Any other
-    OperationalError, or the final attempt, is re-raised as-is.
     """
     check_session_engine()
     verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
-    passkey = None
-    for attempt in range(1, _MAX_RECOVERY_ATTEMPTS + 1):
-        try:
-            with transaction.atomic():
-                lock_user_tokens(user)
-                passkey = _store_passkey(user, verified, credential, name)
-                revoke_all_tokens(user)
-                delete_user_sessions(user, keep_session_key=keep_session_key)
-            break
-        except OperationalError as exc:
-            if attempt == _MAX_RECOVERY_ATTEMPTS or not _is_retryable_db_error(exc):
-                raise
-            log.warning('finish_recover retrying after a deadlock/serialization '
-                       'failure for user %s (attempt %d)', user.pk, attempt)
-            time.sleep(random.uniform(0.02, 0.1) * attempt)
+
+    def _revoke():
+        revoke_all_tokens(user)
+
+    def _store_and_sign_out():
+        passkey = _store_passkey(user, verified, credential, name)
+        delete_user_sessions(user, keep_session_key=keep_session_key)
+        return passkey
+
+    _run_with_retry(_revoke, user)
+    passkey = _run_with_retry(_store_and_sign_out, user)
     try:
         revoke_all_tokens(user)
     except Exception:  # recovery already committed; a sweep failure must not look like one
