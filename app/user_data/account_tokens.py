@@ -19,30 +19,53 @@ and land on invalid_grant once we commit and the row is simply gone,
 instead of racing to mint a fresh access/refresh token pair after we've
 already moved on to revoking those.
 
-RefreshToken goes before AccessToken for the same reason in miniature: if
-a refresh-token rotation is in flight, deleting the access token first
-would let RefreshToken.access_token (SET_NULL) silently orphan a
-concurrently-created refresh token by nulling out the access token it was
-just bound to; deleting refresh tokens first instead means any refresh
-token that rotation creates after our delete has already run remains
-directly deletable (by table, not by a since-vanished FK), and DOT refuses
-to honor an orphaned refresh token during that same window regardless.
+RefreshToken goes before AccessToken for the same reason as Grant, one
+level down: DOT's validate_refresh_token looks up the RefreshToken row by
+checksum with a plain, unlocked SELECT
+(RefreshToken.objects.filter(token_checksum=...).first(), in
+oauth2_validators.py) -- if that row is simply gone, validation returns
+False outright and nothing gets minted. Deleting RefreshToken first is
+what closes that window fastest: a concurrent refresh-grant request that
+reads after (or blocks behind) this delete finds no row at all. Deleting
+AccessToken first instead would leave the refresh token itself fully
+valid throughout the gap -- SET_NULL on RefreshToken.access_token only
+clears its pointer to the now-gone access token, it does not touch the
+refresh token's own validity -- so the credential a client would actually
+present stays exchangeable for a brand-new access token until
+RefreshToken's own delete finally runs. Orphaning the refresh token row
+(deleting it, not just nulling a pointer to it) is the protection this
+order buys, not a side effect the order is chosen to avoid.
 
 IDToken is deleted last and explicitly, because none of the other three
 deletions reach it on their own: it is only ever a delete *target* (via
 AccessToken.id_token), never a delete source, so an IDToken row survives
 untouched unless its own table is filtered too -- leaving a live OIDC
 identity token behind after "revoke everything".
-"""
-from importlib import import_module
 
+None of this closes the window completely, in-transaction ordering only
+narrows it: DOT's unlocked reads mean a request racing this whole
+function can still complete after every delete above has already run and
+mint a brand-new Grant/AccessToken/RefreshToken that our own deletes never
+see. Callers doing something security-sensitive with revoke_all_tokens
+(passkey recovery is the current one) are expected to call it again after
+their transaction commits, to sweep up whatever slipped through during it.
+"""
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
-from django.core.exceptions import ImproperlyConfigured
+from django.contrib.sessions.backends.db import SessionStore
+from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.utils import timezone
 from oauth2_provider.models import (get_access_token_model, get_grant_model,
                                     get_id_token_model, get_refresh_token_model)
 from rest_framework.authtoken.models import Token
+
+_DB_SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+
+# Batch size for the session-row delete in delete_user_sessions: one
+# filter(session_key__in=...).delete() per chunk rather than one row at a
+# time, but still bounded so a very large match set doesn't build one
+# unbounded SQL IN clause.
+_SESSION_DELETE_CHUNK = 500
 
 
 def revoke_all_tokens(user):
@@ -59,6 +82,31 @@ def revoke_all_tokens(user):
     get_id_token_model().objects.filter(user=user).delete()
 
 
+def check_session_engine():
+    """Raise ImproperlyConfigured unless SESSION_ENGINE is plain, uncached 'db'.
+
+    delete_user_sessions needs a server-side session row it can read and
+    delete directly by primary key. 'cached_db' keeps that same row, but
+    also serves reads from a cache entry that a concurrent, still-open
+    transaction can re-populate (from the row this process has not
+    committed the deletion of yet) in the gap right after this process
+    evicts it -- deployments that actually run 'cached_db' would need a
+    real analysis of that race, and production here runs plain 'db', so
+    this is scoped to exactly what has been verified safe rather than
+    trusted to extend cleanly. Every other engine (signed_cookies, a plain
+    cache with no database backing at all, ...) keeps no server-side row
+    whatsoever, so there would be nothing to scan or delete -- silently
+    doing nothing would leave every prior session valid, which is the
+    security hole this whole mechanism exists to close, so misconfiguring
+    it must fail loudly instead of quietly no-op-ing.
+    """
+    if settings.SESSION_ENGINE != _DB_SESSION_ENGINE:
+        raise ImproperlyConfigured(
+            "delete_user_sessions requires SESSION_ENGINE = %r; %r keeps no "
+            "directly deletable server-side session row." %
+            (_DB_SESSION_ENGINE, settings.SESSION_ENGINE))
+
+
 def delete_user_sessions(user, keep_session_key=None):
     """Delete every Django session belonging to `user`, on every device.
 
@@ -68,44 +116,46 @@ def delete_user_sessions(user, keep_session_key=None):
     stays exactly as it was), so Django's session-auth-hash check -- which
     only compares a hash derived from the password -- has nothing to
     invalidate a stale session with. Something has to delete the row
-    itself, and this is that something.
+    itself, and this is that something, for every user alike.
 
     Sessions carry no per-user index, so the only way to find every
     session belonging to `user` is an O(active sessions) scan: decode
     every still-live row and check whose auth session key it carries. This
     runs once per recovery, not once per request, so the cost is
-    acceptable even with a large sessions table.
+    acceptable even with a large sessions table. See check_session_engine
+    for why this requires plain 'db'.
 
-    Requires a database-backed SESSION_ENGINE ('db', or its cached
-    variant 'cached_db' -- both expose get_model_class()). A signed-cookie
-    or plain-cache engine keeps no server-side row to scan or delete, so
-    silently doing nothing here would leave every prior session valid --
-    the exact security hole this function exists to close -- so that
-    configuration raises loudly instead of a quiet, wrong no-op.
+    Matching a decoded row's SESSION_KEY against `user.pk` goes through
+    the user model's own primary-key field (`to_python`), the same
+    coercion django.contrib.auth's own session lookup uses -- a bare
+    string comparison would miss a non-canonical encoding of the same id
+    (e.g. "02" for pk 2) that Django itself still authenticates.
 
     `keep_session_key`, when given, is never deleted even if it belongs to
     `user` -- the caller's own current session, when the recovering
     browser is itself logged in as the account being recovered.
     """
-    store = import_module(settings.SESSION_ENGINE).SessionStore
-    if not hasattr(store, 'get_model_class'):
-        raise ImproperlyConfigured(
-            "delete_user_sessions requires a database-backed SESSION_ENGINE "
-            "('db' or 'cached_db'); %r keeps no server-side session row to "
-            "scan or delete." % settings.SESSION_ENGINE)
-    model = store.get_model_class()
-    target = str(user.pk)
+    check_session_engine()
+    model = SessionStore.get_model_class()
+    pk_field = user._meta.pk
+    stale_keys = []
     rows = (model.objects.filter(expire_date__gt=timezone.now())
             .only('session_key', 'session_data').iterator())
     for row in rows:
         if row.session_key == keep_session_key:
             continue
-        try:
-            data = store().decode(row.session_data)
-        except Exception:  # corrupt session data must never abort the scan
+        # SessionBase.decode() never raises -- a corrupt signature or an
+        # undecodable payload both fall back to {} internally -- so there
+        # is nothing left here for a try/except to usefully catch.
+        data = SessionStore().decode(row.session_data)
+        if not isinstance(data, dict):
             continue
-        if str(data.get(SESSION_KEY)) == target:
-            # Go through the store, not model.objects.filter(...).delete():
-            # cached_db keeps a cache entry per session_key that only the
-            # store's own delete() knows to evict.
-            store(session_key=row.session_key).delete()
+        try:
+            matched = pk_field.to_python(data.get(SESSION_KEY)) == user.pk
+        except (ValidationError, TypeError, ValueError):
+            continue
+        if matched:
+            stale_keys.append(row.session_key)
+    for start in range(0, len(stale_keys), _SESSION_DELETE_CHUNK):
+        chunk = stale_keys[start:start + _SESSION_DELETE_CHUNK]
+        model.objects.filter(session_key__in=chunk).delete()

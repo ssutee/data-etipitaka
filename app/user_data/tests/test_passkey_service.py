@@ -1,12 +1,15 @@
 import json
 import secrets
+from datetime import timedelta
 
 import cbor2
 import pytest
 from django.contrib.auth.models import User
 from django.core import mail
+from django.core.exceptions import ImproperlyConfigured
 from django.test import Client
-from oauth2_provider.models import AccessToken
+from django.utils import timezone
+from oauth2_provider.models import AccessToken, Grant, RefreshToken
 from rest_framework.authtoken.models import Token
 
 from user_data import passkey_challenges as challenges
@@ -1081,11 +1084,11 @@ def test_finish_recover_works_for_passkey_only_user(alice, authenticator):
 
 
 def test_finish_recover_signs_out_existing_sessions_for_passkey_only_user(alice, authenticator):
-    """Django's session auth hash is derived from the password hash, so a
-    passkey-only user's existing browser sessions survive token revocation
-    untouched unless recovery also rotates that hash. Rotating it must not
-    stop the returned (same, in-memory) user object from being usable for
-    a fresh login() right after -- Task 16 depends on that."""
+    """delete_user_sessions signs a passkey-only user's existing browser
+    session out exactly the same way it does for anyone else -- a
+    regression check that recovery still covers this user shape (it used
+    to also rotate an unusable-password hash for this case specifically;
+    that's gone now that the session scan covers every user)."""
     alice.set_unusable_password()
     alice.save(update_fields=['password'])
     old_client = Client()
@@ -1182,3 +1185,87 @@ def test_finish_recover_rolls_back_when_delete_sessions_fails(alice, authenticat
     assert Token.objects.filter(user=alice).exists()
     assert AccessToken.objects.filter(user=alice).exists()
     assert len(mail.outbox) == 0
+
+
+def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authenticator, monkeypatch):
+    """A session or request live throughout the atomic block can still
+    mint a brand-new Grant/AccessToken/RefreshToken at any point during
+    it -- after the in-transaction Grant delete, the refresh delete, the
+    access delete, even before any of them run -- because DOT validates
+    both a Grant and a refresh token with a plain, unlocked SELECT. That
+    mint survives the commit since it never conflicted with anything the
+    transaction deleted. finish_recover has to sweep again after commit to
+    actually close this, not just narrow it."""
+    real_revoke = service.revoke_all_tokens
+    calls = []
+
+    def _revoke_then_mint(user):
+        calls.append(user)
+        real_revoke(user)
+        if len(calls) == 1:
+            # Stand in for the concurrent mint: whenever the in-transaction
+            # revoke actually runs, a fresh set of credentials appears for
+            # this user, as if a racing request just finished.
+            access = make_oauth_token(user)
+            RefreshToken.objects.create(user=user, application=access.application,
+                                        token='concurrent-r', access_token=access)
+            Grant.objects.create(user=user, application=access.application,
+                                 code='concurrent-c',
+                                 expires=timezone.now() + timedelta(minutes=5),
+                                 redirect_uri='https://app.example/cb',
+                                 scope='etipitaka:read')
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _revoke_then_mint)
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert passkey.user == alice
+    assert len(calls) == 2  # the in-transaction call, then the post-commit sweep
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
+    assert not RefreshToken.objects.filter(user=alice).exists()
+    assert not Grant.objects.filter(user=alice).exists()
+
+
+def test_finish_recover_logs_when_post_commit_sweep_fails(alice, authenticator, monkeypatch, caplog):
+    """The post-commit sweep is best-effort, like the email: recovery has
+    already committed by the time it runs, so a failure there must not
+    come back as an exception the caller has to treat as a failed
+    recovery -- the passkey is real and already stored."""
+    real_revoke = service.revoke_all_tokens
+    calls = []
+
+    def _revoke_once_then_fail(user):
+        calls.append(user)
+        if len(calls) == 1:
+            real_revoke(user)
+        else:
+            raise RuntimeError('sweep boom')
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _revoke_once_then_fail)
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert passkey.user == alice
+    assert Passkey.objects.filter(pk=passkey.pk).exists()
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_finish_recover_checks_session_engine_before_consuming_challenge(alice, authenticator,
+                                                                          settings):
+    """A misconfigured SESSION_ENGINE must be caught before the one-time
+    recovery challenge is burnt -- delete_user_sessions would fail deep
+    inside the atomic block anyway, but only after the challenge that
+    can't be replayed is already gone."""
+    challenge_id, options = service.begin_recover(alice)
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+    with pytest.raises(ImproperlyConfigured):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert WebAuthnChallenge.objects.filter(pk=challenge_id).exists()
+
+
+def test_begin_recover_checks_session_engine(alice, settings):
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+    with pytest.raises(ImproperlyConfigured):
+        service.begin_recover(alice)

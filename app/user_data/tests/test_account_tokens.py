@@ -174,7 +174,64 @@ def test_delete_user_sessions_ignores_expired_and_corrupt_rows(alice):
     assert Session.objects.filter(pk=corrupt.pk).exists()
 
 
-def test_delete_user_sessions_requires_db_backed_engine(alice, settings):
-    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+@pytest.mark.parametrize('engine', [
+    'django.contrib.sessions.backends.cached_db',
+    'django.contrib.sessions.backends.signed_cookies',
+])
+def test_delete_user_sessions_requires_plain_db_engine(alice, settings, engine):
+    """Only plain 'db' is supported -- 'cached_db' keeps the same
+    server-side row but also risks serving a stale cache entry that
+    re-populates from a not-yet-committed row (see check_session_engine's
+    docstring), and signed_cookies/a plain cache keep no server-side row
+    at all."""
+    settings.SESSION_ENGINE = engine
     with pytest.raises(ImproperlyConfigured):
         delete_user_sessions(alice)
+
+
+def test_delete_user_sessions_skips_non_dict_payload(alice):
+    """A session row need not decode to a dict -- SessionBase.decode() will
+    happily hand back whatever JSON-serializable object was encoded, e.g.
+    a bare list -- and .get(SESSION_KEY) on that would raise. The scan
+    must skip it, not crash."""
+    encoded = SessionStore().encode([1, 2, 3])
+    row = Session.objects.create(session_key='list-payload-session', session_data=encoded,
+                                 expire_date=timezone.now() + timedelta(days=1))
+
+    delete_user_sessions(alice)  # must not raise
+
+    assert Session.objects.filter(pk=row.pk).exists()
+
+
+def test_delete_user_sessions_skips_session_key_that_is_not_a_valid_pk(alice):
+    """A SESSION_KEY that can't even be coerced through the pk field at
+    all (not just one that fails to match) must be skipped, not raise --
+    the same 'never abort the scan' guarantee as a non-dict payload."""
+    store = SessionStore()
+    store[SESSION_KEY] = 'not-a-valid-pk'
+    store[BACKEND_SESSION_KEY] = 'django.contrib.auth.backends.ModelBackend'
+    store[HASH_SESSION_KEY] = alice.get_session_auth_hash()
+    store.save()
+    key = store.session_key
+
+    delete_user_sessions(alice)  # must not raise
+
+    assert Session.objects.filter(session_key=key).exists()
+
+
+def test_delete_user_sessions_matches_non_canonical_pk_encoding(alice):
+    """Django's own session-auth lookup coerces the stored SESSION_KEY
+    through the user model's pk field (_meta.pk.to_python), so a
+    zero-padded "02" authenticates exactly like "2" would for pk=2 --
+    the scan has to use the same coercion, not a bare string compare, or
+    it would silently leave a session like this one behind."""
+    store = SessionStore()
+    store[SESSION_KEY] = '0%d' % alice.pk
+    store[BACKEND_SESSION_KEY] = 'django.contrib.auth.backends.ModelBackend'
+    store[HASH_SESSION_KEY] = alice.get_session_auth_hash()
+    store.save()
+    key = store.session_key
+
+    delete_user_sessions(alice)
+
+    assert not Session.objects.filter(session_key=key).exists()

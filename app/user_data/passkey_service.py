@@ -39,7 +39,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
-from .account_tokens import delete_user_sessions, revoke_all_tokens
+from .account_tokens import check_session_engine, delete_user_sessions, revoke_all_tokens
 from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -535,57 +535,71 @@ def finish_signup(challenge_id, credential, name=None):
 
 
 def begin_recover(user):
-    """Options for creating a passkey from a valid account-recovery session."""
+    """Options for creating a passkey from a valid account-recovery session.
+
+    check_session_engine() first: finish_recover cannot complete recovery
+    without a working delete_user_sessions, so a misconfigured
+    SESSION_ENGINE should fail before a one-time recovery challenge is
+    even created, not after the caller has already spent it.
+    """
+    check_session_engine()
     return _begin_registration(user, WebAuthnChallenge.RECOVER)
 
 
 def finish_recover(user, challenge_id, credential, name=None, *, keep_session_key=None):
-    """Store the new passkey and sign every other device out.
+    """Store the new passkey, revoke every token, and sign every other
+    browser session out.
 
-    A password-reset-driven recovery is meant for an account an attacker
-    may currently be living inside via stolen tokens, so storing the
-    passkey and revoking every token must be a single atomic step: if
-    revocation raised after the passkey row had already been committed, the
-    attacker's tokens would outlive the very recovery meant to cut them
-    off. Consuming the challenge and verifying the response happen first,
-    exactly like every other ceremony, and outside this transaction --
-    _consume_and_verify already opened and closed its own durable
+    check_session_engine() runs before anything else, including consuming
+    the challenge: delete_user_sessions needs it later, inside the atomic
+    block below, and failing before _consume_and_verify means a
+    misconfigured SESSION_ENGINE never burns the caller's one-time
+    challenge for a recovery that couldn't have completed anyway.
+
+    Consuming the challenge and verifying the response happen next,
+    exactly like every other ceremony, and outside the transaction below
+    -- _consume_and_verify already opened and closed its own durable
     transaction inside _consume, and a durable atomic block can never nest
-    inside a regular one. The email is sent only after the transaction
-    commits, so a failed revoke also means no "passkey added" notice goes
-    out for a passkey that no longer exists.
+    inside a regular one.
 
-    revoke_all_tokens only reaches API credentials -- it cannot touch a
-    browser session, because Django's session auth check compares a hash
-    derived from the password, not anything stored in the session itself.
-    For a passkey-only user (no usable password to leave alone), rotating
-    to a fresh unusable-password hash changes that hash and so signs out
-    every existing session the same way a password change would; this
-    also covers a non-DB-backed session store, which delete_user_sessions
-    below cannot. It deliberately does nothing yet for a user who still
-    has a usable password -- pending a decision on whether recovery should
-    also force a password change for them. set_unusable_password() only
-    touches the in-memory `user` object's .password attribute, so the same
-    object this function was called with (and returns via passkey.user)
-    stays valid for a caller's later login() call.
+    Storing the passkey, revoking every token, and deleting every session
+    then happen together in one atomic block: a password-reset-driven
+    recovery is meant for an account an attacker may currently be living
+    inside, so a failure partway through any of the three must not leave
+    the account half-recovered -- a passkey added but the old tokens or
+    sessions still live, for instance.
 
-    delete_user_sessions is what actually signs every device out for
-    EVERY user, password or passkey-only alike: it does not depend on the
-    password changing at all, just on deleting the session row itself. Its
-    `keep_session_key` lets the caller spare its own session -- pass
-    request.session.session_key when the browser driving recovery is
-    itself already logged in as the account being recovered, or that
-    request's own session row disappears out from under it and saving the
-    response's session fails. (Alternatively, cycle_key() first and keep
-    the new key.) See Task 16.
+    revoke_all_tokens runs a second time after that transaction commits.
+    DOT validates a Grant or a refresh token with a plain, unlocked SELECT
+    (see the account_tokens module docstring), so a request racing this
+    whole function can still mint a brand-new token at any point during
+    the transaction and have that mint survive the commit untouched --
+    the in-transaction revoke only narrows this window, it cannot close
+    it. This second sweep is best-effort, like the email below: recovery
+    has already committed by the time it runs, so a sweep failure is
+    logged, not raised back at whoever is waiting on this recovery to
+    succeed.
+
+    The email is sent last, after both revoke passes, so a failure in
+    either one never sends a "passkey added" notice for a recovery that
+    has not actually finished revoking everything yet.
+
+    Task 16: the recovery view should call request.session.cycle_key()
+    once it has verified the reset token (before calling this function),
+    then pass keep_session_key=request.session.session_key -- only ever
+    that value, read from the session actually driving the request, never
+    anything client-supplied -- so the browser doing the recovering is
+    not signed out of its own, freshly-cycled session.
     """
+    check_session_engine()
     verified = _consume_and_verify(WebAuthnChallenge.RECOVER, challenge_id, credential, user)
     with transaction.atomic():
         passkey = _store_passkey(user, verified, credential, name)
         revoke_all_tokens(user)
-        if not user.has_usable_password():
-            user.set_unusable_password()
-            user.save(update_fields=['password'])
         delete_user_sessions(user, keep_session_key=keep_session_key)
+    try:
+        revoke_all_tokens(user)
+    except Exception:  # recovery already committed; a sweep failure must not look like one
+        log.exception('post-commit token sweep failed for user %s during recovery', user.pk)
     _send_passkey_added_email(user, passkey)
     return passkey
