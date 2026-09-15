@@ -57,6 +57,7 @@ AAGUID_NAMES = {
     'bada5566-a7aa-401f-bd96-45619a55120d': '1Password',
     'd548826e-79b4-db40-a3d8-11116f7e8349': 'Bitwarden',
 }
+PASSKEY_MAX_PER_USER = 20
 _TRANSPORTS = {t.value for t in AuthenticatorTransport}
 # Unicode general categories stripped from passkey names: control (Cc),
 # format (Cf, except the ZWJ used in emoji sequences), surrogate (Cs),
@@ -78,6 +79,15 @@ class PasskeyError(Exception):
 
 class RegistrationFailed(PasskeyError):
     """The challenge or the registration response did not verify."""
+
+
+class TooManyPasskeys(PasskeyError):
+    """The account already holds PASSKEY_MAX_PER_USER passkeys.
+
+    Never raised by the recovery ceremony: an attacker who filled the
+    account with passkeys must not be able to block the owner's own
+    recovery, and signup is always the account's first passkey anyway.
+    """
 
 
 class InvalidCredentials(PasskeyError):
@@ -225,13 +235,25 @@ def _verify_registration(challenge, credential):
     return verified
 
 
-def _store_passkey(user, verified, credential, name):
+def _store_passkey(user, verified, credential, name, *, enforce_cap=False):
+    """Persist a verified credential as a Passkey row.
+
+    `enforce_cap`, set only for the REGISTER purpose, re-checks
+    PASSKEY_MAX_PER_USER under a select_for_update() lock on the user row,
+    taken inside this same atomic block, so two concurrent finish_register
+    calls racing past begin_register's own early (unlocked) check still
+    cannot together exceed the cap. Recovery and signup never pass it.
+    """
     aaguid = str(verified.aaguid)
     raw_transports = (credential.get('response') or {}).get('transports')
     transports = ([t for t in raw_transports if isinstance(t, str) and t in _TRANSPORTS]
                   if isinstance(raw_transports, list) else [])
     try:
         with transaction.atomic():
+            if enforce_cap:
+                locked = get_user_model().objects.select_for_update().get(pk=user.pk)
+                if locked.passkeys.count() >= PASSKEY_MAX_PER_USER:
+                    raise TooManyPasskeys()
             return Passkey.objects.create(
                 user=user, credential_id=bytes_to_base64url(verified.credential_id),
                 public_key=verified.credential_public_key,
@@ -278,19 +300,27 @@ def _consume_and_verify(purpose, challenge_id, credential, user):
     return _verify_registration(row.challenge, credential)
 
 
-def _finish_registration(user, purpose, challenge_id, credential, name):
+def _finish_registration(user, purpose, challenge_id, credential, name, *, enforce_cap=False):
     verified = _consume_and_verify(purpose, challenge_id, credential, user)
-    return _store_passkey(user, verified, credential, name)
+    return _store_passkey(user, verified, credential, name, enforce_cap=enforce_cap)
 
 
 def begin_register(user):
-    """Options for adding a passkey to a signed-in account (after step-up)."""
+    """Options for adding a passkey to a signed-in account (after step-up).
+
+    Fails before a challenge is created once the account already holds
+    PASSKEY_MAX_PER_USER passkeys -- an unlocked, best-effort check; the
+    durable guard against two concurrent finishes together exceeding the
+    cap lives in _store_passkey, under a row lock.
+    """
+    if user.passkeys.count() >= PASSKEY_MAX_PER_USER:
+        raise TooManyPasskeys()
     return _begin_registration(user, WebAuthnChallenge.REGISTER)
 
 
 def finish_register(user, challenge_id, credential, name=None):
     passkey = _finish_registration(user, WebAuthnChallenge.REGISTER,
-                                   challenge_id, credential, name)
+                                   challenge_id, credential, name, enforce_cap=True)
     _send_passkey_added_email(user, passkey)
     return passkey
 

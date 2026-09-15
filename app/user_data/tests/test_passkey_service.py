@@ -172,6 +172,51 @@ def test_finish_register_surfaces_config_errors(alice, authenticator, settings):
         service.finish_register(alice, challenge_id, authenticator.register(options))
 
 
+# --- passkey cap --------------------------------------------------------------
+
+def _fill_to_cap(user, count=None):
+    """Create `count` (default: the cap) dummy Passkey rows directly via the
+    ORM -- fast, unlike running `count` real registration ceremonies. Each
+    credential_id is real base64url so _descriptors() can still decode it
+    when building exclude/allow lists for a later ceremony on this user."""
+    n = service.PASSKEY_MAX_PER_USER if count is None else count
+    for _i in range(n):
+        Passkey.objects.create(user=user, credential_id=b64url(secrets.token_bytes(16)),
+                               public_key=b'', name='Cap passkey')
+
+
+def test_begin_register_refuses_at_the_cap(alice):
+    _fill_to_cap(alice)
+    with pytest.raises(service.TooManyPasskeys):
+        service.begin_register(alice)
+    assert not WebAuthnChallenge.objects.filter(purpose=WebAuthnChallenge.REGISTER).exists()
+
+
+def test_begin_register_allows_one_below_the_cap(alice):
+    _fill_to_cap(alice, service.PASSKEY_MAX_PER_USER - 1)
+    challenge_id, _options = service.begin_register(alice)
+    assert WebAuthnChallenge.objects.filter(pk=challenge_id).exists()
+
+
+def test_finish_register_refuses_when_cap_reached_between_begin_and_finish(alice, authenticator):
+    challenge_id, options = service.begin_register(alice)
+    _fill_to_cap(alice)  # a concurrent finish filled the account after begin
+    with pytest.raises(service.TooManyPasskeys):
+        service.finish_register(alice, challenge_id, authenticator.register(options))
+    assert alice.passkeys.count() == service.PASSKEY_MAX_PER_USER
+    assert len(mail.outbox) == 0
+
+
+def test_recover_succeeds_at_the_cap(alice, authenticator):
+    """An attacker who filled the account with passkeys must not be able to
+    block the owner's own recovery."""
+    _fill_to_cap(alice)
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert passkey.user == alice
+    assert alice.passkeys.count() == service.PASSKEY_MAX_PER_USER + 1
+
+
 # --- malformed / hostile WebAuthn responses ---------------------------------
 # py_webauthn 3.0.0 parses attacker-controlled CBOR without fully guarding
 # against structurally-invalid input; these crash with raw TypeError/KeyError/

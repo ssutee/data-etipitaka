@@ -1,0 +1,119 @@
+"""Passkey management on a signed-in account: list, rename, delete, drop password."""
+import re
+
+from django.contrib.auth import get_user_model
+from django.db import transaction
+
+from .models import Passkey
+from .passkey_service import AAGUID_NAMES, PasskeyError, check_password, clean_name
+
+
+class NotFound(PasskeyError):
+    """No passkey with that id belongs to the caller."""
+
+
+class InvalidName(PasskeyError):
+    """Rename with an empty or non-string name."""
+
+
+class LockoutGuard(PasskeyError):
+    """The change would leave the account with no way to sign in."""
+
+
+class WrongPassword(PasskeyError):
+    """The confirming password did not match."""
+
+
+# The pk is a plain int4 AutoField: 1-10 ASCII digits, capped at 2147483647.
+_PASSKEY_ID_RE = re.compile(r'^[0-9]{1,10}$')
+_MAX_PASSKEY_ID = 2147483647
+
+
+def passkey_to_dict(passkey):
+    return {
+        'id': passkey.pk,
+        'name': passkey.name,
+        'authenticator': AAGUID_NAMES.get(passkey.aaguid, ''),
+        'backed_up': passkey.backed_up,
+        'created_at': passkey.created_at.isoformat(),
+        'last_used_at': passkey.last_used_at.isoformat() if passkey.last_used_at else None,
+    }
+
+
+def list_passkeys(user):
+    return {'has_password': user.has_usable_password(),
+            'passkeys': [passkey_to_dict(p) for p in user.passkeys.order_by('created_at', 'pk')]}
+
+
+def _parse_passkey_id(passkey_id):
+    """Accept only a real (non-bool) int, or a string of 1-10 ASCII digits.
+
+    int(passkey_id) alone would accept far more than an id ever is: True
+    (-> 1), 1.9 (-> 1), ' 7 ' (whitespace-trimmed), or non-ASCII digits like
+    the Arabic-Indic '٧'. A plain [0-9] character class (not \\d, which
+    matches those non-ASCII digits too) rules all of that out. Returns None
+    for anything that isn't a valid id, including one above 2147483647 --
+    the ceiling of the pk's int4 AutoField.
+    """
+    if isinstance(passkey_id, bool):
+        return None
+    if isinstance(passkey_id, int):
+        value = passkey_id
+    elif isinstance(passkey_id, str) and _PASSKEY_ID_RE.fullmatch(passkey_id):
+        value = int(passkey_id)
+    else:
+        return None
+    return value if 0 <= value <= _MAX_PASSKEY_ID else None
+
+
+def _own(user, passkey_id):
+    value = _parse_passkey_id(passkey_id)
+    if value is None:
+        raise NotFound()
+    try:
+        return Passkey.objects.get(pk=value, user=user)
+    except Passkey.DoesNotExist as exc:
+        raise NotFound() from exc
+
+
+def rename_passkey(user, passkey_id, name):
+    """Ownership is resolved before the name is validated: another user's
+    id is NotFound even when the supplied name would also be invalid."""
+    passkey = _own(user, passkey_id)
+    cleaned = clean_name(name)
+    if not cleaned:
+        raise InvalidName()
+    passkey.name = cleaned
+    passkey.save(update_fields=['name'])
+    return passkey
+
+
+def delete_passkey(user, passkey_id):
+    """Delete, unless it is the only passkey of an account without a password."""
+    with transaction.atomic():
+        locked = get_user_model().objects.select_for_update().get(pk=user.pk)
+        passkey = _own(locked, passkey_id)
+        if not locked.has_usable_password() and locked.passkeys.count() == 1:
+            raise LockoutGuard()
+        # A queryset delete, not passkey.delete(): a concurrent delete of
+        # the same row must not raise here.
+        Passkey.objects.filter(pk=passkey.pk, user=locked).delete()
+
+
+def remove_password(user, password):
+    """Make the password unusable; allowed only while a passkey exists.
+
+    This changes the password hash, which invalidates the signed-in
+    session's auth-hash check. The caller -- the Task 12 view -- must call
+    update_session_auth_hash(request, locked) with the user this returns,
+    or the request's own session will be signed out on its next request.
+    """
+    with transaction.atomic():
+        locked = get_user_model().objects.select_for_update().get(pk=user.pk)
+        if not locked.has_usable_password() or not locked.passkeys.exists():
+            raise LockoutGuard()
+        if not check_password(locked, password):
+            raise WrongPassword()
+        locked.set_unusable_password()
+        locked.save(update_fields=['password'])
+    return locked
