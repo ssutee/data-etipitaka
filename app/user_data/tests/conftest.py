@@ -148,3 +148,18 @@ def _passkey_settings(settings):
 @pytest.fixture
 def authenticator():
     return SoftAuthenticator()
+
+
+def add_passkey(user, authenticator, name=None):
+    """Register `authenticator` as a passkey of `user` through the real service."""
+    from user_data import passkey_service
+    challenge_id, options = passkey_service.begin_register(user)
+    return passkey_service.finish_register(user, challenge_id,
+                                           authenticator.register(options), name=name)
+
+
+def login_assertion(authenticator, **tamper):
+    """(challenge_id, credential) for a fresh login challenge."""
+    from user_data import passkey_service
+    challenge_id, options = passkey_service.begin_login()
+    return challenge_id, authenticator.assert_(options, **tamper)

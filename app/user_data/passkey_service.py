@@ -6,21 +6,27 @@ performs the cryptographic checks (signature, RP ID hash, origin, UV flag,
 sign counter); this module owns challenges, account rules and persistence.
 See docs/superpowers/specs/2026-09-14-passkey-login-design.md.
 """
+import hmac
 import json
 import logging
 import secrets
 import unicodedata
 
 from django.conf import settings
+from django.contrib.auth.models import update_last_login
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.template.loader import render_to_string
+from django.utils import timezone
 from django.utils.translation import gettext as _
-from webauthn import generate_registration_options, options_to_json, verify_registration_response
+from webauthn import (generate_authentication_options, generate_registration_options,
+                      options_to_json, verify_authentication_response,
+                      verify_registration_response)
 from webauthn.helpers import (base64url_to_bytes, bytes_to_base64url,
                               decode_credential_public_key,
                               decoded_public_key_to_cryptography,
-                              encode_cbor, parse_cbor)
+                              encode_cbor, parse_authentication_credential_json,
+                              parse_cbor)
 from webauthn.helpers.exceptions import WebAuthnException
 from webauthn.helpers.structs import (AttestationConveyancePreference,
                                       AuthenticatorSelectionCriteria,
@@ -62,6 +68,18 @@ class PasskeyError(Exception):
 
 class RegistrationFailed(PasskeyError):
     """The challenge or the registration response did not verify."""
+
+
+class InvalidCredentials(PasskeyError):
+    """The challenge or the assertion did not verify (deliberately generic)."""
+
+
+class InactiveUser(PasskeyError):
+    """The assertion verified but the account's email is not verified yet."""
+
+
+class StepUpFailed(PasskeyError):
+    """Neither a password nor a passkey assertion proved the account holder."""
 
 
 def clean_name(name):
@@ -242,3 +260,101 @@ def finish_register(user, challenge_id, credential, name=None):
                                    challenge_id, credential, name)
     _send_passkey_added_email(user, passkey)
     return passkey
+
+
+def begin_login():
+    """Options for a username-less login: the authenticator picks the account."""
+    row = challenges.create(WebAuthnChallenge.LOGIN)
+    return row.id, _options_json(generate_authentication_options(
+        rp_id=config.rp_id(), challenge=row.challenge,
+        timeout=settings.PASSKEY_CHALLENGE_TTL * 1000,
+        user_verification=UserVerificationRequirement.REQUIRED))
+
+
+def _verify_assertion(challenge_id, credential):
+    """Verify a login assertion and return its Passkey with usage recorded."""
+    # Read config before consuming the challenge or touching the (possibly
+    # hostile) credential at all: a malformed setting -- e.g.
+    # PASSKEY_ANDROID_CERT_SHA256 -- must raise loudly for every login
+    # attempt, not get funnelled into a generic InvalidCredentials by the
+    # widened except clauses below. Same lesson as _verify_registration.
+    rp_id = config.rp_id()
+    expected_origin = config.expected_origins()
+    row = _consume(challenge_id, WebAuthnChallenge.LOGIN, None, InvalidCredentials)
+    if not isinstance(credential, dict):
+        raise InvalidCredentials()
+    try:
+        # py_webauthn parses an attacker-controlled assertion without fully
+        # guarding against structurally-invalid input -- e.g. a userHandle
+        # that isn't valid base64url can still raise a raw
+        # binascii.Error/ValueError here instead of one of py_webauthn's
+        # own WebAuthnException subclasses.
+        parsed = parse_authentication_credential_json(credential)
+    except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
+            AttributeError) as exc:
+        raise InvalidCredentials() from exc
+    passkey = None
+    if parsed.raw_id:
+        passkey = (Passkey.objects.select_related('user')
+                   .filter(credential_id=bytes_to_base64url(parsed.raw_id)).first())
+    if passkey is None:
+        raise InvalidCredentials()
+    handle = (PasskeyUserHandle.objects.filter(user_id=passkey.user_id)
+              .values_list('handle', flat=True).first())
+    claimed = parsed.response.user_handle
+    if handle is None or claimed is None or not hmac.compare_digest(bytes(handle), claimed):
+        raise InvalidCredentials()
+    try:
+        # A stored public key can also fail to decode here -- a legacy or
+        # otherwise corrupt row is not structurally different from the
+        # crafted COSE keys _verify_registration already guards against,
+        # and decode_credential_public_key/decoded_public_key_to_cryptography
+        # can raise a raw ValueError/KeyError/IndexError on it.
+        verified = verify_authentication_response(
+            credential=parsed, expected_challenge=row.challenge,
+            expected_rp_id=rp_id, expected_origin=expected_origin,
+            credential_public_key=bytes(passkey.public_key),
+            credential_current_sign_count=passkey.sign_count,
+            require_user_verification=True)
+    except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
+            AttributeError) as exc:
+        # Includes a non-increasing sign counter: possibly a cloned authenticator.
+        log.warning('passkey assertion rejected for passkey %s: %s',
+                    passkey.pk, type(exc).__name__)
+        raise InvalidCredentials() from exc
+    passkey.sign_count = verified.new_sign_count
+    passkey.backed_up = verified.credential_backed_up
+    passkey.last_used_at = timezone.now()
+    passkey.save(update_fields=['sign_count', 'backed_up', 'last_used_at'])
+    return passkey
+
+
+def finish_login(challenge_id, credential):
+    """Return the active user the assertion proves."""
+    user = _verify_assertion(challenge_id, credential).user
+    if not user.is_active:
+        raise InactiveUser()
+    update_last_login(None, user)
+    return user
+
+
+def verify_step_up(user, password=None, assertion=None):
+    """Raise StepUpFailed unless the caller re-proved they hold `user`.
+
+    Proof is the current password, or a fresh assertion (a begin_login
+    challenge_id plus credential) made with one of `user`'s own passkeys.
+    """
+    if password is not None:
+        if (isinstance(password, str) and user.has_usable_password()
+                and user.check_password(password)):
+            return
+        raise StepUpFailed()
+    if isinstance(assertion, dict):
+        try:
+            passkey = _verify_assertion(assertion.get('challenge_id'),
+                                        assertion.get('credential'))
+        except InvalidCredentials as exc:
+            raise StepUpFailed() from exc
+        if passkey.user_id == user.pk:
+            return
+    raise StepUpFailed()
