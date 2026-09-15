@@ -13,9 +13,11 @@ import secrets
 import unicodedata
 
 from django.conf import settings
-from django.contrib.auth.models import update_last_login
+from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
+from django.db.models import F
+from django.db.models.functions import Greatest
 from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -60,6 +62,12 @@ _TRANSPORTS = {t.value for t in AuthenticatorTransport}
 _NAME_STRIP_CATEGORIES = {'Cc', 'Cf', 'Cs', 'Co', 'Cn', 'Zl', 'Zp'}
 _NAME_KEEP_CHAR = chr(0x200D)  # zero-width joiner, kept in passkey names for emoji sequences
 _MAX_CREDENTIAL_ID_LENGTH = 1023
+# Prefix of py_webauthn 3.0.0's own message for a non-increasing sign
+# counter (verify_authentication_response's "Response sign count of {n} was
+# not greater than current count of {m}"). Matched by prefix, not equality,
+# since the numbers are unverified at that point -- the counter check runs
+# before the signature is checked.
+_COUNTER_REGRESSION_PREFIX = 'Response sign count of'
 
 
 class PasskeyError(Exception):
@@ -262,6 +270,24 @@ def finish_register(user, challenge_id, credential, name=None):
     return passkey
 
 
+def check_password(user, password):
+    """True iff `password` is `user`'s current password.
+
+    Guards inputs Django's own check_password cannot handle safely: a
+    non-str value (e.g. an int from a loosely-typed JSON body), an empty
+    string, or a lone UTF-16 surrogate -- valid JSON decodes straight into
+    such a str, but str.encode('utf-8') on it raises UnicodeEncodeError deep
+    inside the password hasher. Also used by passkey_manage.remove_password.
+    """
+    if not isinstance(password, str) or not password:
+        return False
+    try:
+        password.encode('utf-8')
+    except UnicodeEncodeError:
+        return False
+    return user.has_usable_password() and user.check_password(password)
+
+
 def begin_login():
     """Options for a username-less login: the authenticator picks the account."""
     row = challenges.create(WebAuthnChallenge.LOGIN)
@@ -271,8 +297,35 @@ def begin_login():
         user_verification=UserVerificationRequirement.REQUIRED))
 
 
-def _verify_assertion(challenge_id, credential):
-    """Verify a login assertion and return its Passkey with usage recorded."""
+def _log_assertion_failure(passkey, exc):
+    """Log a rejected assertion.
+
+    A non-increasing sign counter can mean a cloned authenticator and is
+    worth an operator's attention, so it alone is logged at WARNING --
+    matched by the library's own message prefix, since equality would
+    require trusting the (at that point still unverified) counter values.
+    The message is truncated before logging because the counter check runs
+    before the signature is checked, so it can still embed attacker-chosen
+    numbers. Every other rejection is routine and gets INFO with just the
+    exception's type name, never its message.
+    """
+    if isinstance(exc, WebAuthnException) and str(exc).startswith(_COUNTER_REGRESSION_PREFIX):
+        log.warning('passkey assertion rejected for passkey %s: possible cloned '
+                    'authenticator (%r)', passkey.pk, str(exc)[:200])
+    else:
+        log.info('passkey assertion rejected for passkey %s: %s',
+                 passkey.pk, type(exc).__name__)
+
+
+def _verify_assertion(challenge_id, credential, owner=None):
+    """Verify a login assertion and return its Passkey with usage recorded.
+
+    `owner`, when given, additionally requires the assertion to be made
+    with a passkey belonging to that user (step-up's own use) -- checked
+    before the assertion is cryptographically verified or its usage is
+    recorded, so a step-up attempt with someone else's passkey never
+    touches that passkey's counter or last_used_at.
+    """
     # Read config before consuming the challenge or touching the (possibly
     # hostile) credential at all: a malformed setting -- e.g.
     # PASSKEY_ANDROID_CERT_SHA256 -- must raise loudly for every login
@@ -304,6 +357,8 @@ def _verify_assertion(challenge_id, credential):
     claimed = parsed.response.user_handle
     if handle is None or claimed is None or not hmac.compare_digest(bytes(handle), claimed):
         raise InvalidCredentials()
+    if owner is not None and passkey.user_id != owner.pk:
+        raise InvalidCredentials()
     try:
         # A stored public key can also fail to decode here -- a legacy or
         # otherwise corrupt row is not structurally different from the
@@ -318,14 +373,20 @@ def _verify_assertion(challenge_id, credential):
             require_user_verification=True)
     except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
             AttributeError) as exc:
-        # Includes a non-increasing sign counter: possibly a cloned authenticator.
-        log.warning('passkey assertion rejected for passkey %s: %s',
-                    passkey.pk, type(exc).__name__)
+        _log_assertion_failure(passkey, exc)
         raise InvalidCredentials() from exc
-    passkey.sign_count = verified.new_sign_count
-    passkey.backed_up = verified.credential_backed_up
-    passkey.last_used_at = timezone.now()
-    passkey.save(update_fields=['sign_count', 'backed_up', 'last_used_at'])
+    # A conditional update, not passkey.save(): two concurrent assertions
+    # must not let whichever reaches here later lower a counter the other
+    # already advanced, and if the row was deleted between the lookup above
+    # and here (e.g. a concurrent passkey removal), save() could silently
+    # re-INSERT it -- update() instead affects zero rows and we can tell.
+    now = timezone.now()
+    updated = Passkey.objects.filter(pk=passkey.pk).update(
+        sign_count=Greatest(F('sign_count'), verified.new_sign_count),
+        backed_up=verified.credential_backed_up, last_used_at=now)
+    if not updated:
+        raise InvalidCredentials()
+    passkey.refresh_from_db(fields=['sign_count', 'backed_up', 'last_used_at'])
     return passkey
 
 
@@ -334,7 +395,11 @@ def finish_login(challenge_id, credential):
     user = _verify_assertion(challenge_id, credential).user
     if not user.is_active:
         raise InactiveUser()
-    update_last_login(None, user)
+    # A plain queryset update, not update_last_login()'s user.save(): if the
+    # user row were ever deleted concurrently, save() could re-INSERT it.
+    now = timezone.now()
+    get_user_model().objects.filter(pk=user.pk).update(last_login=now)
+    user.last_login = now
     return user
 
 
@@ -343,18 +408,18 @@ def verify_step_up(user, password=None, assertion=None):
 
     Proof is the current password, or a fresh assertion (a begin_login
     challenge_id plus credential) made with one of `user`'s own passkeys.
+    A password takes precedence when both are given: a wrong password is
+    not a chance to fall back to trying the assertion instead.
     """
     if password is not None:
-        if (isinstance(password, str) and user.has_usable_password()
-                and user.check_password(password)):
+        if check_password(user, password):
             return
         raise StepUpFailed()
     if isinstance(assertion, dict):
         try:
-            passkey = _verify_assertion(assertion.get('challenge_id'),
-                                        assertion.get('credential'))
+            _verify_assertion(assertion.get('challenge_id'), assertion.get('credential'),
+                              owner=user)
         except InvalidCredentials as exc:
             raise StepUpFailed() from exc
-        if passkey.user_id == user.pk:
-            return
+        return
     raise StepUpFailed()

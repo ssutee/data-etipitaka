@@ -6,6 +6,7 @@ import pytest
 from django.contrib.auth.models import User
 from django.core import mail
 
+from user_data import passkey_challenges as challenges
 from user_data import passkey_service as service
 from user_data.models import Passkey, PasskeyUserHandle, WebAuthnChallenge
 from user_data.passkey_config import android_origin
@@ -22,6 +23,7 @@ APPLE_AAGUID = bytes.fromhex('fbfc3007154e4ecc8c0b6e020557d7bd')
 ZWJ = chr(0x200D)          # zero-width joiner
 RTL_OVERRIDE = chr(0x202E)  # right-to-left override
 ZWSP = chr(0x200B)          # zero-width space
+LONE_SURROGATE = chr(0xD800)  # valid JSON/Python str, invalid UTF-8
 
 
 def _register(user, authenticator, name=None, **tamper):
@@ -414,6 +416,7 @@ def test_finish_login_returns_user_and_records_use(alice, authenticator):
     assert service.finish_login(*login_assertion(authenticator)) == alice
     passkey.refresh_from_db()
     assert passkey.sign_count == 1
+    assert passkey.backed_up is True
     assert passkey.last_used_at is not None
     alice.refresh_from_db()
     assert alice.last_login is not None
@@ -480,6 +483,46 @@ def test_finish_login_inactive_user(alice, authenticator):
         service.finish_login(*login_assertion(authenticator))
 
 
+def test_finish_login_surfaces_config_errors_and_keeps_challenge(settings):
+    """Same lesson as registration: a broken PASSKEY_ANDROID_CERT_SHA256 is
+    an operator error, not a rejected login -- and reading config before
+    consuming the challenge means the challenge survives to be retried once
+    the setting is fixed, instead of being burned on an error that had
+    nothing to do with the assertion."""
+    settings.PASSKEY_ANDROID_CERT_SHA256 = ['zz:not-hex']
+    challenge_id, _options = service.begin_login()
+    with pytest.raises(ValueError):
+        service.finish_login(challenge_id, {})
+    assert WebAuthnChallenge.objects.filter(pk=challenge_id).exists()
+
+
+def test_finish_login_failed_verify_still_consumes_challenge(alice, authenticator):
+    """A failed verify must burn the challenge too, or the ceremony is
+    replayable -- even a subsequent genuinely-signed assertion against the
+    same challenge id must not be accepted afterwards."""
+    add_passkey(alice, authenticator)
+    challenge_id, options = service.begin_login()
+    bad_credential = authenticator.assert_(options, corrupt_signature=True)
+    with pytest.raises(service.InvalidCredentials):
+        service.finish_login(challenge_id, bad_credential)
+    good_credential = authenticator.assert_(options)
+    with pytest.raises(service.InvalidCredentials):
+        service.finish_login(challenge_id, good_credential)
+
+
+def test_finish_login_rejects_challenge_of_wrong_purpose_when_user_matches(authenticator):
+    """The purpose column alone must gate a login challenge. A signup
+    challenge is, like a login challenge, issued with user=None, so this
+    isolates the purpose filter from the separate user filter that
+    test_register_challenge_cannot_finish_login also exercises (a register
+    challenge belongs to a user, which is a second reason it should fail)."""
+    row = challenges.create(WebAuthnChallenge.SIGNUP)
+    options = {'challenge': b64url(bytes(row.challenge)), 'rpId': 'data.etipitaka.com'}
+    credential = authenticator.assert_(options, user_handle=secrets.token_bytes(32))
+    with pytest.raises(service.InvalidCredentials):
+        service.finish_login(row.id, credential)
+
+
 # --- crafted / hostile login assertions --------------------------------
 # Like registration, py_webauthn 3.0.0 parses attacker-controlled CBOR/JSON
 # for an assertion without fully guarding against structurally-invalid
@@ -529,6 +572,16 @@ def test_finish_login_rejects_raw_id_mismatch(alice, authenticator):
         service.finish_login(challenge_id, credential)
 
 
+def test_finish_login_rejects_id_mismatch_with_genuine_raw_id(alice, authenticator):
+    """The id/rawId equivalence check must catch either direction: a
+    genuine rawId paired with a forged id, not just a forged rawId."""
+    add_passkey(alice, authenticator)
+    challenge_id, credential = login_assertion(authenticator)
+    credential['id'] = b64url(secrets.token_bytes(32))
+    with pytest.raises(service.InvalidCredentials):
+        service.finish_login(challenge_id, credential)
+
+
 def test_finish_login_rejects_truncated_authenticator_data(alice, authenticator):
     add_passkey(alice, authenticator)
     challenge_id, credential = login_assertion(authenticator)
@@ -556,6 +609,97 @@ def test_finish_login_rejects_very_long_credential_id(alice, authenticator):
         service.finish_login(challenge_id, credential)
 
 
+# --- usage recording is race-safe -------------------------------------------
+# The sign_count/backed_up/last_used_at update, and the last_login update,
+# go through a conditional queryset .update() rather than instance.save():
+# a concurrent request must not be able to lower the counter, and a row
+# deleted between verification and the update must not be silently
+# resurrected by save()'s fall-back-to-insert-on-zero-rows behaviour.
+
+def test_finish_login_race_deleted_passkey_raises_invalid_credentials(alice, authenticator,
+                                                                       monkeypatch):
+    passkey = add_passkey(alice, authenticator)
+    challenge_id, credential = login_assertion(authenticator)
+    real_verify = service.verify_authentication_response
+
+    def _verify_then_delete(**kwargs):
+        result = real_verify(**kwargs)
+        Passkey.objects.filter(pk=passkey.pk).delete()
+        return result
+
+    monkeypatch.setattr(service, 'verify_authentication_response', _verify_then_delete)
+    with pytest.raises(service.InvalidCredentials):
+        service.finish_login(challenge_id, credential)
+
+
+def test_finish_login_race_does_not_lower_counter(alice, authenticator, monkeypatch):
+    passkey = add_passkey(alice, authenticator)
+    challenge_id, credential = login_assertion(authenticator, sign_count=5)
+    real_verify = service.verify_authentication_response
+
+    def _verify_then_bump(**kwargs):
+        result = real_verify(**kwargs)
+        Passkey.objects.filter(pk=passkey.pk).update(sign_count=100)
+        return result
+
+    monkeypatch.setattr(service, 'verify_authentication_response', _verify_then_bump)
+    assert service.finish_login(challenge_id, credential) == alice
+    passkey.refresh_from_db()
+    assert passkey.sign_count == 100
+
+
+def test_finish_login_sets_last_login(alice, authenticator):
+    add_passkey(alice, authenticator)
+    service.finish_login(*login_assertion(authenticator))
+    alice.refresh_from_db()
+    assert alice.last_login is not None
+
+
+# --- clone-detection logging -------------------------------------------------
+
+def test_finish_login_logs_counter_regression_at_warning(alice, authenticator, caplog):
+    add_passkey(alice, authenticator)
+    service.finish_login(*login_assertion(authenticator, sign_count=5))
+    with caplog.at_level('WARNING', logger='user_data.passkey_service'):
+        with pytest.raises(service.InvalidCredentials):
+            service.finish_login(*login_assertion(authenticator, sign_count=3))
+    assert any(r.levelname == 'WARNING' for r in caplog.records)
+
+
+def test_finish_login_bad_signature_does_not_log_warning(alice, authenticator, caplog):
+    add_passkey(alice, authenticator)
+    challenge_id, credential = login_assertion(authenticator, corrupt_signature=True)
+    with caplog.at_level('INFO', logger='user_data.passkey_service'):
+        with pytest.raises(service.InvalidCredentials):
+            service.finish_login(challenge_id, credential)
+    assert not any(r.levelname == 'WARNING' for r in caplog.records)
+    assert any(r.levelname == 'INFO' for r in caplog.records)
+
+
+# --- check_password ----------------------------------------------------
+# Also used, unmodified, by passkey_manage.remove_password in a later task.
+
+def test_check_password_accepts_correct_password(alice):
+    assert service.check_password(alice, 'alicepass123') is True
+
+
+def test_check_password_rejects_wrong_password(alice):
+    assert service.check_password(alice, 'wrong') is False
+
+
+def test_check_password_rejects_for_passkey_only_user(alice):
+    alice.set_unusable_password()
+    alice.save()
+    assert service.check_password(alice, 'alicepass123') is False
+
+
+@pytest.mark.parametrize('password', [
+    LONE_SURROGATE, 12345, None, '', ['alicepass123'], {'a': 1}, b'alicepass123'],
+    ids=['lone-surrogate', 'int', 'none', 'empty', 'list', 'dict', 'bytes'])
+def test_check_password_rejects_bad_input(alice, password):
+    assert service.check_password(alice, password) is False
+
+
 # --- step-up --------------------------------------------------------------
 
 def test_step_up_with_password(alice):
@@ -571,6 +715,35 @@ def test_step_up_password_refused_for_passkey_only_user(alice):
         service.verify_step_up(alice, password='alicepass123')
 
 
+def test_step_up_rejects_lone_surrogate_password(alice):
+    """A lone UTF-16 surrogate is valid JSON and decodes to a valid Python
+    str, but str.encode('utf-8') on it raises deep inside the password
+    hasher -- must end as StepUpFailed, never an unhandled 500."""
+    with pytest.raises(service.StepUpFailed):
+        service.verify_step_up(alice, password=LONE_SURROGATE)
+
+
+@pytest.mark.parametrize('password', [12345, ['x'], {'a': 1}])
+def test_step_up_rejects_non_string_password(alice, password):
+    with pytest.raises(service.StepUpFailed):
+        service.verify_step_up(alice, password=password)
+
+
+def test_step_up_rejects_empty_password(alice):
+    with pytest.raises(service.StepUpFailed):
+        service.verify_step_up(alice, password='')
+
+
+def test_step_up_wrong_password_takes_precedence_over_valid_assertion(alice, authenticator):
+    """password is checked first; a wrong one is not a chance to fall back
+    to a valid assertion also supplied in the same call."""
+    add_passkey(alice, authenticator)
+    challenge_id, credential = login_assertion(authenticator)
+    with pytest.raises(service.StepUpFailed):
+        service.verify_step_up(alice, password='wrong',
+                               assertion={'challenge_id': challenge_id, 'credential': credential})
+
+
 def test_step_up_with_own_passkey(alice, authenticator):
     add_passkey(alice, authenticator)
     challenge_id, credential = login_assertion(authenticator)
@@ -579,11 +752,14 @@ def test_step_up_with_own_passkey(alice, authenticator):
 
 
 def test_step_up_rejects_other_users_passkey(alice, bob, authenticator):
-    add_passkey(bob, authenticator)
+    passkey = add_passkey(bob, authenticator)
     challenge_id, credential = login_assertion(authenticator)
     with pytest.raises(service.StepUpFailed):
         service.verify_step_up(alice, assertion={'challenge_id': challenge_id,
                                                  'credential': credential})
+    passkey.refresh_from_db()
+    assert passkey.sign_count == 0
+    assert passkey.last_used_at is None
 
 
 @pytest.mark.parametrize('assertion', [None, 'x', {}, {'challenge_id': 'nope', 'credential': {}}])
