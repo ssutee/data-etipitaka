@@ -3,11 +3,12 @@ import secrets
 from datetime import timedelta
 
 import cbor2
+import psycopg
 import pytest
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connection
+from django.db import OperationalError, connection
 from django.test import Client
 from django.utils import timezone
 from oauth2_provider.models import AccessToken, Grant, RefreshToken
@@ -1309,6 +1310,84 @@ def test_finish_recover_logs_when_post_commit_sweep_fails(alice, authenticator, 
     assert Passkey.objects.filter(pk=passkey.pk).exists()
     assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
               for record in caplog.records)
+
+
+# --- recovery retries on deadlock --------------------------------------------
+# A concurrent OAuth refresh-token rotation can lock the token tables and
+# then the user row in the opposite order from finish_recover's own atomic
+# block (user row in _store_passkey, then token rows in revoke_all_tokens),
+# which Postgres can only resolve by aborting one side with a deadlock
+# (40P01) or, under stricter isolation, a serialization failure (40001).
+# These are exercised by monkeypatching revoke_all_tokens to raise the same
+# shape of error a real driver would, rather than provoking a real deadlock
+# between two threads.
+
+def _raise_deadlock():
+    cause = psycopg.errors.DeadlockDetected('deadlock detected')
+    raise OperationalError('deadlock detected') from cause
+
+
+def test_finish_recover_retries_once_on_deadlock_then_succeeds(alice, authenticator, monkeypatch):
+    make_oauth_token(alice)
+    real_revoke = service.revoke_all_tokens
+    calls = {'n': 0}
+
+    def _flaky_revoke(user):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            _raise_deadlock()
+        return real_revoke(user)
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _flaky_revoke)
+    monkeypatch.setattr(service.time, 'sleep', lambda *_a, **_kw: None)
+
+    challenge_id, options = service.begin_recover(alice)
+    passkey = service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert passkey.user == alice
+    assert Passkey.objects.filter(user=alice).count() == 1  # the failed attempt rolled back
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 1
+
+
+def test_finish_recover_gives_up_after_max_deadlock_retries(alice, authenticator, monkeypatch):
+    calls = {'n': 0}
+
+    def _always_deadlocks(_user):
+        calls['n'] += 1
+        _raise_deadlock()
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _always_deadlocks)
+    monkeypatch.setattr(service.time, 'sleep', lambda *_a, **_kw: None)
+
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(OperationalError):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert calls['n'] == service._MAX_RECOVERY_ATTEMPTS
+    assert not Passkey.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_finish_recover_does_not_retry_a_non_deadlock_operational_error(alice, authenticator,
+                                                                        monkeypatch):
+    calls = {'n': 0}
+
+    def _unrelated_operational_error(_user):
+        calls['n'] += 1
+        raise OperationalError('server closed the connection unexpectedly')
+
+    monkeypatch.setattr(service, 'revoke_all_tokens', _unrelated_operational_error)
+    monkeypatch.setattr(service.time, 'sleep', lambda *_a, **_kw: None)
+
+    challenge_id, options = service.begin_recover(alice)
+    with pytest.raises(OperationalError):
+        service.finish_recover(alice, challenge_id, authenticator.register(options))
+
+    assert calls['n'] == 1  # no retry: this is not a deadlock or serialization failure
+    assert not Passkey.objects.filter(user=alice).exists()
+    assert len(mail.outbox) == 0
 
 
 def test_finish_recover_checks_session_engine_before_consuming_challenge(alice, authenticator,
