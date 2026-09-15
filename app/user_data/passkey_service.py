@@ -580,9 +580,11 @@ def finish_recover(user, challenge_id, credential, name=None, *, keep_session_ke
     logged, not raised back at whoever is waiting on this recovery to
     succeed.
 
-    The email is sent last, after both revoke passes, so a failure in
-    either one never sends a "passkey added" notice for a recovery that
-    has not actually finished revoking everything yet.
+    The email is sent last, after the post-commit sweep has been
+    attempted -- but a failed sweep is caught and logged above, not
+    raised, so it does not stop the email from going out; only a failure
+    inside the atomic block (store, revoke, or delete_user_sessions) does
+    that, by raising before this line is ever reached.
 
     Task 16: the recovery view should call request.session.cycle_key()
     once it has verified the reset token (before calling this function),

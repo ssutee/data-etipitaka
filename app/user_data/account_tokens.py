@@ -23,18 +23,23 @@ RefreshToken goes before AccessToken for the same reason as Grant, one
 level down: DOT's validate_refresh_token looks up the RefreshToken row by
 checksum with a plain, unlocked SELECT
 (RefreshToken.objects.filter(token_checksum=...).first(), in
-oauth2_validators.py) -- if that row is simply gone, validation returns
-False outright and nothing gets minted. Deleting RefreshToken first is
-what closes that window fastest: a concurrent refresh-grant request that
-reads after (or blocks behind) this delete finds no row at all. Deleting
-AccessToken first instead would leave the refresh token itself fully
-valid throughout the gap -- SET_NULL on RefreshToken.access_token only
-clears its pointer to the now-gone access token, it does not touch the
-refresh token's own validity -- so the credential a client would actually
-present stays exchangeable for a brand-new access token until
-RefreshToken's own delete finally runs. Orphaning the refresh token row
-(deleting it, not just nulling a pointer to it) is the protection this
-order buys, not a side effect the order is chosen to avoid.
+oauth2_validators.py). Once this delete has committed, that lookup finds
+no row at all and validation returns False outright -- but not before:
+Postgres's MVCC means a plain, unlocked SELECT is never blocked by, and
+never observes, another transaction's uncommitted delete, so a concurrent
+refresh-grant request that reads while this transaction is still open
+sees the row exactly as it was regardless of the order deletes run in
+here. Deleting RefreshToken first only narrows how long the row survives
+past commit; it does not stop a read that lands inside the window before
+commit. Deleting AccessToken first instead would leave the refresh token
+itself fully valid for even longer after commit -- SET_NULL on
+RefreshToken.access_token only clears its pointer to the now-gone access
+token, it does not touch the refresh token's own validity -- so the
+credential a client would actually present would stay exchangeable for a
+brand-new access token until RefreshToken's own delete finally runs and
+commits. Orphaning the refresh token row (deleting it, not just nulling a
+pointer to it) is the protection this order buys, not a side effect the
+order is chosen to avoid.
 
 IDToken is deleted last and explicitly, because none of the other three
 deletions reach it on their own: it is only ever a delete *target* (via

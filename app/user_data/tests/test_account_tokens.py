@@ -14,6 +14,7 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
                                     get_id_token_model, get_refresh_token_model)
 from rest_framework.authtoken.models import Token
 
+from user_data import account_tokens
 from user_data.account_tokens import delete_user_sessions, revoke_all_tokens
 
 from .conftest import make_oauth_token
@@ -172,6 +173,21 @@ def test_delete_user_sessions_ignores_expired_and_corrupt_rows(alice):
     # decodes to {} (never matches alice's pk) -- both are left alone
     assert Session.objects.filter(session_key=expired_key).exists()
     assert Session.objects.filter(pk=corrupt.pk).exists()
+
+
+def test_delete_user_sessions_deletes_across_multiple_chunks(alice, bob, monkeypatch):
+    """The delete runs in filter(session_key__in=...) chunks, not one
+    query for the whole match set -- pin that a match set bigger than one
+    chunk still gets deleted completely, not just its first chunk."""
+    monkeypatch.setattr(account_tokens, '_SESSION_DELETE_CHUNK', 2)
+    alice_keys = [_login_session(alice) for _ in range(5)]
+    bob_key = _login_session(bob)
+
+    delete_user_sessions(alice)
+
+    for key in alice_keys:
+        assert not Session.objects.filter(session_key=key).exists()
+    assert Session.objects.filter(session_key=bob_key).exists()
 
 
 @pytest.mark.parametrize('engine', [

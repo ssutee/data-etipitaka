@@ -7,6 +7,7 @@ import pytest
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connection
 from django.test import Client
 from django.utils import timezone
 from oauth2_provider.models import AccessToken, Grant, RefreshToken
@@ -1195,12 +1196,24 @@ def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authe
     both a Grant and a refresh token with a plain, unlocked SELECT. That
     mint survives the commit since it never conflicted with anything the
     transaction deleted. finish_recover has to sweep again after commit to
-    actually close this, not just narrow it."""
+    actually close this, not just narrow it -- so this also pins the
+    sweep's *position*: recording the atomic-block nesting depth on each
+    call catches a regression where the second call moves back inside the
+    block (which would still pass every other assertion here, since a
+    revoke from inside an about-to-commit transaction also happens to
+    delete rows that were only ever created within that same transaction
+    in this particular test)."""
     real_revoke = service.revoke_all_tokens
     calls = []
+    depths = []
 
     def _revoke_then_mint(user):
         calls.append(user)
+        # pytest-django wraps the whole test in its own atomic block(s), so
+        # 0 is never the baseline -- what matters is that the second call
+        # is shallower than the first, i.e. it runs after finish_recover's
+        # own `with transaction.atomic():` has exited.
+        depths.append(len(connection.atomic_blocks))
         real_revoke(user)
         if len(calls) == 1:
             # Stand in for the concurrent mint: whenever the in-transaction
@@ -1221,6 +1234,7 @@ def test_finish_recover_sweeps_tokens_minted_during_the_transaction(alice, authe
 
     assert passkey.user == alice
     assert len(calls) == 2  # the in-transaction call, then the post-commit sweep
+    assert depths[1] < depths[0]  # the sweep runs strictly outside finish_recover's atomic block
     assert not Token.objects.filter(user=alice).exists()
     assert not AccessToken.objects.filter(user=alice).exists()
     assert not RefreshToken.objects.filter(user=alice).exists()
