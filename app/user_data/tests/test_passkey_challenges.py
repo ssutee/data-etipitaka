@@ -45,6 +45,7 @@ def test_consume_rejects_wrong_purpose():
     row = challenges.create(WebAuthnChallenge.LOGIN)
     with pytest.raises(challenges.ChallengeError):
         challenges.consume(row.id, WebAuthnChallenge.REGISTER)
+    assert WebAuthnChallenge.objects.filter(pk=row.id).exists()
 
 
 def test_consume_rejects_other_user_and_burns_row(alice, bob):
@@ -54,8 +55,20 @@ def test_consume_rejects_other_user_and_burns_row(alice, bob):
     assert not WebAuthnChallenge.objects.filter(pk=row.id).exists()
 
 
-@pytest.mark.parametrize('bad', [None, '', 123, ['x']])
-def test_consume_rejects_non_string_ids(bad):
+def test_consume_rejects_register_without_user(alice):
+    row = challenges.create(WebAuthnChallenge.REGISTER, user=alice)
+    with pytest.raises(challenges.ChallengeError):
+        challenges.consume(row.id, WebAuthnChallenge.REGISTER)
+
+
+def test_consume_returns_row_for_matching_user(alice):
+    row = challenges.create(WebAuthnChallenge.REGISTER, user=alice)
+    got = challenges.consume(row.id, WebAuthnChallenge.REGISTER, user=alice)
+    assert got.user_id == alice.pk
+
+
+@pytest.mark.parametrize('bad', [None, '', 123, ['x'], 'a\x00b', 'x' * 65])
+def test_consume_rejects_malformed_ids(bad):
     with pytest.raises(challenges.ChallengeError):
         challenges.consume(bad, WebAuthnChallenge.LOGIN)
 
