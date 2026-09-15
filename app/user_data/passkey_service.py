@@ -9,6 +9,7 @@ See docs/superpowers/specs/2026-09-14-passkey-login-design.md.
 import json
 import logging
 import secrets
+import unicodedata
 
 from django.conf import settings
 from django.core.mail import send_mail
@@ -16,7 +17,9 @@ from django.db import IntegrityError, transaction
 from django.template.loader import render_to_string
 from django.utils.translation import gettext as _
 from webauthn import generate_registration_options, options_to_json, verify_registration_response
-from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
+from webauthn.helpers import (base64url_to_bytes, bytes_to_base64url,
+                              decode_credential_public_key,
+                              decoded_public_key_to_cryptography)
 from webauthn.helpers.exceptions import WebAuthnException
 from webauthn.helpers.structs import (AttestationConveyancePreference,
                                       AuthenticatorSelectionCriteria,
@@ -44,6 +47,12 @@ AAGUID_NAMES = {
     'd548826e-79b4-db40-a3d8-11116f7e8349': 'Bitwarden',
 }
 _TRANSPORTS = {t.value for t in AuthenticatorTransport}
+# Unicode general categories stripped from passkey names: control (Cc),
+# format (Cf, except the ZWJ used in emoji sequences), surrogate (Cs),
+# private-use (Co), unassigned (Cn), and the line/paragraph separators.
+_NAME_STRIP_CATEGORIES = {'Cc', 'Cf', 'Cs', 'Co', 'Cn', 'Zl', 'Zp'}
+_NAME_KEEP_CHAR = '‍'  # zero-width joiner
+_MAX_CREDENTIAL_ID_LENGTH = 1023
 
 
 class PasskeyError(Exception):
@@ -55,7 +64,18 @@ class RegistrationFailed(PasskeyError):
 
 
 def clean_name(name):
-    return name.strip()[:100] if isinstance(name, str) else ''
+    """Sanitize a user-supplied passkey name; '' means "use the default".
+
+    Strips characters that could inject headers/newlines into the
+    added-passkey email or spoof the reader with bidi overrides, collapses
+    whitespace, then truncates -- in that order, so a truncation cut never
+    leaves trailing whitespace.
+    """
+    if not isinstance(name, str):
+        return ''
+    filtered = ''.join(ch for ch in name if ch == _NAME_KEEP_CHAR
+                       or unicodedata.category(ch) not in _NAME_STRIP_CATEGORIES)
+    return ' '.join(filtered.split())[:100].strip()
 
 
 def _options_json(options):
@@ -100,19 +120,33 @@ def _verify_registration(challenge, credential):
     if not isinstance(credential, dict):
         raise RegistrationFailed()
     try:
-        return verify_registration_response(
+        # py_webauthn parses attacker-controlled CBOR (the COSE public key,
+        # the attestation statement) without fully guarding against
+        # structurally-invalid input, so a crafted response can raise a raw
+        # TypeError/KeyError/IndexError/ValueError (binascii.Error included)
+        # instead of one of its own WebAuthnException subclasses.
+        verified = verify_registration_response(
             credential=credential, expected_challenge=challenge,
             expected_rp_id=config.rp_id(), expected_origin=config.expected_origins(),
             require_user_verification=True)
-    except WebAuthnException as exc:
+        # A key can pass verification (e.g. fmt "none" never inspects it)
+        # yet still not be a usable point/modulus -- decode it for real now
+        # so junk never gets stored only to break the first login attempt.
+        decoded_public_key_to_cryptography(
+            decode_credential_public_key(verified.credential_public_key))
+    except (WebAuthnException, ValueError, KeyError, TypeError, IndexError) as exc:
         log.info('passkey registration rejected: %s', type(exc).__name__)
         raise RegistrationFailed() from exc
+    if len(verified.credential_id) > _MAX_CREDENTIAL_ID_LENGTH:
+        raise RegistrationFailed()
+    return verified
 
 
 def _store_passkey(user, verified, credential, name):
     aaguid = str(verified.aaguid)
-    transports = [t for t in (credential.get('response') or {}).get('transports') or []
-                  if isinstance(t, str) and t in _TRANSPORTS]
+    raw_transports = (credential.get('response') or {}).get('transports')
+    transports = ([t for t in raw_transports if isinstance(t, str) and t in _TRANSPORTS]
+                  if isinstance(raw_transports, list) else [])
     try:
         with transaction.atomic():
             return Passkey.objects.create(
@@ -132,8 +166,11 @@ def _send_passkey_added_email(user, passkey):
         'username': user.username, 'passkey_name': passkey.name,
         'security_url': config.web_origin() + '/account/security/',
         'reset_url': config.web_origin() + '/password_reset/'})
-    send_mail(_('A passkey was added to your E-Tipitaka account'), body,
-              settings.DEFAULT_FROM_EMAIL, [user.email])
+    try:
+        send_mail(_('A passkey was added to your E-Tipitaka account'), body,
+                  settings.DEFAULT_FROM_EMAIL, [user.email])
+    except Exception:  # a mail outage must not look like a failed registration
+        log.exception('failed to send passkey-added email to user %s', user.pk)
 
 
 def _begin_registration(user, purpose):

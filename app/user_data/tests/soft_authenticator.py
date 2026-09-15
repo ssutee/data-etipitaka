@@ -67,8 +67,13 @@ class SoftAuthenticator:
         return flags
 
     def register(self, options, origin=DEFAULT_ORIGIN, rp_id=None, uv=True,
-                 backed_up=True):
-        """Answer PublicKeyCredentialCreationOptionsJSON (a dict)."""
+                 backed_up=True, public_key=None, fmt='none', att_stmt=None):
+        """Answer PublicKeyCredentialCreationOptionsJSON (a dict).
+
+        `public_key` overrides the COSE-encoded public key bytes embedded in
+        authenticatorData, and `fmt`/`att_stmt` override the attestation
+        statement -- both let tests craft malformed registration responses.
+        """
         rp_id = rp_id or options['rp']['id']
         self.user_handle = unb64url(options['user']['id'])
         client_data = self._client_data('webauthn.create', options['challenge'], origin)
@@ -79,9 +84,9 @@ class SoftAuthenticator:
             + self.aaguid
             + struct.pack('>H', len(self.credential_id))
             + self.credential_id
-            + self._cose_public_key()
+            + (public_key if public_key is not None else self._cose_public_key())
         )
-        attestation = cbor2.dumps({'fmt': 'none', 'attStmt': {}, 'authData': auth_data})
+        attestation = cbor2.dumps({'fmt': fmt, 'attStmt': att_stmt or {}, 'authData': auth_data})
         return {
             'id': b64url(self.credential_id),
             'rawId': b64url(self.credential_id),
