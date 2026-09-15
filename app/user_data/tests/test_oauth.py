@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
-from oauth2_provider.models import AccessToken, Application, get_refresh_token_model
+from oauth2_provider.models import AccessToken, Application, Grant, get_refresh_token_model
 from oauth2_provider.oauth2_validators import OAuth2Validator
 
 from user_data.oauth_validators import EtipitakaOAuth2Validator
@@ -207,10 +207,15 @@ def _get_tokens(client, alice):
     return cid, resp.json()
 
 
-def test_refresh_token_grant_takes_the_advisory_lock(client, alice):
-    """save_bearer_token's rotation path (validate_refresh_token too, but
-    one lock call is enough to prove the SQL is really reaching Postgres
-    through the live token endpoint, not just present in a unit test)."""
+def _lock_call_count(ctx):
+    return sum('pg_advisory_xact_lock' in q['sql'] for q in ctx.captured_queries)
+
+
+def test_refresh_token_grant_takes_the_advisory_lock_exactly_twice(client, alice):
+    """Exactly two lock calls -- one from validate_refresh_token, one from
+    save_bearer_token's rotation -- not just "at least one": an `any(...)`
+    version of this assertion still passed with either lock site removed
+    (each one alone still lets the other cover the query log)."""
     cid, body = _get_tokens(client, alice)
     with CaptureQueriesContext(connection) as ctx:
         resp = client.post('/o/token/', {
@@ -218,7 +223,27 @@ def test_refresh_token_grant_takes_the_advisory_lock(client, alice):
             'client_id': cid,
         })
     assert resp.status_code == 200, resp.content
-    assert any('pg_advisory_xact_lock' in q['sql'] for q in ctx.captured_queries)
+    assert _lock_call_count(ctx) == 2
+
+
+def test_authorization_code_exchange_takes_the_advisory_lock_exactly_once(client, alice):
+    """Only save_bearer_token has an owner to lock during the initial
+    exchange -- validate_refresh_token never runs for this grant type."""
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    verifier, challenge = _pkce()
+    client.force_login(alice)
+    allowed = client.post('/o/authorize/', {**_authz_params(cid, challenge), 'allow': 'Authorize'})
+    code = parse_qs(urlparse(allowed['Location']).query)['code'][0]
+    with CaptureQueriesContext(connection) as ctx:
+        resp = client.post('/o/token/', {
+            'grant_type': 'authorization_code', 'code': code,
+            'redirect_uri': 'https://app.example/cb', 'client_id': cid,
+            'code_verifier': verifier,
+        })
+    assert resp.status_code == 200, resp.content
+    assert _lock_call_count(ctx) == 1
 
 
 def test_revoke_token_takes_the_advisory_lock(client, alice):
@@ -292,6 +317,71 @@ def test_refresh_token_deleted_during_rotation_is_invalid_grant(client, alice, m
     # header is oauthlib/DOT's plain HttpResponse default (text/html),
     # an existing oauthlib quirk this fix does not attempt to paper over.
     assert json.loads(resp.content)['error'] == 'invalid_grant'
+
+
+def test_grant_deleted_during_exchange_is_invalid_grant(client, alice, monkeypatch):
+    """Stands in for a concurrent passkey recovery deleting the Grant row
+    between validate_code's own guarded lookup and get_code_challenge's
+    unguarded one, later in the same exchange -- a gap that predates the
+    advisory lock entirely (see the EtipitakaOAuth2Validator module
+    docstring: Grant reads are not something it serialises, since
+    nothing here needs to write a Grant row to answer them). Must
+    surface as a normal 400 invalid_grant, not an unhandled 500."""
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    verifier, challenge = _pkce()
+    client.force_login(alice)
+    allowed = client.post('/o/authorize/', {**_authz_params(cid, challenge), 'allow': 'Authorize'})
+    code = parse_qs(urlparse(allowed['Location']).query)['code'][0]
+
+    real_validate_code = EtipitakaOAuth2Validator.validate_code
+
+    def _validate_then_delete_grant(self, client_id, code_, oauth_client, request, *args, **kwargs):
+        result = real_validate_code(self, client_id, code_, oauth_client, request, *args, **kwargs)
+        Grant.objects.filter(code=code_, application=oauth_client).delete()
+        return result
+
+    monkeypatch.setattr(EtipitakaOAuth2Validator, 'validate_code', _validate_then_delete_grant)
+    resp = client.post('/o/token/', {
+        'grant_type': 'authorization_code', 'code': code,
+        'redirect_uri': 'https://app.example/cb', 'client_id': cid,
+        'code_verifier': verifier,
+    })
+    assert resp.status_code == 400, resp.content
+    assert resp.json()['error'] == 'invalid_grant'
+
+
+def test_grant_deleted_between_challenge_and_method_lookup_is_invalid_grant(client, alice,
+                                                                            monkeypatch):
+    """get_code_challenge_method's own guard specifically: oauthlib calls
+    it right after get_code_challenge, as a separate read of the same
+    Grant row, so this covers the gap between those two rather than the
+    one validate_code -> get_code_challenge already covers above."""
+    reg = client.post('/o/register/', data=json.dumps(DCR_BODY),
+                      content_type='application/json').json()
+    cid = reg['client_id']
+    verifier, challenge = _pkce()
+    client.force_login(alice)
+    allowed = client.post('/o/authorize/', {**_authz_params(cid, challenge), 'allow': 'Authorize'})
+    code = parse_qs(urlparse(allowed['Location']).query)['code'][0]
+
+    real_get_challenge = EtipitakaOAuth2Validator.get_code_challenge
+
+    def _get_challenge_then_delete_grant(self, code_, request):
+        result = real_get_challenge(self, code_, request)
+        Grant.objects.filter(code=code_, application=request.client).delete()
+        return result
+
+    monkeypatch.setattr(EtipitakaOAuth2Validator, 'get_code_challenge',
+                        _get_challenge_then_delete_grant)
+    resp = client.post('/o/token/', {
+        'grant_type': 'authorization_code', 'code': code,
+        'redirect_uri': 'https://app.example/cb', 'client_id': cid,
+        'code_verifier': verifier,
+    })
+    assert resp.status_code == 400, resp.content
+    assert resp.json()['error'] == 'invalid_grant'
 
 
 def test_save_bearer_token_skips_locking_without_an_authenticated_user():

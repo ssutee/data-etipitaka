@@ -17,13 +17,25 @@ which is the opposite of DOT's own explicit RefreshToken-then-AccessToken
 FOR UPDATE order during rotation. No amount of reordering either side's
 statements can reconcile that; only serialising entry can.
 
+This class also closes a second, unrelated gap the advisory lock does not
+touch: get_code_challenge and get_code_challenge_method each do their own
+unguarded Grant.objects.get(code=..., application=...) *after*
+validate_code's own, already try/except-guarded lookup of the same row --
+so a concurrent passkey recovery deleting the grant in the gap between
+those two reads (a plain read racing a write, not two writes racing each
+other) raises a raw Grant.DoesNotExist that must not reach the caller as
+an unhandled 500. This predates the advisory lock entirely and is not a
+locking problem: Grant reads are not something lock_user_tokens
+serialises against, since nothing here needs to write a Grant row to
+answer them.
+
 Wired in via OAUTH2_PROVIDER['OAUTH2_VALIDATOR_CLASS'] in
 etipitaka_auth/settings.py.
 """
 import hashlib
 
 from django.db import transaction
-from oauth2_provider.models import get_access_token_model, get_refresh_token_model
+from oauth2_provider.models import get_access_token_model, get_grant_model, get_refresh_token_model
 from oauth2_provider.oauth2_validators import OAuth2Validator
 from oauthlib.oauth2.rfc6749 import errors
 
@@ -31,14 +43,16 @@ from .account_tokens import lock_user_tokens
 
 # Bound once at import time, exactly as oauth2_validators.py itself binds
 # these (its own module-level `RefreshToken = get_refresh_token_model()`),
-# so `except RefreshToken.DoesNotExist` below matches the identical class
+# so `except ModelName.DoesNotExist` below matches the identical class
 # DOT's own code raises against, including under a swapped model.
 AccessToken = get_access_token_model()
+Grant = get_grant_model()
 RefreshToken = get_refresh_token_model()
 
 
 class EtipitakaOAuth2Validator(OAuth2Validator):
-    """Take the per-user advisory lock before every OAuth token write."""
+    """Take the per-user advisory lock before every OAuth token write, and
+    guard two unlocked Grant reads against a grant deleted concurrently."""
 
     def save_bearer_token(self, token, request, *args, **kwargs):
         """Lock the token's owner before issuing or rotating tokens.
@@ -136,3 +150,36 @@ class EtipitakaOAuth2Validator(OAuth2Validator):
             for user_id in sorted(user_ids):
                 lock_user_tokens(user_id)
             return super().revoke_token(token, token_type_hint, request, *args, **kwargs)
+
+    def get_code_challenge(self, code, request):
+        """Report the authorization-code exchange's PKCE challenge, or None.
+
+        validate_code (called by oauthlib just before this, during the
+        same exchange) already catches Grant.DoesNotExist and returns
+        False for a missing grant, which oauthlib itself turns into
+        invalid_grant -- but the base implementation's own
+        Grant.objects.get(code=..., application=...) here has no such
+        guard, so a grant that vanishes in the gap between the two reads
+        (a concurrent passkey recovery deleting it, mid-exchange) still
+        raises a raw Grant.DoesNotExist. Reported the same way validate_code
+        itself already reports "no such grant".
+        """
+        try:
+            return super().get_code_challenge(code, request)
+        except Grant.DoesNotExist as exc:
+            raise errors.InvalidGrantError(request=request) from exc
+
+    def get_code_challenge_method(self, code, request):
+        """See get_code_challenge just above -- the same gap, the same fix.
+
+        oauthlib calls this right after get_code_challenge, as a third
+        separate read of the same Grant row, so it needs its own guard
+        even though get_code_challenge's guard already covers the same
+        race for the read before it.
+        """
+        try:
+            return super().get_code_challenge_method(code, request)
+        except Grant.DoesNotExist as exc:
+            raise errors.InvalidGrantError(request=request) from exc
+
+

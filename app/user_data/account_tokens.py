@@ -130,6 +130,28 @@ def lock_user_tokens(user_id):
     Miss one and that writer is back to racing the others on raw row
     locks, with all the same ordering problems described above.
 
+    Warning for any future caller: never call this (directly, or via
+    revoke_all_tokens) while already holding the user row's own FOR
+    UPDATE lock in the same transaction. That is exactly the shape of the
+    original deadlock -- a transaction holding the user row and then
+    reaching for a token-table lock, racing another transaction doing the
+    reverse -- just with this lock substituted for the raw AccessToken/
+    RefreshToken row locks. Passkey recovery's own split into transaction
+    A (revoke_all_tokens, which takes this lock) and transaction B
+    (_store_passkey, which takes the user row's FOR UPDATE, and never
+    this lock) exists specifically so the two never nest inside one
+    transaction; see finish_recover's docstring.
+
+    Two writers of a user's OAuth tokens still bypass this lock entirely:
+    `manage.py cleartokens` (DOT's own expired-token sweep) and the
+    django-oauth-toolkit admin pages (a human deleting a row by hand).
+    Neither is worth serialising against the request path for -- the
+    first runs on a schedule, the second is a rare, deliberate action --
+    so for these two the deadlock retry around recovery's own
+    transactions (finish_recover's _run_with_retry) is the backstop, not
+    this lock: a genuine collision is rare and, when it happens, gets
+    retried rather than surfaced as a failure.
+
     pg_advisory_xact_lock is transaction-scoped: Postgres releases it
     automatically at COMMIT or ROLLBACK, so a caller never has to release
     it explicitly, and cannot leak it by forgetting to.
