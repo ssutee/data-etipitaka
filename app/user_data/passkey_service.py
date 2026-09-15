@@ -11,6 +11,7 @@ import logging
 import secrets
 import unicodedata
 
+import cbor2
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
@@ -51,7 +52,7 @@ _TRANSPORTS = {t.value for t in AuthenticatorTransport}
 # format (Cf, except the ZWJ used in emoji sequences), surrogate (Cs),
 # private-use (Co), unassigned (Cn), and the line/paragraph separators.
 _NAME_STRIP_CATEGORIES = {'Cc', 'Cf', 'Cs', 'Co', 'Cn', 'Zl', 'Zp'}
-_NAME_KEEP_CHAR = '‍'  # zero-width joiner
+_NAME_KEEP_CHAR = chr(0x200D)  # zero-width joiner, kept in passkey names for emoji sequences
 _MAX_CREDENTIAL_ID_LENGTH = 1023
 
 
@@ -66,16 +67,25 @@ class RegistrationFailed(PasskeyError):
 def clean_name(name):
     """Sanitize a user-supplied passkey name; '' means "use the default".
 
-    Strips characters that could inject headers/newlines into the
-    added-passkey email or spoof the reader with bidi overrides, collapses
-    whitespace, then truncates -- in that order, so a truncation cut never
-    leaves trailing whitespace.
+    Order matters: collapse whitespace FIRST (so a control character used as
+    a word separator, e.g. a tab or newline, still leaves a single space
+    behind rather than merging the words either side of it), THEN strip
+    characters that could inject headers/newlines into the added-passkey
+    email or spoof the reader with bidi overrides, THEN collapse again
+    (filtering can turn two spaces that used to flank a now-deleted
+    character into an adjacent pair), then truncate and strip so a
+    truncation cut never leaves trailing whitespace. A name left with no
+    visible character (e.g. only zero-width joiners) is treated as empty.
     """
     if not isinstance(name, str):
         return ''
-    filtered = ''.join(ch for ch in name if ch == _NAME_KEEP_CHAR
+    collapsed = ' '.join(name.split())
+    filtered = ''.join(ch for ch in collapsed if ch == _NAME_KEEP_CHAR
                        or unicodedata.category(ch) not in _NAME_STRIP_CATEGORIES)
-    return ' '.join(filtered.split())[:100].strip()
+    cleaned = ' '.join(filtered.split())[:100].strip()
+    if not cleaned.replace(_NAME_KEEP_CHAR, '').strip():
+        return ''
+    return cleaned
 
 
 def _options_json(options):
@@ -116,25 +126,58 @@ def _registration_options(challenge, username, handle, exclude):
         exclude_credentials=exclude))
 
 
+def _neutralize_attestation(credential):
+    """Discard the attestation statement before verification.
+
+    We request attestation "none" and never trust whatever an authenticator
+    actually sends, so there is no reason for py_webauthn's packed/tpm/
+    android-key/apple/android-safetynet/fido-u2f parsers to ever run on
+    attacker-controlled attStmt bytes -- e.g. a crafted android-safetynet
+    response raises a raw AttributeError deep inside py_webauthn instead of
+    one of its own exception types. Keep only authData: RP ID hash, the UV
+    flag, and the credential id/public key are all read from it, and none
+    of that requires an attestation statement at all.
+    """
+    attestation_object = cbor2.loads(base64url_to_bytes(credential['response']['attestationObject']))
+    auth_data = attestation_object['authData']
+    if not isinstance(auth_data, bytes):
+        raise TypeError('authData was not bytes')
+    neutral = cbor2.dumps({'fmt': 'none', 'attStmt': {}, 'authData': auth_data})
+    credential = dict(credential)
+    credential['response'] = dict(credential['response'])
+    credential['response']['attestationObject'] = bytes_to_base64url(neutral)
+    return credential
+
+
 def _verify_registration(challenge, credential):
+    # Read config before touching the (possibly hostile) credential at all:
+    # a malformed setting -- e.g. PASSKEY_ANDROID_CERT_SHA256 -- must raise
+    # loudly for every request, not get funnelled into a generic
+    # RegistrationFailed by the except clause below.
+    rp_id = config.rp_id()
+    expected_origin = config.expected_origins()
     if not isinstance(credential, dict):
         raise RegistrationFailed()
     try:
-        # py_webauthn parses attacker-controlled CBOR (the COSE public key,
-        # the attestation statement) without fully guarding against
-        # structurally-invalid input, so a crafted response can raise a raw
-        # TypeError/KeyError/IndexError/ValueError (binascii.Error included)
-        # instead of one of its own WebAuthnException subclasses.
+        credential = _neutralize_attestation(credential)
+        # py_webauthn parses attacker-controlled CBOR (the COSE public key)
+        # without fully guarding against structurally-invalid input, so a
+        # crafted response can still raise a raw TypeError/KeyError/
+        # IndexError/ValueError (binascii.Error included) or AttributeError
+        # instead of one of its own WebAuthnException subclasses; a
+        # malformed attestationObject can also fail our own cbor2 decode
+        # above with a CBORError.
         verified = verify_registration_response(
             credential=credential, expected_challenge=challenge,
-            expected_rp_id=config.rp_id(), expected_origin=config.expected_origins(),
+            expected_rp_id=rp_id, expected_origin=expected_origin,
             require_user_verification=True)
-        # A key can pass verification (e.g. fmt "none" never inspects it)
-        # yet still not be a usable point/modulus -- decode it for real now
-        # so junk never gets stored only to break the first login attempt.
+        # A key can pass verification (fmt "none" never inspects it) yet
+        # still not be a usable point/modulus -- decode it for real now so
+        # junk never gets stored only to break the first login attempt.
         decoded_public_key_to_cryptography(
             decode_credential_public_key(verified.credential_public_key))
-    except (WebAuthnException, ValueError, KeyError, TypeError, IndexError) as exc:
+    except (WebAuthnException, ValueError, KeyError, TypeError, IndexError,
+            AttributeError, cbor2.CBORError) as exc:
         log.info('passkey registration rejected: %s', type(exc).__name__)
         raise RegistrationFailed() from exc
     if len(verified.credential_id) > _MAX_CREDENTIAL_ID_LENGTH:
