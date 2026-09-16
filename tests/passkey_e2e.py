@@ -15,7 +15,14 @@ signed in) -> the spent reset link.
 
 The authenticator answers for the relying party the server advertises: origin
 https://<rpId>, or http://localhost:1338 when a dev override sets rpId to
-localhost. Repeated runs within a minute may hit the passkey throttle (429).
+localhost. A same-minute rerun WILL hit the passkey throttle (429), even
+against the default http://web:8000: PasskeyRateThrottle is per-client-IP
+for anonymous calls (settings' 'passkey' rate, 20/min in dev), this script's
+own anonymous passkey calls alone number around ten per run, and every run
+shares one IP (the container's). If a run fails with a THROTTLED error (see
+Client.json below), wait about 60s for the bucket to refill, then re-run --
+don't just retry immediately, since that would only refill the bucket
+further into the next window and mask whatever the original failure was.
 
 Running against the default http://web:8000 talks straight to the `web`
 container and bypasses nginx entirely, so none of the Task 23 rate-limit
@@ -41,15 +48,23 @@ with its own memory, so a module-level django.core.mail.outbox populated
 there is not visible here, and there is no docker socket or CLI inside the
 container to go read that worker's stdout instead. So request_password_reset
 below is the one step in this script that does NOT go over `base`'s HTTP:
-it forces settings.EMAIL_BACKEND to locmem and dispatches the request
-in-process with django.test.Client (this script already called
-django.setup(), so it can), then reads django.core.mail.outbox directly.
-That still runs the real password_reset_view / AccountRecoveryForm code --
-just via Django's own request dispatch instead of a socket -- and is the
-only way this script can observe what mail was actually sent. Everything
-downstream of getting that link (following it, and the recover
-begin/finish calls) goes over real HTTP to `base`, exactly like the rest of
-this script.
+it forces settings.EMAIL_BACKEND to locmem (via override_settings, scoped to
+just that call) and dispatches the request in-process with django.test.Client
+(this script already called django.setup(), so it can), then reads
+django.core.mail.outbox directly. That still runs the real
+password_reset_view / AccountRecoveryForm code -- just via Django's own
+request dispatch instead of a socket -- and is the only way this script can
+observe what mail was actually sent. Everything downstream of getting that
+link (following it, and the recover begin/finish calls) goes over real HTTP
+to `base`, exactly like the rest of this script. A real HTTP GET to
+/password_reset/ still happens too (recover_account's first step below),
+so the route and its form template are exercised over the wire, the same as
+everything else here -- only the POST that actually triggers the email is
+in-process. That also means this script's real-HTTP traffic never POSTs to
+/password_reset/ or /reset/<uidb64>/<token>/, so nginx's reset_post_rl zone
+(Task 23) is never exercised even when run against localhost:1338 -- it was
+deliberately left that way (a POST there would only spend budget from a
+5/min zone for no extra coverage; see recover_account's own comment).
 
 Not covered here: recovery bypassing the passkey cap (PASSKEY_MAX_PER_USER,
 currently 20). Proving that over real HTTP means filling one account with
@@ -64,6 +79,7 @@ test_recover_succeeds_at_the_cap proves it at the real default of 20,
 neither of which needs a live server or real WebAuthn round trips.
 """
 import base64
+import contextlib
 import hashlib
 import http.cookiejar
 import json
@@ -80,12 +96,11 @@ import django  # noqa: E402
 
 django.setup()
 
-from django.conf import settings as django_settings  # noqa: E402
 from django.contrib.auth.models import User  # noqa: E402
 from django.core import mail  # noqa: E402
 from django.test import Client as DjangoTestClient  # noqa: E402
+from django.test import override_settings  # noqa: E402
 from oauth2_provider.models import Application  # noqa: E402
-from rest_framework.authtoken.models import Token  # noqa: E402
 
 from user_data.account_tokens import delete_user_sessions  # noqa: E402
 from user_data.tests.soft_authenticator import SoftAuthenticator  # noqa: E402
@@ -145,6 +160,17 @@ class Client:
 
     def json(self, method, path, body=None, expect=200, headers=None):
         status, _headers, raw = self.call(method, path, body, headers)
+        if status == 429 and expect != 429:
+            # Every DRF endpoint this script's json() calls sits behind
+            # PasskeyRateThrottle (see the module docstring's throttle
+            # paragraph) -- flag this specific, common failure clearly
+            # rather than let it read as some other assertion tripping,
+            # which would send a rerun chasing the wrong cause.
+            raise AssertionError(
+                'THROTTLED: %s %s -> 429 %s (wait ~60s for the passkey rate '
+                'limit to reset, then re-run -- retrying immediately will '
+                'likely 429 again and hide whatever the real failure was)'
+                % (method, path, raw[:300]))
         assert status == expect, '%s %s -> %s %s' % (method, path, status, raw[:300])
         return json.loads(raw) if raw else {}
 
@@ -225,7 +251,7 @@ def run(base, username, app, signup_name):
     assert guest.json('POST', '/api/passkeys/login/finish/', assertion(guest, newcomer))['key']
     print('passkey signup -> verified -> login: OK')
 
-    recover_account(base, username, app, authenticator)
+    recover_account(base, username, app, authenticator, api.token)
 
 
 # --- Task 25 addition: account recovery -------------------------------
@@ -275,20 +301,32 @@ def get_oauth_access_token(client, app):
     return json.loads(raw)['access_token']
 
 
+# Text unique to registration/password_reset_email.txt (this project's own
+# template, wired in via password_reset_view's email_template_name) -- the
+# stock Django reset email never mentions passkeys at all, so asserting
+# this also catches email_template_name silently coming unwired and users
+# quietly getting Django's default English "click here to reset your
+# password" email with no passkey instructions in it.
+_RECOVERY_EMAIL_MARKER = 'พาสคีย์'  # "passkey" (Thai), the default site language
+
+
 def request_password_reset(email):
     """POST /password_reset/ in-process and return the recovery link's
     path, extracted from the email django's console backend would
     otherwise only print to a different process's stdout. See the module
     docstring's "Email capture" paragraph for why this is in-process while
-    everything else in this script is real HTTP against `base`.
+    everything else in this script -- including a real GET of this same
+    /password_reset/ route, in recover_account below -- is real HTTP
+    against `base`.
 
-    SERVER_NAME is a fixed, ALLOWED_HOSTS-listed value ('web'): it only
-    affects the domain embedded in the mailed link, which this function
-    discards -- callers use the returned *path* against their own `base`.
+    SERVER_NAME is a fixed, ALLOWED_HOSTS-listed value ('web'): the domain
+    it puts in the mailed link is discarded below (only the path is kept,
+    for use against the caller's own `base`) -- but the link's
+    *absoluteness* (a real scheme://host prefix, not a bare path a mail
+    client couldn't turn into a clickable link) is checked before that
+    discarding happens.
     """
-    original_backend = django_settings.EMAIL_BACKEND
-    django_settings.EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
-    try:
+    with override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend'):
         # locmem's EmailBackend only creates the module-level `outbox` list
         # the first time it actually sends something -- it does not exist
         # yet in a process (like this one) that has never sent mail before.
@@ -298,11 +336,15 @@ def request_password_reset(email):
         assert status == 302, status
         outbox = getattr(mail, 'outbox', [])
         assert len(outbox) == before + 1, 'expected exactly one recovery email'
-        match = re.search(r'(/reset/[^\s/]+/[^\s/]+/)', outbox[-1].body)
-        assert match, 'no reset link found in the recovery email'
+        sent = outbox[-1]
+        assert sent.to == [email], 'recovery email went to the wrong address: %r' % (sent.to,)
+        assert _RECOVERY_EMAIL_MARKER in sent.body, (
+            "recovery email doesn't look like this project's own template "
+            '(email_template_name unwired back to Django\'s stock one?): %r'
+            % sent.body[:300])
+        match = re.search(r'https?://[^/\s]+(/reset/[^\s/]+/[^\s/]+/)', sent.body)
+        assert match, 'no absolute reset link found in the recovery email: %r' % sent.body[:300]
         return match.group(1)
-    finally:
-        django_settings.EMAIL_BACKEND = original_backend
 
 
 def recover_passkey(client, authenticator, uidb64):
@@ -317,7 +359,7 @@ def recover_passkey(client, authenticator, uidb64):
                        headers={'X-CSRFToken': csrf})
 
 
-def recover_account(base, username, app, lost_authenticator):
+def recover_account(base, username, app, lost_authenticator, drf_token):
     # A fresh browser session + OAuth token, minted only now -- strictly
     # after run() already removed the password above. Removing the
     # password changes the session-auth hash and silently signs out any
@@ -331,9 +373,24 @@ def recover_account(base, username, app, lost_authenticator):
         headers={'X-CSRFToken': recovery_browser.cookie('csrftoken')})['redirect']
     assert redirect == '/', redirect
     oauth_token = get_oauth_access_token(recovery_browser, app)
+    # `drf_token` is the same token run() minted via password login,
+    # already live this whole time (removing the password doesn't touch a
+    # DRF token -- only recovery's revoke_all_tokens does): reusing it here
+    # rather than minting a fresh one also proves it survived everything
+    # else run() already did to this account before recovery even starts.
     live_drf_token = Client(base)
-    live_drf_token.token = _drf_token_for(username)
+    live_drf_token.token = drf_token
     print('pre-recovery browser session + OAuth token: OK')
+
+    # A real HTTP GET, unlike request_password_reset's in-process POST
+    # below: exercises the /password_reset/ route and its form template for
+    # real, so the route being removed or renamed in urls.py fails here --
+    # request_password_reset's in-process django.test.Client dispatch knows
+    # how to reach the view function directly and would not by itself
+    # notice the route disappearing from urls.py.
+    status, _headers, page = Client(base).call('GET', '/password_reset/')
+    assert status == 200 and b'name="email"' in page, (status, page[:300])
+    print('GET /password_reset/ shows the reset-request form: OK')
 
     reset_path = request_password_reset(username + '@example.com')
     recovering = Client(base)
@@ -356,6 +413,18 @@ def recover_account(base, username, app, lost_authenticator):
     assert status == 200, (status, raw[:300])
     print('recovering client is signed in: OK')
 
+    # Recovery exists to hand a locked-out user a WORKING credential, not
+    # just to run the ceremony and revoke the old ones -- so prove the new
+    # passkey can independently sign in through the normal login endpoint
+    # (a *different* client than `recovering`, which is already signed in
+    # via finish_recover's own login() call and wouldn't notice the new
+    # credential itself being unusable, e.g. a corrupted stored public key).
+    login_client = Client(base)
+    recovered_key = login_client.json(
+        'POST', '/api/passkeys/login/finish/', assertion(login_client, fresh_authenticator))['key']
+    assert recovered_key, 'the recovered passkey must be able to sign in'
+    print('recovered passkey signs in: OK')
+
     status, _headers, raw = live_drf_token.call('GET', '/rest-auth/user/')
     assert status == 401, (status, raw[:300])
     print('pre-recovery DRF token revoked: OK')
@@ -374,26 +443,18 @@ def recover_account(base, username, app, lost_authenticator):
     print('reset link is spent (re-opening it shows the invalid-link page): OK')
 
 
-def _drf_token_for(username):
-    """The account's current DRF token, read directly from the DB.
-
-    Only used to pin down the *value* recover_account needs to prove is
-    dead afterwards; run() already minted this same token via password
-    login and it has been live the whole time (removing the password does
-    not touch it -- only recovery's revoke_all_tokens does).
-    """
-    return Token.objects.get(user__username=username).key
-
-
 def main(base):
     suffix = secrets.token_hex(4)
     username, signup_name = 'e2e_pk_' + suffix, 'e2e_su_' + suffix
-    User.objects.create_user(username, username + '@example.com', PASSWORD)
+    # Application first, and outside the try: the finally block's app.delete()
+    # needs it to exist unconditionally, including if User creation itself
+    # (inside the try below) is what fails.
     app = Application.objects.create(
         name='passkey-e2e', client_type=Application.CLIENT_PUBLIC,
         authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
         redirect_uris=REDIRECT, client_secret='', hash_client_secret=False)
     try:
+        User.objects.create_user(username, username + '@example.com', PASSWORD)
         run(base, username, app, signup_name)
     finally:
         for name in (username, signup_name):
@@ -402,8 +463,13 @@ def main(base):
                 # Sessions carry no FK to User (django.contrib.sessions is
                 # decoupled from auth), so deleting the user below would
                 # not on its own clean up recover_account's leftover
-                # recovering-client session row.
-                delete_user_sessions(user)
+                # recovering-client session row. Best-effort: a failure
+                # here (e.g. a transient DB error) must not skip deleting
+                # the user/app rows below, which matter more -- a stray
+                # session row is comparatively harmless (it expires on its
+                # own; see delete_user_sessions's own docstring).
+                with contextlib.suppress(Exception):
+                    delete_user_sessions(user)
         User.objects.filter(username__in=[username, signup_name]).delete()
         app.delete()
     print('PASSKEY E2E OK')

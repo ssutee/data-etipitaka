@@ -44,7 +44,8 @@ const TEST_HOOKS = `
     bufferToB64url: bufferToB64url,
     credentialToJSON: credentialToJSON,
     creationOptions: creationOptions,
-    requestOptions: requestOptions
+    requestOptions: requestOptions,
+    csrfToken: csrfToken
   };
 `;
 
@@ -59,26 +60,63 @@ function instrumentedSource() {
 
 const INSTRUMENTED_SOURCE = instrumentedSource();
 
+/* atob/btoa are Web APIs, not part of the JS language itself, so a vm
+ * context (unlike Node's own global scope, which happens to expose them
+ * since Node 16) does not have them for free. A first version of these
+ * stubs just delegated straight to Buffer.from(value, 'base64') /
+ * .toString('base64') -- but Node's base64 decoder is far more forgiving
+ * than a real atob: it silently ignores wrong or missing '=' padding
+ * instead of throwing, which let a real bug in b64urlToBuffer's own
+ * padding arithmetic slip past every test here undetected (caught in
+ * review by mutation-testing '==='.slice((base64.length + 3) % 4) into
+ * '==='.slice(base64.length % 4) -- every test stayed green even though a
+ * real browser would throw InvalidCharacterError on the resulting
+ * malformed string for any input whose unpadded length is a multiple of
+ * 4). These implement the WHATWG "forgiving-base64 decode" algorithm
+ * (https://infra.spec.whatwg.org/#forgiving-base64-decode, as used by
+ * atob: https://html.spec.whatwg.org/multipage/webappapis.html#atob)
+ * closely enough to reject the same malformed input a real browser would:
+ * strip ASCII whitespace, strip trailing '=' padding only when the
+ * (whitespace-stripped) length is already a multiple of 4, then throw on
+ * a length%4 of 1 or on any character outside the base64 alphabet
+ * (a stray '=' included, once padding-stripping didn't apply to it).
+ */
+function specAtob(value) {
+  var data = String(value).replace(/[\t\n\f\r ]/g, '');
+  if (data.length % 4 === 0) {
+    data = data.replace(/={1,2}$/, '');
+  }
+  if (data.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(data)) {
+    throw new Error('InvalidCharacterError: atob stub -- not correctly encoded base64: ' +
+      JSON.stringify(value));
+  }
+  return Buffer.from(data, 'base64').toString('binary');
+}
+
+function specBtoa(value) {
+  if (/[^\x00-\xff]/.test(value)) {
+    throw new Error('InvalidCharacterError: btoa stub -- character outside \\x00-\\xff: ' +
+      JSON.stringify(value));
+  }
+  return Buffer.from(value, 'binary').toString('base64');
+}
+
 /** A fresh vm context with a minimal window/document/navigator, running the
  * real (instrumented) passkey.js in it. `overrides` lets a test control
- * window.PublicKeyCredential, window.i18n, navigator, etc. before load --
- * every test gets its own context, since some of these (e.g.
- * PublicKeyCredential.parseCreationOptionsFromJSON's presence) matter at
- * call time, but starting clean avoids any cross-test leakage regardless.
+ * window.PublicKeyCredential, window.i18n, navigator, document, etc.
+ * before load -- every test gets its own context, since some of these
+ * (e.g. PublicKeyCredential.parseCreationOptionsFromJSON's presence)
+ * matter at call time, but starting clean avoids any cross-test leakage
+ * regardless.
  */
 function loadPasskeyModule(overrides = {}) {
-  const documentStub = {
+  const documentStub = Object.assign({
     cookie: '',
     querySelector() { return null; },
-  };
+  }, overrides.document || {});
   const windowStub = Object.assign({
-    // atob/btoa are Web APIs, not part of the JS language itself, so a vm
-    // context (unlike Node's own global scope, which happens to expose
-    // them since Node 16) does not have them for free -- these mirror the
-    // browser contract closely enough for passkey.js's own use of them
-    // (byte-for-byte binary strings, not real UTF-16 text).
-    atob: (value) => Buffer.from(value, 'base64').toString('binary'),
-    btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
+    atob: specAtob,
+    btoa: specBtoa,
     PublicKeyCredential: {},
     fetch: () => Promise.reject(new Error('fetch not stubbed for this test')),
     i18n: {},
@@ -146,6 +184,16 @@ test('b64urlToBuffer / bufferToB64url round-trip: a real 32-byte challenge', () 
 });
 
 // --- credentialToJSON -----------------------------------------------------
+//
+// The hardcoded key lists below are checked against py_webauthn's own JSON
+// field names, not guessed: webauthn.helpers.structs.RegistrationCredential
+// and AuthenticationCredential both have id/raw_id/response/
+// authenticator_attachment/type, and their nested
+// AuthenticatorAttestationResponse / AuthenticatorAssertionResponse have
+// client_data_json/attestation_object/transports and
+// client_data_json/authenticator_data/signature/user_handle respectively
+// (py_webauthn's own JSON parsing maps the snake_case dataclass fields
+// to/from the camelCase wire names asserted here, e.g. raw_id <-> rawId).
 
 test('credentialToJSON: registration credential shape matches what py_webauthn expects', () => {
   const { window } = loadPasskeyModule();
@@ -341,6 +389,55 @@ test('requestOptions: manual fallback with no allowCredentials -> []', () => {
   // See the transports-fallback test above for why this is a length check,
   // not assert.deepEqual against a host-realm [] literal.
   assert.equal(out.allowCredentials.length, 0);
+});
+
+// --- csrfToken --------------------------------------------------------
+//
+// csrfToken() is a security control (it's what gets sent back as
+// X-CSRFToken on every state-changing request this file makes -- see
+// request()), and its documented ordering -- the rendered
+// csrfmiddlewaretoken hidden input first, the (non-HttpOnly, per
+// settings.py) csrftoken cookie only as a fallback -- is exactly the kind
+// of thing a refactor could quietly invert without any visible symptom
+// on a page that always has both anyway.
+
+test('csrfToken: prefers the rendered csrfmiddlewaretoken input when present', () => {
+  const { window } = loadPasskeyModule({
+    document: {
+      cookie: 'csrftoken=cookie-value',
+      querySelector: (selector) =>
+        selector === 'input[name=csrfmiddlewaretoken]' ? { value: 'input-value' } : null,
+    },
+  });
+  assert.equal(window.__testHooks.csrfToken(), 'input-value');
+});
+
+test('csrfToken: falls back to the csrftoken cookie when no such input exists', () => {
+  const { window } = loadPasskeyModule({
+    document: { cookie: 'csrftoken=cookie-value', querySelector: () => null },
+  });
+  assert.equal(window.__testHooks.csrfToken(), 'cookie-value');
+});
+
+test('csrfToken: falls back to the cookie when the input exists but is empty', () => {
+  const { window } = loadPasskeyModule({
+    document: {
+      cookie: 'csrftoken=cookie-value',
+      querySelector: (selector) =>
+        selector === 'input[name=csrfmiddlewaretoken]' ? { value: '' } : null,
+    },
+  });
+  assert.equal(window.__testHooks.csrfToken(), 'cookie-value');
+});
+
+test('csrfToken: reads the csrftoken cookie out of a multi-cookie document.cookie string', () => {
+  const { window } = loadPasskeyModule({
+    document: {
+      cookie: 'django_language=th; csrftoken=cookie-value; sessionid=abc123',
+      querySelector: () => null,
+    },
+  });
+  assert.equal(window.__testHooks.csrfToken(), 'cookie-value');
 });
 
 // --- errorMessage -----------------------------------------------------

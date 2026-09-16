@@ -30,11 +30,22 @@ the Task 23 rate-limit zones too (the default `http://web:8000` bypasses
 nginx entirely) -- but only from somewhere `localhost:1338` actually
 reaches nginx's published port with Django/Postgres access alongside it
 (e.g. the docker host, not another `docker compose exec -T web`, whose own
-loopback has no nginx listening on it). Expect it to end with
-`PASSKEY E2E OK`; every step before that prints its own `... : OK` marker
-as it completes. Repeated runs inside the same minute or so may hit the
-passkey throttle (429) -- space runs out, or read the assertion message,
-which names the request and response.
+loopback has no nginx listening on it). Even then, `reset_post_rl`
+specifically (nginx's 5/min zone for `POST /password_reset/` and
+`POST /reset/<uidb64>/<token>/`) is never exercised by this script, against
+either URL: the script's own reset-request step deliberately stays
+in-process (see the script's docstring) and its one real-HTTP touch of that
+route is a GET, never a POST.
+
+Expect it to end with `PASSKEY E2E OK`; every step before that prints its
+own `... : OK` marker as it completes. A same-minute rerun WILL 429 --
+even against the default `http://web:8000`: PasskeyRateThrottle's
+anonymous bucket keys on the container's own IP, this script makes on the
+order of ten anonymous passkey calls per run, and the dev 'passkey' rate is
+20/min. A 429 the script didn't expect raises a `THROTTLED: ...` error
+naming the request -- wait about 60s for the bucket to refill and re-run;
+retrying immediately just re-429s and can mask whatever the real failure
+was underneath.
 
 ## `passkey_js_test.mjs` -- unit tests for `app/assets/passkey.js`
 
