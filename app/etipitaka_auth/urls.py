@@ -54,6 +54,8 @@ urlpatterns = [
     path('signup/validate/', TemplateView.as_view(template_name="validate.html")),
     re_path(r'^account/confirm-email/(?P<key>[^/]+)/$',
             auth_views.account_confirm_email, name='account_confirm_email'),
+    path('account/recover/passkey/begin/', recovery.recover_passkey_begin),
+    path('account/recover/passkey/finish/', recovery.recover_passkey_finish),
     path('api/content/bookmarks/', content_views.bookmarks),
     path('api/content/highlights/', content_views.highlights),
     path('api/content/tags/', content_views.tags),

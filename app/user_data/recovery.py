@@ -10,7 +10,7 @@ import logging
 import random
 import time
 
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, login
 from django.contrib.auth.forms import PasswordResetForm
 # _unicode_ci_compare is a private Django helper (leading underscore --
 # never part of the public API) that PasswordResetForm.get_users itself
@@ -28,9 +28,17 @@ from django.contrib.auth.forms import PasswordResetForm
 # actually requests a password reset in production.
 from django.contrib.auth.forms import _unicode_ci_compare
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.contrib.auth.views import PasswordResetConfirmView, PasswordResetView
+from django.contrib.auth.views import (INTERNAL_RESET_SESSION_TOKEN, PasswordResetConfirmView,
+                                       PasswordResetView)
+from django.core.exceptions import ValidationError
 from django.db import OperationalError
+from django.http import JsonResponse
+from django.utils.http import urlsafe_base64_decode
+from django.utils.translation import gettext as _
+from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.http import require_POST
 
+from . import passkey_service as service
 from .account_tokens import revoke_all_tokens
 from .models import PasskeyEpoch
 # Reused directly from passkey_service (also private there, and also
@@ -42,6 +50,7 @@ from .models import PasskeyEpoch
 # about this call site (swallowing a persistent failure instead of
 # raising it) local.
 from .passkey_service import _MAX_RECOVERY_ATTEMPTS, _is_retryable_db_error
+from .passkey_web_views import SESSION_BACKEND, json_body
 
 log = logging.getLogger(__name__)
 UserModel = get_user_model()
@@ -245,3 +254,111 @@ class AccountRecoveryConfirmView(PasswordResetConfirmView):
             log.exception('post-commit token sweep failed for user %s after password reset',
                          form.user.pk)
         return response
+
+
+# --- Task 16: create a new passkey from a password-reset link --------------
+
+
+def _recovering_user(request, uidb64):
+    """The active user whose valid reset session token this session holds,
+    else None.
+
+    This is the third of three places that must require an active user --
+    see AccountRecoveryForm.get_users and AccountRecoveryConfirmView.get_user
+    for the other two -- so a link issued before a deactivation can never be
+    used to create a passkey (and sign in) on a now-disabled account either.
+
+    `uidb64` can be any JSON value an anonymous caller sent (a non-dict
+    body, a wrong-typed field, an int, a list, ...): its type is checked
+    before it is ever handed to urlsafe_base64_decode/bytes.decode, both of
+    which assume text. Past that, a value that decodes cleanly as base64 but
+    not to a real primary key -- non-UTF-8 bytes (UnicodeDecodeError, a
+    ValueError subclass), or a non-numeric, absurdly large or negative
+    string -- must still 400, never 500: Django's AutoField.to_python raises
+    a plain ValueError for non-numeric text, while a huge or negative (but
+    numeric) value round-trips through the ORM/Postgres as an ordinary "no
+    such row" (UserModel.DoesNotExist), needing no special case at all.
+    OverflowError is kept defensively alongside those, matching the same
+    guard passkey ceremonies elsewhere in this codebase use for
+    attacker-controlled numeric input.
+    """
+    if not isinstance(uidb64, str):
+        return None
+    try:
+        user = UserModel._default_manager.get(pk=urlsafe_base64_decode(uidb64).decode())
+    except (TypeError, ValueError, OverflowError, UserModel.DoesNotExist, ValidationError):
+        return None
+    token = request.session.get(INTERNAL_RESET_SESSION_TOKEN)
+    if not user.is_active or not recovery_token_generator.check_token(user, token):
+        return None
+    return user
+
+
+def _invalid_link():
+    return JsonResponse({'detail': _('This password reset link is invalid or has expired.')},
+                        status=400)
+
+
+@require_POST
+@csrf_protect
+def recover_passkey_begin(request):
+    user = _recovering_user(request, json_body(request).get('uidb64'))
+    if user is None:
+        return _invalid_link()
+    # begin_recover itself calls check_session_engine() first (see its own
+    # docstring): a misconfigured SESSION_ENGINE must fail loudly here, so
+    # it is deliberately never caught -- see recover_passkey_finish's own
+    # comment on the same point for why.
+    challenge_id, options = service.begin_recover(user)
+    return JsonResponse({'challenge_id': challenge_id, 'options': options})
+
+
+@require_POST
+@csrf_protect
+def recover_passkey_finish(request):
+    data = json_body(request)
+    user = _recovering_user(request, data.get('uidb64'))
+    if user is None:
+        return _invalid_link()
+    # finish_recover unconditionally deletes every OTHER session belonging
+    # to `user` inside its own transaction (see its docstring). Without
+    # this, a recovering browser that happens to already be signed in as
+    # the account being recovered would have its own session row deleted
+    # out from under this very request, and the response's own session
+    # save would then fail with a 400 (SessionInterrupted) once Django's
+    # SessionMiddleware finds the row already gone.
+    #
+    # cycle_key() first -- which also defeats session fixation, the same
+    # reason login_passkey's own login() call cycles the key -- so
+    # keep_session_key names the *post-cycle* row, not a pre-existing key
+    # an attacker might already know. keep_session_key must be exactly
+    # this value, read only from request.session.session_key: NEVER from
+    # `data` (the request body), which an anonymous caller fully controls
+    # -- a client-supplied value there could name an arbitrary session and
+    # shield it from revocation. See
+    # test_passkey_recovery_ignores_client_supplied_keep_session_key.
+    request.session.cycle_key()
+    try:
+        # finish_recover can also raise a bare OperationalError, once its
+        # own internal retries (passkey_service._run_with_retry) are
+        # exhausted, or ImproperlyConfigured from check_session_engine().
+        # Neither is caught here, deliberately: an exhausted-retry
+        # OperationalError is a genuine, rare Postgres availability
+        # problem, not anything wrong with this request, so it is left to
+        # surface as an unhandled 500 -- exactly how every other passkey
+        # ceremony view already treats an exception outside its own typed
+        # set (RegistrationFailed, InvalidCredentials, ...), rather than
+        # inventing a bespoke JSON error shape just for this endpoint. The
+        # reset link stays valid either way (a failed attempt here never
+        # reaches the epoch bump in _store_passkey), so the caller can
+        # simply retry once the transient condition clears.
+        # ImproperlyConfigured must never be swallowed either: it signals
+        # an operator misconfiguration (the wrong SESSION_ENGINE) that has
+        # to be fixed, not something a client-facing 400 could paper over.
+        service.finish_recover(user, data.get('challenge_id'), data.get('credential'),
+                               data.get('name'), keep_session_key=request.session.session_key)
+    except service.RegistrationFailed:
+        return JsonResponse({'detail': _('Passkey registration failed.')}, status=400)
+    request.session.pop(INTERNAL_RESET_SESSION_TOKEN, None)
+    login(request, user, backend=SESSION_BACKEND)
+    return JsonResponse({'redirect': '/account/security/'})

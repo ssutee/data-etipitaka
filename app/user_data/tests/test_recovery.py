@@ -1,11 +1,16 @@
+import json
 import re
 
 import psycopg
 import pytest
+from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
 from django.contrib.auth.forms import _unicode_ci_compare
 from django.contrib.auth.tokens import default_token_generator
+from django.contrib.sessions.backends.db import SessionStore
 from django.core import mail
+from django.core.exceptions import ImproperlyConfigured
 from django.db import OperationalError
+from django.test import Client, RequestFactory
 from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
@@ -374,3 +379,358 @@ def test_password_reset_sweeps_tokens_minted_during_revocation(client, alice, mo
     assert resp.status_code == 302
     assert len(calls) == 2  # the primary revoke, then the post-commit sweep
     assert not AccessToken.objects.filter(user=alice).exists()
+
+
+# =============================================================================
+# Task 16: recovery passkey endpoints
+# =============================================================================
+
+
+def _begin_recovery(client, uidb64):
+    return client.post('/account/recover/passkey/begin/', json.dumps({'uidb64': uidb64}),
+                       content_type='application/json')
+
+
+def _post_json(client, url, body):
+    return client.post(url, json.dumps(body), content_type='application/json')
+
+
+def _recover_with_passkey(client, uidb64, authenticator, **tamper):
+    begin = _begin_recovery(client, uidb64)
+    assert begin.status_code == 200, begin.content
+    body = begin.json()
+    return client.post('/account/recover/passkey/finish/', json.dumps({
+        'uidb64': uidb64, 'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options'], **tamper)}),
+        content_type='application/json')
+
+
+def _login_session(user):
+    """A real, decodable session row carrying the same keys
+    django.contrib.auth.login() would set, independent of any Client --
+    lets a test create a second, unrelated 'other browser' session for the
+    same user. Mirrors test_account_tokens.py's own _login_session helper.
+    """
+    store = SessionStore()
+    store[SESSION_KEY] = str(user.pk)
+    store[BACKEND_SESSION_KEY] = 'django.contrib.auth.backends.ModelBackend'
+    store[HASH_SESSION_KEY] = user.get_session_auth_hash()
+    store.save()
+    return store.session_key
+
+
+def test_passkey_recovery_signs_in_and_revokes_tokens(client, alice, authenticator):
+    alice.set_unusable_password()
+    alice.save()
+    make_oauth_token(alice)
+    _request_reset(client)
+    uidb64, set_password_url = _open_link(client)
+    resp = _recover_with_passkey(client, uidb64, authenticator)
+    assert resp.status_code == 200
+    assert resp.json() == {'redirect': '/account/security/'}
+    assert client.session['_auth_user_id'] == str(alice.pk)
+    assert alice.passkeys.count() == 1
+    assert not Token.objects.filter(user=alice).exists()
+    assert not AccessToken.objects.filter(user=alice).exists()
+    assert client.get(set_password_url).context['validlink'] is False  # link spent
+
+
+def test_passkey_recovery_requires_reset_session(client, alice):
+    uidb64 = urlsafe_base64_encode(force_bytes(alice.pk))
+    assert _begin_recovery(client, uidb64).status_code == 400
+
+
+@pytest.mark.parametrize('uidb64', [None, 5, '!!!', 'YWJj'])
+def test_passkey_recovery_rejects_bad_uid(client, alice, uidb64):
+    _request_reset(client)
+    _open_link(client)
+    assert _begin_recovery(client, uidb64).status_code == 400
+
+
+def test_passkey_recovery_rejects_other_users_uid(client, alice, bob):
+    _request_reset(client)
+    _open_link(client)
+    assert _begin_recovery(client, urlsafe_base64_encode(force_bytes(bob.pk))).status_code == 400
+
+
+def test_passkey_recovery_rejects_inactive_user(client, alice):
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    alice.is_active = False
+    alice.save()
+    assert _begin_recovery(client, uidb64).status_code == 400
+
+
+def test_passkey_recovery_bad_response_keeps_link(client, alice, authenticator):
+    _request_reset(client)
+    uidb64, set_password_url = _open_link(client)
+    resp = _recover_with_passkey(client, uidb64, authenticator, uv=False)
+    assert resp.status_code == 400
+    assert client.get(set_password_url).context['validlink'] is True
+
+
+def test_passkey_recovery_finish_rejects_without_session(client, alice):
+    uidb64 = urlsafe_base64_encode(force_bytes(alice.pk))
+    resp = client.post('/account/recover/passkey/finish/', json.dumps({'uidb64': uidb64}),
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_passkey_recovery_requires_csrf():
+    csrf_client = Client(enforce_csrf_checks=True)
+    resp = csrf_client.post('/account/recover/passkey/begin/', '{}',
+                            content_type='application/json')
+    assert resp.status_code == 403
+
+
+# --- crafted-body hardening: these endpoints are anonymous apart from the --
+# --- session token, so a malformed body must never turn into a 500 ---------
+
+
+@pytest.mark.parametrize('body', [[1, 2], 'just a string', 42, True])
+def test_passkey_recovery_begin_non_object_json_body_is_400(client, body):
+    resp = client.post('/account/recover/passkey/begin/', json.dumps(body),
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_passkey_recovery_begin_malformed_json_is_400(client):
+    resp = client.post('/account/recover/passkey/begin/', 'not json',
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('body', [[1, 2], 'just a string', 42, True])
+def test_passkey_recovery_finish_non_object_json_body_is_400(client, body):
+    resp = client.post('/account/recover/passkey/finish/', json.dumps(body),
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_passkey_recovery_finish_malformed_json_is_400(client):
+    resp = client.post('/account/recover/passkey/finish/', 'not json',
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def _nested_body(depth):
+    return '{"a":' * depth + '1' + '}' * depth
+
+
+@pytest.mark.parametrize('url', ['/account/recover/passkey/begin/',
+                                 '/account/recover/passkey/finish/'])
+def test_passkey_recovery_deeply_nested_json_body_is_400_not_500(client, url):
+    # Same nesting-depth reasoning as test_passkey_web.py's own version of
+    # this test: json_body() (passkey_web_views.py, shared by every plain-
+    # Django passkey endpoint) catches the RecursionError json.loads() has
+    # no nesting-depth limit of its own to avoid, turning it into a clean
+    # 400 instead of an unhandled 500.
+    resp = client.post(url, _nested_body(20000), content_type='application/json')
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('challenge_id', [{'a': 1}, [1, 2], 42, None])
+def test_passkey_recovery_finish_crafted_challenge_id_types_are_400(client, alice, challenge_id):
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    resp = _post_json(client, '/account/recover/passkey/finish/',
+                      {'uidb64': uidb64, 'challenge_id': challenge_id, 'credential': {}})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('credential', ['not-a-dict', [1, 2], None])
+def test_passkey_recovery_finish_crafted_credential_types_are_400(client, alice, credential):
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    begin = _begin_recovery(client, uidb64)
+    body = begin.json()
+    resp = _post_json(client, '/account/recover/passkey/finish/',
+                      {'uidb64': uidb64, 'challenge_id': body['challenge_id'],
+                       'credential': credential})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('name', [{'a': 1}, 'x' * 5000])
+def test_passkey_recovery_finish_crafted_name_is_sanitized_not_500(client, alice, authenticator,
+                                                                    name):
+    """clean_name() (Task 1-10) already sanitizes a non-str or over-long
+    name rather than rejecting it -- see
+    test_signup_finish_crafted_name_is_sanitized_not_500 in
+    test_passkey_views.py for the same rule pinned on another ceremony.
+    Recovery follows it too, so a crafted name here must still complete the
+    recovery (200), unlike a crafted challenge_id/credential (400).
+    """
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    begin = _begin_recovery(client, uidb64)
+    body = begin.json()
+    resp = _post_json(client, '/account/recover/passkey/finish/', {
+        'uidb64': uidb64, 'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options']), 'name': name})
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize('raw_pk', [
+    '99999999999999999999999999999999',  # huge: resolves to "no such row", not an error
+    '-5',                                 # negative: same
+    'not-a-number',                       # non-numeric: ValueError from the pk field itself
+])
+def test_passkey_recovery_rejects_crafted_uidb64_pk(client, alice, raw_pk):
+    """A uidb64 that decodes cleanly from base64 but not to a real primary
+    key must 400, never 500, whatever shape the garbage takes.
+    """
+    _request_reset(client)
+    _open_link(client)
+    uidb64 = urlsafe_base64_encode(force_bytes(raw_pk))
+    assert _begin_recovery(client, uidb64).status_code == 400
+
+
+# --- session handling: the recovering browser's own session must survive ---
+
+
+def test_passkey_recovery_keeps_own_session_but_signs_out_other_browser(client, alice,
+                                                                        authenticator):
+    """finish_recover deletes every OTHER session belonging to `user` inside
+    its own transaction. Without keep_session_key, a recovering browser
+    that already happens to be signed in as the account being recovered
+    would have its own session row deleted out from under this very
+    request, and the response's own session save would then fail with a
+    400 (SessionInterrupted) once SessionMiddleware finds the row gone.
+    Reproduced here by logging the recovering browser itself into the
+    account before completing recovery through it: it must still get a 200
+    and stay signed in, while a second, unrelated browser session for the
+    same user is revoked exactly as before.
+    """
+    other_key = _login_session(alice)
+
+    # force_login() fires the real user_logged_in signal, which moves
+    # last_login -- and the recovery token's hash mixes last_login in (see
+    # AccountRecoveryTokenGenerator._make_hash_value), so this must happen
+    # BEFORE the reset token is minted below, not after: logging in once a
+    # token already exists would immediately burn it, unrelated to
+    # anything this test is trying to pin.
+    client.force_login(alice)  # the browser doing the recovery is already signed in
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    resp = _recover_with_passkey(client, uidb64, authenticator)
+    assert resp.status_code == 200
+    assert resp.json() == {'redirect': '/account/security/'}
+    assert client.session['_auth_user_id'] == str(alice.pk)
+    assert not SessionStore.get_model_class().objects.filter(session_key=other_key).exists()
+
+
+def test_passkey_recovery_ignores_client_supplied_keep_session_key(client, alice, authenticator):
+    """keep_session_key must come only from request.session.session_key --
+    never from the request body. Name an unrelated session in the JSON
+    body's own (otherwise-unused) 'keep_session_key' field; it must still
+    be deleted, exactly as if the field had never been sent.
+    """
+    other_key = _login_session(alice)
+
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    begin = _begin_recovery(client, uidb64)
+    assert begin.status_code == 200
+    body = begin.json()
+    resp = _post_json(client, '/account/recover/passkey/finish/', {
+        'uidb64': uidb64, 'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options']),
+        'keep_session_key': other_key})
+    assert resp.status_code == 200
+    assert not SessionStore.get_model_class().objects.filter(session_key=other_key).exists()
+
+
+# --- OperationalError/ImproperlyConfigured must not be silently swallowed --
+
+
+def test_recover_passkey_finish_does_not_swallow_operational_error(client, alice, authenticator,
+                                                                    monkeypatch):
+    """finish_recover's own retry loop (passkey_service._run_with_retry) can
+    still exhaust every attempt and raise a bare OperationalError -- a rare,
+    genuine Postgres availability problem, not anything wrong with this
+    request. Deliberately left uncaught: it surfaces as an unhandled 500,
+    exactly like every other passkey ceremony view already treats an
+    exception outside its own typed set, rather than inventing a bespoke
+    JSON error shape just for this endpoint. The reset link itself must
+    stay valid either way, so the caller can simply retry.
+
+    Checked here via a FRESH client re-visiting the original emailed link,
+    not via the crashed request's own client/cookie: Django's own
+    SessionMiddleware.process_response skips saving the session (and so
+    skips re-cookieing the client) for any 5xx response, while
+    request.session.cycle_key() -- called unconditionally before
+    finish_recover, deleting the *old* session row immediately and
+    unconditionally -- already ran and committed before the mocked
+    finish_recover ever raises. So the crashed request's own client is left
+    holding a cookie for a now-deleted row: a session/cookie artifact of a
+    5xx response, not a statement about whether the link itself is still
+    good.
+    """
+    _request_reset(client)
+    match = LINK_RE.search(mail.outbox[-1].body)
+    uidb64, _set_password_url = _open_link(client)
+    begin = _begin_recovery(client, uidb64)
+    assert begin.status_code == 200
+    body = begin.json()
+
+    def _boom(*args, **kwargs):
+        raise OperationalError('deadlock detected')
+
+    monkeypatch.setattr(recovery.service, 'finish_recover', _boom)
+    with pytest.raises(OperationalError):
+        client.post('/account/recover/passkey/finish/', json.dumps({
+            'uidb64': uidb64, 'challenge_id': body['challenge_id'],
+            'credential': authenticator.register(body['options'])}),
+            content_type='application/json')
+
+    assert alice.passkeys.count() == 0
+    fresh = Client()
+    resp = fresh.get(match.group(0))
+    assert resp.status_code == 302
+    assert fresh.get(resp['Location']).context['validlink'] is True
+
+
+def test_recover_passkey_begin_does_not_swallow_improperly_configured(alice, settings):
+    """begin_recover's check_session_engine() must be allowed to raise -- a
+    misconfigured SESSION_ENGINE is an operator error that has to be fixed,
+    not something a client-facing 400 could paper over.
+
+    Exercised against the raw view function via RequestFactory, not the
+    Django test client's full middleware stack: changing
+    settings.SESSION_ENGINE mid-test would also change how the *next*
+    request's own session cookie gets decoded, which would just look like a
+    missing reset session (a 400 from _recovering_user) rather than ever
+    reaching begin_recover at all.
+    """
+    session = SessionStore()
+    session[recovery.INTERNAL_RESET_SESSION_TOKEN] = recovery_token_generator.make_token(alice)
+    session.save()
+    request = RequestFactory().post(
+        '/account/recover/passkey/begin/',
+        json.dumps({'uidb64': urlsafe_base64_encode(force_bytes(alice.pk))}),
+        content_type='application/json')
+    request.session = session
+    request._dont_enforce_csrf_checks = True
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+    with pytest.raises(ImproperlyConfigured):
+        recovery.recover_passkey_begin(request)
+
+
+def test_recover_passkey_finish_does_not_swallow_improperly_configured(alice, settings):
+    """Same as above for finish_recover: check_session_engine() runs as its
+    very first statement, before the challenge is even consumed, so a
+    placeholder challenge_id/credential is enough to reach it.
+    """
+    session = SessionStore()
+    session[recovery.INTERNAL_RESET_SESSION_TOKEN] = recovery_token_generator.make_token(alice)
+    session.save()
+    request = RequestFactory().post(
+        '/account/recover/passkey/finish/',
+        json.dumps({'uidb64': urlsafe_base64_encode(force_bytes(alice.pk)),
+                   'challenge_id': 'x', 'credential': {}}),
+        content_type='application/json')
+    request.session = session
+    request._dont_enforce_csrf_checks = True
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+    with pytest.raises(ImproperlyConfigured):
+        recovery.recover_passkey_finish(request)
