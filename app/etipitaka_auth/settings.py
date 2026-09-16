@@ -80,6 +80,11 @@ REST_FRAMEWORK = {
         'login': '10/min',
         'passkey': '20/min',
     },
+    # Maps a RecursionError from parsing a pathologically deep JSON body
+    # (json.loads has no nesting-depth limit of its own) to a clean 400
+    # instead of an unhandled 500; delegates every other exception to DRF's
+    # own default handler. See user_data/drf_handlers.py.
+    'EXCEPTION_HANDLER': 'user_data.drf_handlers.exception_handler',
 }
 
 # OAuth 2.1 Authorization Server (django-oauth-toolkit) backing the remote MCP

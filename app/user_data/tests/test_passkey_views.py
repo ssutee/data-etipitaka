@@ -6,10 +6,11 @@ from django.core import mail
 from django.core.cache import cache
 from django.utils import translation
 from rest_framework.authtoken.models import Token
+from rest_framework.test import APIClient
 
 from user_data.passkey_views import PasskeyRateThrottle
 
-from .conftest import add_passkey
+from .conftest import add_passkey, make_oauth_token
 
 pytestmark = pytest.mark.django_db
 
@@ -204,6 +205,75 @@ def test_signup_begin_crafted_identity_types_are_400(api, field, value):
 def test_malformed_json_body_is_400(api, url):
     resp = api.post(url, '{not valid json', content_type='application/json')
     assert resp.status_code == 400
+
+
+# --- anonymous pinning: a caller's own credentials must never matter -------
+#
+# Every view is decorated @authentication_classes([]) -- these endpoints have
+# no notion of "who is calling". The dangerous mutation is one that quietly
+# adds an authentication class back (e.g. copy-pasting TokenAuthentication
+# from another view in this module) while leaving permission_classes([])
+# alone: nothing about permissions would catch it, since an empty permission
+# list still lets the request through. What DOES catch it is a garbage
+# Authorization: Token value -- today it is inert (no authenticator reads
+# it), but TokenAuthentication.authenticate_credentials() raises
+# AuthenticationFailed (401) for an unrecognised key, and that exception is
+# raised during DRF's initial() step, before the view body ever runs, so no
+# amount of code inside the view could prevent it once the decorator regresses.
+
+CREDENTIAL_LABELS = ['valid_token', 'garbage_token', 'oauth_bearer', 'session']
+
+
+def _credentialed_client(alice, label):
+    client = APIClient()
+    if label == 'valid_token':
+        client.credentials(HTTP_AUTHORIZATION='Token ' + alice.auth_token.key)
+    elif label == 'garbage_token':
+        client.credentials(HTTP_AUTHORIZATION='Token not-a-real-token')
+    elif label == 'oauth_bearer':
+        client.credentials(HTTP_AUTHORIZATION='Bearer ' + make_oauth_token(alice).token)
+    elif label == 'session':
+        client.force_login(alice)
+    return client
+
+
+@pytest.mark.parametrize('label', CREDENTIAL_LABELS)
+def test_login_begin_ignores_caller_credentials(alice, label):
+    client = _credentialed_client(alice, label)
+    resp = _post(client, '/api/passkeys/login/begin/')
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize('label', CREDENTIAL_LABELS)
+def test_signup_begin_ignores_caller_credentials(alice, label):
+    client = _credentialed_client(alice, label)
+    resp = _signup_begin(client, username='cred_probe', email='cred_probe@example.com')
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize('label', CREDENTIAL_LABELS)
+def test_login_finish_error_body_unchanged_by_caller_credentials(alice, authenticator, label):
+    add_passkey(alice, authenticator)
+    baseline = _login(APIClient(), authenticator, corrupt_signature=True)
+    client = _credentialed_client(alice, label)
+    resp = _login(client, authenticator, corrupt_signature=True)
+    assert resp.status_code == baseline.status_code == 400
+    assert resp.json() == baseline.json()
+
+
+@pytest.mark.parametrize('label', CREDENTIAL_LABELS)
+def test_signup_finish_error_body_unchanged_by_caller_credentials(alice, authenticator, label):
+    def _bad_registration(client, username, email):
+        body = _signup_begin(client, username=username, email=email).json()
+        return _post(client, '/api/passkeys/signup/finish/', {
+            'challenge_id': body['challenge_id'],
+            'credential': authenticator.register(body['options'], uv=False)})
+
+    baseline = _bad_registration(APIClient(), 'cred_probe2', 'cred_probe2@example.com')
+    client = _credentialed_client(alice, label)
+    resp = _bad_registration(client, 'cred_probe3', 'cred_probe3@example.com')
+    assert resp.status_code == baseline.status_code == 400
+    assert resp.json() == baseline.json()
 
 
 # --- throttling -------------------------------------------------------------
