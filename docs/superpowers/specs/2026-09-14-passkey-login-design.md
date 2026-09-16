@@ -90,8 +90,9 @@ and browsers all produce and consume.
 `app/requirements.txt`. Brings `cbor2`, `cryptography>=49`, `pyOpenSSL`,
 `pyasn1`, `pyasn1-modules`.
 
-**Migration:** `user_data/migrations/0005_passkeys.py`. The existing `User`
-table is untouched.
+**Migration:** `user_data/migrations/0005_passkeys.py`, plus
+`migrations/0006_passkey_epoch.py` (`PasskeyEpoch`, added later for
+Component 5's reset-token hash). The existing `User` table is untouched.
 
 ### `Passkey` — one row per credential; a user may have many
 
@@ -109,15 +110,33 @@ table is untouched.
 | `last_used_at` | `DateTimeField(null=True)` | |
 
 Default `name`: the client-supplied `name` if given, else a label from a small
-built-in AAGUID map (iCloud Keychain, Google Password Manager, Windows Hello,
-1Password, Bitwarden), else `"Passkey"`.
+built-in AAGUID map (Apple Passwords, iCloud Keychain (Managed), Google
+Password Manager, Windows Hello, 1Password, Bitwarden), else `"Passkey"`.
+**PASSKEY_MAX_PER_USER = 20**: register/begin and register/finish (never
+signup or recovery, so a filled account can never block its own owner's
+recovery) reject a 21st passkey with a 409, `"You have reached the maximum
+number of passkeys."`.
 
 ### `PasskeyUserHandle` — `OneToOne(User)`
 
 `handle`: 32 random bytes, used as WebAuthn `user.id`. Not the user pk: the
 spec requires the handle to carry no identifying information, and a stable
 per-account handle lets an authenticator replace an older passkey for the same
-account instead of storing a duplicate. Created on the user's first passkey.
+account instead of storing a duplicate. Created at **begin**, not at the
+first stored passkey: `begin_register`/`begin_recover` create the row via
+`get_or_create` the first time either ceremony runs for a user; `begin_signup`
+generates the handle immediately and carries it in the challenge payload
+until `finish_signup` persists the row.
+
+### `PasskeyEpoch` — `OneToOne(User)`
+
+`value`: a monotonic per-user counter, bumped by one, under the user row's
+`select_for_update()` lock, every time a passkey is added (`_store_passkey`)
+or deleted (`passkey_manage.delete_passkey`). Exists solely so
+`AccountRecoveryTokenGenerator` (Component 5) can mix in a value that only
+ever increases — the *current* passkey set (e.g. its newest pk) can go back
+down if a passkey is added then deleted, which would quietly revive a reset
+token that the add had correctly killed.
 
 ### `WebAuthnChallenge` — single-use ceremony state
 
@@ -155,9 +174,10 @@ is the single source for "does this user have a password".
 | `PASSKEY_IOS_APP_IDS` | env (comma list), else `A6DJDJ7527.com.watnapp.E-Tipitaka-Plus` | |
 | `PASSKEY_ANDROID_PACKAGE` | env, empty | |
 | `PASSKEY_ANDROID_CERT_SHA256` | env (comma list of colon-hex fingerprints), empty | |
-| `PASSKEY_EXPECTED_ORIGINS` | derived: `[PASSKEY_WEB_ORIGIN]` + `android:apk-key-hash:<base64url(sha256 bytes)>` per Android fingerprint | iOS native sends `https://<rp id>`, already covered by the web origin |
+| `passkey_config.expected_origins()` | derived: `[PASSKEY_WEB_ORIGIN]` + `android:apk-key-hash:<base64url(sha256 bytes)>` per Android fingerprint | iOS native sends `https://<rp id>`, already covered by the web origin |
 | `PASSKEY_CHALLENGE_TTL` | `300` | seconds |
 | `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey']` | `'20/min'` | set to `None` under pytest, like `login` |
+| `REST_FRAMEWORK['NUM_PROXIES']` | `1` | pins DRF's IP-keyed throttles to the last `X-Forwarded-For` entry (the one this container's own nginx appends) instead of the whole client-controlled header, which would otherwise let a client dodge the bucket by spoofing a fresh address every request |
 
 Android values and the dev localhost overrides go in each environment's
 **gitignored** `docker-compose.override.yml`, never the tracked `.env` (same
@@ -191,15 +211,24 @@ translate their exceptions into HTTP codes.
   `verify_registration_response(..., require_user_verification=True)`;
   reject if the `credential_id` already exists on any account; store the row;
   send the "new passkey added" email.
-- `begin_signup(username, email) -> (challenge_id, options)` — validate with
-  the same rules as `RegisterSerializer` plus Django's
-  `UnicodeUsernameValidator`; generate the handle; keep
-  `{username, email, handle}` in `payload`. **No `User` row yet.**
-- `finish_signup(challenge_id, credential, name=None) -> User` — in one
-  transaction: re-check username and email uniqueness, create
-  `User(is_active=False)` with an unusable password, the handle and the
-  passkey. The view then sends the existing verification email. A name or
-  email taken since `begin` → `SignupConflict` (400).
+- `begin_signup(username, email) -> (challenge_id, options)` — validated by
+  `AccountIdentitySerializer` (username ≤150 chars + Django's
+  `UnicodeUsernameValidator` + uniqueness; email ≤254 chars + uniqueness) —
+  the same serializer `RegisterSerializer` (password signup) now extends, so
+  the two signup paths can't drift apart; generate the handle; keep
+  `{username, email, handle}` in `payload`. **No `User` row yet.** Both
+  fields are matched by an exact, case-sensitive `filter(...=value).exists()`
+  and neither is Unicode-normalized, same as password signup today — see
+  "Out of scope" / the client guide's "Known gaps" for what that allows.
+- `finish_signup(challenge_id, credential, name=None) -> User` — consumes and
+  verifies the challenge, then re-checks username and email uniqueness
+  *just before* opening the transaction (not inside it), and only then
+  creates `User(is_active=False)` with an unusable password, the handle and
+  the passkey, all in that one transaction. The view then sends the existing
+  verification email. A name or email taken since `begin` → `SignupInvalid`
+  (400, field errors); a duplicate that instead slips through the gap
+  between that re-check and the insert (a race, not the common case) is
+  caught as `IntegrityError` and reported the same way, not as a bare 500.
 - `list_passkeys(user)`, `rename_passkey(user, id, name)`,
   `delete_passkey(user, id)` — lookups scoped to `user` (else `NotFound`).
   Delete takes `select_for_update()` on the `User` row and refuses to remove
@@ -207,11 +236,30 @@ translate their exceptions into HTTP codes.
 - `remove_password(user, password)` — `check_password` required; under
   `select_for_update()` on the user, requires at least one passkey
   (`LockoutGuard`) and a usable password (`LockoutGuard`); then
-  `set_unusable_password()`.
+  `set_unusable_password()`. Deliberately does **not** call
+  `revoke_all_tokens`: an existing DRF token keeps working after the
+  password fallback is dropped; only recovery (below) revokes tokens.
 - `begin_recover(user)` / `finish_recover(user, challenge_id, credential)` —
-  as register, purpose `recover`, followed by `revoke_all_tokens(user)`.
+  as register, purpose `recover`, followed by `revoke_all_tokens(user)` *and*
+  `delete_user_sessions(user, keep_session_key=...)` (the recovering
+  browser's own, freshly-cycled session is kept; every other browser session
+  for the account is deleted — see Component 5, which also covers why this
+  runs as two separate transactions, not one).
 - `revoke_all_tokens(user)` — delete the user's DRF `Token` and
-  django-oauth-toolkit access tokens, refresh tokens and grants.
+  django-oauth-toolkit access tokens, refresh tokens and grants. Takes a
+  per-user Postgres advisory lock (`account_tokens.lock_user_tokens`) before
+  touching any row; `user_data/oauth_validators.py`'s
+  `EtipitakaOAuth2Validator` takes the same lock before every
+  django-oauth-toolkit token write (issuance, refresh rotation, RFC 7009
+  revocation), which is what actually prevents a deadlock between recovery's
+  revocation and a concurrent OAuth refresh-token rotation — row-lock
+  ordering alone cannot, because Django's delete collector and DOT's own
+  rotation code lock `AccessToken`/`RefreshToken` in opposite orders.
+- `bump_passkey_epoch(user)` — advance `PasskeyEpoch.value` by one; called by
+  every path that adds (`_store_passkey`, inside `register`/`signup`/
+  `recover`) or deletes (`passkey_manage.delete_passkey`) a passkey, under
+  the same locked transaction. See the `PasskeyEpoch` model above and
+  Component 5's token generator.
 
 ## Component 4: HTTP API
 
@@ -223,10 +271,10 @@ read-scoped MCP connector token can never manage credentials.
 | Method + path | Auth | Request | Success | Errors |
 |---|---|---|---|---|
 | `POST /api/passkeys/login/begin/` | anon | `{}` | 200 `{challenge_id, options}` | 429 |
-| `POST /api/passkeys/login/finish/` | anon | `{challenge_id, credential}` | 200 `{"key": <token>}` (same shape as `/rest-auth/login/`) | 400 `{"non_field_errors": [...]}` — same messages as `LoginSerializer` for bad credentials and inactive account |
+| `POST /api/passkeys/login/finish/` | anon | `{challenge_id, credential}` | 200 `{"key": <token>}` (same shape as `/rest-auth/login/`) | 400 `{"non_field_errors": [...]}` — same message strings as `LoginSerializer` for bad credentials and inactive account, but not the same *reachability*: `finish_login` checks `is_active` explicitly after verifying the assertion, so the inactive-account message is reachable here; on the password path `ModelBackend.authenticate()` already returns `None` for an inactive user, so `LoginSerializer` never gets past the generic bad-credentials branch to reach it |
 | `POST /login/passkey/` | anon, **CSRF** | `{challenge_id, credential, next}` | 200 `{"redirect": <_safe_redirect_target(next)>}` + session | 400 `{"detail": ...}`, 403 CSRF |
-| `POST /api/passkeys/register/begin/` | account | `{"password": ...}` or `{"step_up": {challenge_id, credential}}` | 200 `{challenge_id, options}` | 400 step-up failed |
-| `POST /api/passkeys/register/finish/` | account | `{challenge_id, credential, name?}` | 201 passkey object | 400 |
+| `POST /api/passkeys/register/begin/` | account | `{"password": ...}` or `{"step_up": {challenge_id, credential}}` | 200 `{challenge_id, options}` | 400 step-up failed; 409 `PASSKEY_MAX_PER_USER` (20) already reached |
+| `POST /api/passkeys/register/finish/` | account | `{challenge_id, credential, name?}` | 201 passkey object | 400; 409 `PASSKEY_MAX_PER_USER` reached (re-checked under lock, so two concurrent finishes can't together exceed it) |
 | `POST /api/passkeys/signup/begin/` | anon | `{username, email}` | 200 `{challenge_id, options}` | 400 field errors |
 | `POST /api/passkeys/signup/finish/` | anon | `{challenge_id, credential, name?}` | 201 `{"detail": "Verification e-mail sent."}` | 400 |
 | `GET /api/passkeys/` | account | — | 200 `{has_password, passkeys: [passkey…]}` | 401 |
@@ -235,8 +283,8 @@ read-scoped MCP connector token can never manage credentials.
 | `POST /api/passkeys/password/remove/` | account | `{password}` | 200 `{"has_password": false}` | 400 wrong password, 409 |
 | `POST /account/recover/passkey/begin/` | anon, **CSRF**, reset session | `{uidb64}` | 200 `{challenge_id, options}` | 400 invalid/expired link |
 | `POST /account/recover/passkey/finish/` | anon, **CSRF**, reset session | `{uidb64, challenge_id, credential, name?}` | 200 `{"redirect": "/account/security/"}` + session | 400 |
-| `GET /.well-known/apple-app-site-association` | anon | — | 200 `application/json` | — |
-| `GET /.well-known/assetlinks.json` | anon | — | 200 `application/json` | 404 when Android settings empty |
+| `GET /.well-known/apple-app-site-association` | anon | — | 200 `application/json` | 404 JSON when `PASSKEY_IOS_APP_IDS` is empty (an empty `{"webcredentials": {"apps": []}}` would actively tell iOS no app is associated, which is worse than a 404) |
+| `GET /.well-known/assetlinks.json` | anon | — | 200 `application/json` | 404 JSON when Android settings empty |
 
 Passkey object:
 `{id, name, authenticator, backed_up, created_at, last_used_at}`.
@@ -260,9 +308,13 @@ Well-known bodies:
   users stay excluded. The page keeps Django's generic "if an account exists"
   response.
 - **`AccountRecoveryTokenGenerator(PasswordResetTokenGenerator)`** — own
-  `key_salt`; `_make_hash_value` = Django's value + the pk of the user's newest
-  passkey (or empty). The link stops working once a password is set, a passkey
-  is added, or the user logs in (`last_login` is already in Django's hash).
+  `key_salt`; `_make_hash_value` = Django's value + the user's `PasskeyEpoch`
+  counter (or empty, if the user has none yet). The link stops working once a
+  password is set, a passkey is **added or removed**, or the user logs in
+  (`last_login` is already in Django's hash). A monotonic counter, not the
+  newest passkey's pk, is deliberate: "newest pk" can go back down (add a
+  passkey — correctly killing the token — then delete it, and the token
+  would quietly come back to life); `PasskeyEpoch` only ever increases.
   Timeout stays `PASSWORD_RESET_TIMEOUT` (Django default, 3 days).
 - **URLs:** explicit `password_reset/` and `reset/<uidb64>/<token>/` paths
   are placed **before** the root `include('django.contrib.auth.urls')`, using
@@ -278,9 +330,18 @@ Well-known bodies:
   form.
 - **Recovery endpoints** re-validate the token Django stores in the session
   (`INTERNAL_RESET_SESSION_TOKEN`) against `uidb64` on both begin and finish.
-- **After passkey recovery:** passkey stored, "new passkey added" email sent,
-  `revoke_all_tokens(user)`, logged in on this browser, redirected to
-  `/account/security/` to delete the lost device's passkey.
+- **After passkey recovery:** `revoke_all_tokens(user)`, then the passkey is
+  stored and `delete_user_sessions(user, keep_session_key=...)` deletes
+  every *other* browser session for the account (the recovering browser
+  keeps its own, freshly-cycled session — `request.session.cycle_key()`
+  runs first, also defeating session fixation) — as two separate,
+  independently retried transactions, not one, to avoid a deadlock against a
+  concurrent OAuth refresh-token rotation (see `revoke_all_tokens` and
+  `bump_passkey_epoch` above). Then "new passkey added" email sent, logged in
+  on this browser, redirected to `/account/security/` to delete the lost
+  device's passkey. This is a deliberate behaviour change from the original
+  design: browser sessions on other devices are now deleted here too, not
+  left as future work (see "Out of scope" below).
 - **After password reset** (existing form): `AccountRecoveryConfirmView`
   additionally calls `revoke_all_tokens(user)`. Django already invalidates
   sessions on password change. This is a behaviour change: other devices must
@@ -322,17 +383,36 @@ Well-known bodies:
 
 ## Component 7: Hosting
 
-- **nginx:** new `limit_req_zone` `passkey` (30r/m, burst 10) for
-  `^/api/passkeys/` and `= /login/passkey/` and `^/account/recover/passkey/`,
-  with a `@ratelimited_passkey` 429 handler and `Retry-After`, matching the
-  existing DCR/token zones. The DRF `passkey` throttle stays as a second layer
-  but is per worker (no shared cache).
+- **nginx** (superseded by Task 23; full rationale in
+  `docs/remote-mcp-oauth-deploy.md`, summarized in
+  `docs/passkeys-client-integration.md`'s "Rate limits" section — not the
+  single 30r/m-burst-10 `passkey` zone originally planned here):
+  - `passkey_rl` (60r/m, burst 30) for the anonymous surface —
+    `^/api/passkeys/(login|signup)/`, `^/login/passkey/?$` and
+    `^/account/recover/passkey/` — via `@ratelimited_passkey`.
+  - `passkey_manage_rl` (60r/m, burst 20) for the rest of
+    `^/api/passkeys(/|$)` (signed-in list/rename/delete/register/remove
+    password) via `@ratelimited_passkey_manage`.
+  - `reset_get_rl` (20r/m, burst 10) and `reset_post_rl` (5r/m, burst 3),
+    method-aware, for `/password_reset/` and `/reset/<uidb64>/<token-or-
+    set-password>/`, via `@ratelimited_reset` — the only 429 handler on this
+    surface that renders HTML instead of JSON, since it's reached by a
+    browser following an emailed link.
+  - Every location above caps the request body at 64 KiB
+    (`client_max_body_size 64k`).
+  - The DRF `passkey` throttle stays as a second layer but is per worker (no
+    shared cache); `REST_FRAMEWORK['NUM_PROXIES'] = 1` was added so it keys
+    on the real client IP instead of a client-spoofable header.
 - **`.well-known` paths** already reach Django through `location /`; no nginx
-  change needed.
+  location of their own, so they are never rate-limited.
+- **`TRUST_PROXY_PROTO=1`** (a separate, opt-in operator setting, not
+  passkey-specific) additionally marks `SESSION_COOKIE_SECURE` and
+  `CSRF_COOKIE_SECURE`, once the front-most proxy is confirmed to always
+  overwrite `X-Forwarded-Proto`. See `docs/remote-mcp-oauth-deploy.md`.
 - **`deploy.sh`:** after the existing homepage check, `curl -fsS` the AASA
   endpoint and require a JSON body.
-- Migration `0005_passkeys` is applied by the existing
-  `manage.py migrate --noinput` step in `deploy.sh`.
+- Migrations `0005_passkeys` and `0006_passkey_epoch` are applied by the
+  existing `manage.py migrate --noinput` step in `deploy.sh`.
 
 ## Data flows
 
@@ -355,8 +435,8 @@ page.
 
 **Lost passkey:** `/password_reset/` → email → `/reset/<uidb64>/<token>/` →
 `/reset/<uidb64>/set-password/` → Create a new passkey → recovery
-begin/finish → all tokens revoked → logged in → `/account/security/` → delete
-old passkey.
+begin/finish → all tokens revoked and every other browser session deleted →
+logged in on this browser → `/account/security/` → delete old passkey.
 
 ## Security
 
@@ -375,8 +455,8 @@ old passkey.
 | Username-less login with a missing or wrong `userHandle` | rejected |
 | Account enumeration | login and recovery responses are generic. Signup reveals a taken username or email, **as `/rest-auth/registration/` already does** (accepted) |
 | XSS through passkey names or AngularJS interpolation | `textContent` only; `ng-non-bindable` containers; no passkey name rendered by Django templates |
-| Lost device still holding tokens | recovery and password reset revoke DRF and OAuth tokens |
-| Request flooding | nginx `passkey` zone + DRF `passkey` throttle |
+| Lost device still holding tokens | recovery and password reset revoke DRF and OAuth tokens; passkey recovery (not password reset) also deletes every other browser session |
+| Request flooding | nginx (separate zones for anonymous ceremonies, signed-in management, and the password-reset GET/POST pages — see Component 7) plus the DRF `passkey` throttle as a second, per-worker layer |
 
 `attestation: none`: the device model is not needed, synced passkeys send no
 attestation, and it avoids collecting device identifiers.
@@ -387,15 +467,18 @@ attestation, and it avoids collecting device identifiers.
 |---|---|
 | Unknown, expired, reused or wrong-purpose `challenge_id` | 400 |
 | Malformed credential JSON | 400 (library `InvalidRegistrationResponse` / `InvalidAuthenticationResponse`, or parse error) |
+| Request body isn't a JSON object, or nests too deeply to parse | 400 `{"detail": "Malformed request."}` — every `/api/passkeys/*` (DRF) endpoint via a shared `_body()` guard, plus a project-wide `EXCEPTION_HANDLER` (`user_data/drf_handlers.py`) for the deep-nesting case; `/login/passkey/` and `/account/recover/passkey/*` are plain Django views, not DRF, so they instead treat such a body as `{}` and fall through to their own domain-specific 400 |
 | Verification failure on login | 400 with the generic `LoginSerializer` message |
-| Inactive account on login | 400 with the existing "verify your email" message |
+| Inactive account on login | 400 with the existing "verify your email" message — reachable on the passkey path; not reachable on the password path, since `ModelBackend` returns `None` for an inactive user before `LoginSerializer` gets there (see Component 4's login/finish row) |
 | Step-up failed | 400 |
 | Signup name/email taken (at begin or finish) | 400 with field errors |
 | Passkey id not owned by caller | 404 |
-| Deleting the last passkey without a password; removing a password without a passkey | 409 |
+| Deleting the last passkey without a password; removing a password without a passkey | 409 `"Your account must keep at least one way to sign in."` |
+| Passkey cap (`PASSKEY_MAX_PER_USER` = 20) reached, at register/begin or register/finish only | 409 `"You have reached the maximum number of passkeys."` |
 | Missing or invalid recovery session token | 400 |
 | Android settings empty | `assetlinks.json` 404; no Android origin accepted |
-| Throttled | 429 (DRF) or nginx 429 with `Retry-After` |
+| `PASSKEY_IOS_APP_IDS` empty | `apple-app-site-association` 404 |
+| Throttled | 429 (DRF `passkey` throttle) or nginx 429 (JSON with `Retry-After` on every passkey zone; the `/password_reset/`/reset-confirm zone renders a small HTML page instead — see Component 7) |
 
 ## Testing
 
@@ -415,13 +498,32 @@ attestation, and it avoids collecting device identifiers.
   `/`; step-up by password and by assertion, and by another user's assertion
   (rejected); 400/404/409 codes; username validator; verification and
   "passkey added" emails in `mail.outbox`; session survives password removal.
-- `test_passkey_recovery.py` — unusable-password users receive the reset email;
-  inactive users do not; link invalid after a passkey is added or a password is
-  set; tokens revoked on both paths; missing or wrong session token → 400.
+- `test_recovery.py` (named `test_passkey_recovery.py` in the original plan)
+  — unusable-password users receive the reset email; inactive users do not;
+  link invalid after a passkey is added **or removed**, a password change, a
+  login, or an email change (`PasskeyEpoch` + Django's own hash inputs);
+  tokens revoked and other browser sessions deleted on both recovery paths;
+  the recovering browser keeps its own session; missing or wrong session
+  token → 400; deadlock-retry behaviour against a concurrent OAuth
+  refresh-token rotation.
 - `test_wellknown.py` — AASA body and content type; assetlinks 404 when unset
-  and body when set; Android origin derived correctly from a colon-hex
-  fingerprint; `PASSKEY_RP_ID` / `PASSKEY_WEB_ORIGIN` defaults and overrides.
-- `test_models.py` — new models and constraints.
+  and body when set; AASA itself 404 when `PASSKEY_IOS_APP_IDS` is empty;
+  Android origin derived correctly from a colon-hex fingerprint;
+  `PASSKEY_RP_ID` / `PASSKEY_WEB_ORIGIN` defaults and overrides.
+- `test_models.py` / `test_passkey_models.py` — new models and constraints.
+- Split further, beyond what this plan originally called out as one file per
+  concern: `test_passkey_config.py`, `test_passkey_challenges.py`,
+  `test_passkey_manage.py`, `test_passkey_pages.py`, `test_passkey_web.py`,
+  `test_passkey_i18n.py`, `test_serializers.py` — covering, among other
+  things, the `PASSKEY_MAX_PER_USER` cap (both register endpoints, and the
+  race between two concurrent finishes), the `_bad_request()` /
+  `drf_handlers.py` malformed-body 400, `NUM_PROXIES` pinning the DRF
+  throttle to the real client IP despite a spoofed `X-Forwarded-For`, and
+  `TRUST_PROXY_PROTO`'s cookie-security behaviour.
+- `tests/passkey_js_test.mjs` (run on the host with Node, not in the `web`
+  container) — unit tests for `app/assets/passkey.js`'s private helpers,
+  plus a `node --check` syntax pass over every `passkey*.js` file and
+  `account_security.js`. See `tests/README.md`.
 
 **Golden harness (HTTP, same-stack)**
 - `normalize.py` masks `challenge`, `challenge_id` and `user.id` values as
@@ -451,29 +553,45 @@ no dev override is required)
 ## Deliverables
 
 - `app/requirements.txt` — `webauthn==3.0.0`.
-- `app/user_data/models.py`, `migrations/0005_passkeys.py`.
-- `app/user_data/passkey_service.py`, `passkey_views.py`, `recovery.py`,
-  `wellknown_views.py`.
+- `app/user_data/models.py`, `migrations/0005_passkeys.py`,
+  `migrations/0006_passkey_epoch.py` (`PasskeyEpoch`).
+- `app/user_data/passkey_config.py`, `passkey_challenges.py`,
+  `passkey_service.py`, `passkey_manage.py`, `account_tokens.py`,
+  `passkey_views.py`, `passkey_web_views.py`, `wellknown_views.py`,
+  `recovery.py`; `serializers.py` (`AccountIdentitySerializer`).
+- `app/user_data/oauth_validators.py` — the per-user advisory-lock
+  `EtipitakaOAuth2Validator`, wired in via
+  `OAUTH2_PROVIDER['OAUTH2_VALIDATOR_CLASS']`, that serialises every
+  django-oauth-toolkit token write against passkey recovery's own
+  `revoke_all_tokens` (not called out in the original plan — needed once
+  recovery's token revocation started deadlocking against a live OAuth
+  refresh-token rotation under load).
+- `app/user_data/drf_handlers.py` — the project-wide DRF `EXCEPTION_HANDLER`
+  that maps a pathologically deep JSON body (`RecursionError`) to the same
+  clean 400 the passkey endpoints already give a wrong-shaped body.
 - `app/etipitaka_auth/settings.py`, `urls.py`.
-- Templates: `account_security.html`, `login.html` / `forms/login_form.html`,
-  `signup.html` / `forms/signup_form.html`,
-  `registration/password_reset_confirm.html`,
+- Templates: `account_security.html`, `login.html`, `forms/login_form.html`,
+  `signup.html`, `registration/password_reset_confirm.html`,
   `registration/password_reset_email.txt`, `email/passkey_added.txt`,
-  `base.html` (navbar link, i18n strings, script tag).
-- `app/assets/passkey.js`.
+  `base.html`.
+- `app/assets/passkey.js`, `passkey_login.js`, `passkey_signup.js`,
+  `account_security.js`, `passkey_recover.js`.
 - `app/locale/th/LC_MESSAGES/django.po` (+ compiled `.mo`).
-- `nginx/nginx.conf`, `deploy.sh`.
-- Tests listed above; golden snapshots and README note.
+- `nginx/nginx.conf`, `deploy.sh` (rate-limit zones reworked again by Task
+  23 — see Component 7).
+- Unit tests (see Testing above — more files than this plan originally
+  listed), golden snapshots + README note, `tests/passkey_e2e.py`,
+  `tests/passkey_js_test.mjs`, `tests/README.md`.
 - `docs/passkeys-client-integration.md` — endpoints, JSON shapes, iOS
   entitlement `webcredentials:data.etipitaka.com`, Android assetlinks and
-  Credential Manager notes, step-up and recovery flows, error codes, testing
-  against prod or an HTTPS tunnel (native passkeys cannot use `localhost`).
+  Credential Manager notes, step-up and recovery flows, rate limits and 429
+  shapes, error codes, "Known gaps", testing against prod or an HTTPS
+  tunnel (native passkeys cannot use `localhost`).
+- Plan: `docs/superpowers/plans/2026-09-14-passkey-login.md`.
 
 ## Out of scope (v1)
 
 - iOS and Android app code.
-- Deleting existing web sessions on passkey recovery (Django sessions are not
-  indexed by user; would need a full session scan).
 - WebAuthn Signal API (`signalUnknownCredential`, etc.).
 - A resend-verification-email endpoint.
 - Passkeys as a second factor on top of a password.
@@ -484,9 +602,18 @@ no dev override is required)
 - **Token model:** DRF tokens are shared per user and never expire. Passkeys do
   not change that; step-up and revocation-on-recovery narrow the damage of a
   leaked token but do not remove it.
-- **Throttle accuracy** depends on the still-open host-proxy item
-  (`X-Forwarded-For` + `TRUST_PROXY_PROTO`): until it is done, nginx buckets
-  clients together, so the `passkey` zone may throttle many users as one.
+- **Throttle accuracy**, originally an open item here, was closed within
+  this repo by Task 23: `nginx/nginx.conf` now recovers the real client
+  address from `X-Forwarded-For` (`set_real_ip_from` / `real_ip_recursive`)
+  before keying any `limit_req_zone` on it, and
+  `REST_FRAMEWORK['NUM_PROXIES'] = 1` does the equivalent for DRF's own
+  throttles. What remains open is outside this repo: correctness depends on
+  the host-level TLS-terminating proxy in front of this container always
+  *overwriting* (never appending to, and never passing through a
+  client-supplied) `X-Forwarded-For` and `X-Forwarded-Proto` — see the
+  host-proxy contract in `docs/remote-mcp-oauth-deploy.md`. Until that's
+  confirmed on the host, every client can still bucket together at this
+  container's edge.
 - **Local browser testing** requires the dev override
   (`PASSKEY_RP_ID=localhost`, `PASSKEY_WEB_ORIGIN=http://localhost:1338`);
   passkeys created locally are tied to `localhost` and do not work on prod.
