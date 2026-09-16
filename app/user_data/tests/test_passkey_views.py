@@ -6,7 +6,9 @@ from django.core import mail
 from django.core.cache import cache
 from django.test import Client
 from django.utils import translation
+from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.authtoken.models import Token
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIClient
 
 from user_data import passkey_views
@@ -394,11 +396,28 @@ def test_session_auth_is_accepted(client, alice):
     assert client.get('/api/passkeys/').status_code == 200
 
 
-def test_session_post_requires_csrf(alice):
+# register_finish (POST) and passkey_detail (PATCH, DELETE) were, before
+# this parametrization, never exercised over a session at all -- neither
+# CSRF-checked nor otherwise -- so a regression that dropped
+# @authentication_classes from either view (which makes a session caller
+# anonymous, and IsAuthenticated then 401s before CSRF is ever checked)
+# passed the whole suite silently. Each row here drives the real Django
+# CSRF middleware through SessionAuthentication.enforce_csrf, the same path
+# a browser hits, rather than only asserting the view's declared classes.
+CSRF_PROTECTED_ACCOUNT_REQUESTS = [
+    ('post', '/api/passkeys/register/begin/', {'password': 'alicepass123'}),
+    ('post', '/api/passkeys/register/finish/', {'challenge_id': 'x', 'credential': {}}),
+    ('patch', '/api/passkeys/1/', {'name': 'Laptop'}),
+    ('delete', '/api/passkeys/1/', None),
+    ('post', '/api/passkeys/password/remove/', {'password': 'alicepass123'}),
+]
+
+
+@pytest.mark.parametrize('method,url,body', CSRF_PROTECTED_ACCOUNT_REQUESTS)
+def test_session_requires_csrf(alice, method, url, body):
     csrf_client = Client(enforce_csrf_checks=True)
     csrf_client.force_login(alice)
-    resp = csrf_client.post('/api/passkeys/register/begin/', {'password': 'alicepass123'},
-                            content_type='application/json')
+    resp = getattr(csrf_client, method)(url, body or '', content_type='application/json')
     assert resp.status_code == 403
 
 
@@ -504,6 +523,37 @@ def test_register_finish_rejects_when_cap_reached_between_begin_and_finish(
 def test_account_endpoints_are_throttled(name):
     view = getattr(passkey_views, name)
     assert view.cls.throttle_classes == [PasskeyRateThrottle]
+
+
+@pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_begin',
+                                  'register_finish', 'password_remove'])
+def test_account_endpoints_declare_their_authenticators(name):
+    """Pins the exact authenticator list and its order on every account view.
+
+    This is a structural mutation-catcher, not a behavioural one: it does
+    not send a request, so it catches a regression a green suite could
+    otherwise miss -- e.g. dropping @authentication_classes from
+    register_finish or passkey_detail, which would make a session caller
+    anonymous there (a 401 from IsAuthenticated, before CSRF is even
+    checked) while every *other* test still force_login()s a client whose
+    Token credential (from the `client`/`alice` fixtures' auth_token) can
+    make Token-based tests pass regardless.
+
+    Token must come before Session: when every configured authenticator
+    fails to authenticate a request, DRF's exception handler takes the
+    `WWW-Authenticate` challenge header from the *first* authenticator in
+    the list to answer with a 401. SessionAuthentication declares none, so
+    if it came first, an unauthenticated caller with no credentials at all
+    would get a bare 403 instead of DRF's normal 401 -- exactly backwards
+    from what test_account_endpoints_reject_anonymous already pins.
+
+    OAuth2Authentication must never appear here at all: these are the
+    account-management endpoints an OAuth bearer token must never reach
+    (see the module docstring and test_account_endpoints_reject_oauth_bearer).
+    """
+    view = getattr(passkey_views, name)
+    assert view.cls.authentication_classes == [TokenAuthentication, SessionAuthentication]
+    assert view.cls.permission_classes == [IsAuthenticated]
 
 
 # --- account endpoints: crafted input must never reach a 500 ----------------

@@ -4,12 +4,14 @@ Account endpoints accept DRF Token and Session authentication only -- never
 OAuth bearer tokens -- so a read-scoped MCP connector cannot manage a
 user's credentials.
 
-Every view here is anonymous and reachable by an untrusted caller with an
-arbitrary JSON body, so `_body()` is the one gate every view passes a
-request through before touching any field of it: it forces `request.data`
-to be parsed (turning malformed JSON into DRF's own 400 response) and
-rejects any body that isn't a JSON object (list/string/number), so a
-crafted request can only ever reach a 400, never a 500.
+Every view here -- anonymous or signed-in -- is reachable by an untrusted
+caller with an arbitrary JSON body (a signed-in caller is still an
+untrusted one as far as the request body goes), so `_body()` is the one
+gate every view passes a request through before touching any field of it:
+it forces `request.data` to be parsed (turning malformed JSON into DRF's
+own 400 response) and rejects any body that isn't a JSON object
+(list/string/number), so a crafted request can only ever reach a 400,
+never a 500.
 """
 import logging
 

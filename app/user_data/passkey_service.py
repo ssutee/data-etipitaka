@@ -154,12 +154,32 @@ def _handle_for(user):
 
 
 def _descriptors(user):
-    return [
-        PublicKeyCredentialDescriptor(
-            id=base64url_to_bytes(p.credential_id),
-            transports=[AuthenticatorTransport(t) for t in p.transports if t in _TRANSPORTS])
-        for p in user.passkeys.order_by('pk')
-    ]
+    """PublicKeyCredentialDescriptor for each of the user's passkeys.
+
+    Skips (and logs at INFO) any row whose credential_id fails to decode as
+    base64url, rather than letting base64url_to_bytes's raw
+    binascii.Error/ValueError (binascii.Error is a ValueError subclass)
+    escape into begin_register/begin_login. Unreachable in practice today --
+    every credential_id is written by _store_passkey from a value
+    py_webauthn itself produced -- but it is the same defence
+    _verify_assertion already applies on the read side: a corrupt stored id
+    there just can't match an incoming assertion's raw_id, so it never
+    verifies rather than 500ing. This extends that same tolerance to the
+    write side, so a corrupt row (a legacy migration, manual data surgery)
+    can't turn "list my own exclude/allow credentials" into a 500 either.
+    """
+    descriptors = []
+    for p in user.passkeys.order_by('pk'):
+        try:
+            credential_id = base64url_to_bytes(p.credential_id)
+        except ValueError:
+            log.info('passkey %s has an undecodable credential_id; omitting it from '
+                     'excludeCredentials/allowCredentials', p.pk)
+            continue
+        descriptors.append(PublicKeyCredentialDescriptor(
+            id=credential_id,
+            transports=[AuthenticatorTransport(t) for t in p.transports if t in _TRANSPORTS]))
+    return descriptors
 
 
 def _registration_options(challenge, username, handle, exclude):

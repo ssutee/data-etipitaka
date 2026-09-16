@@ -103,6 +103,21 @@ def test_exclude_credentials_lists_existing_passkeys(alice, authenticator):
     assert options['excludeCredentials'][0]['transports'] == ['internal', 'hybrid']
 
 
+def test_exclude_credentials_skips_undecodable_credential_id(alice, authenticator, caplog):
+    """A corrupt credential_id (a legacy row, manual data surgery) must be
+    left out of excludeCredentials rather than letting base64url_to_bytes's
+    raw binascii.Error/ValueError escape begin_register -- the same
+    tolerance _verify_assertion already applies when reading a passkey back
+    for login, extended here to the write side."""
+    passkey = _register(alice, authenticator)
+    Passkey.objects.create(user=alice, credential_id='corrupt-credential-id',
+                           public_key=b'', name='Corrupt')
+    with caplog.at_level('INFO', logger='user_data.passkey_service'):
+        _challenge_id, options = service.begin_register(alice)
+    assert [c['id'] for c in options['excludeCredentials']] == [passkey.credential_id]
+    assert any(r.levelname == 'INFO' for r in caplog.records)
+
+
 @pytest.mark.parametrize('tamper', [
     {'uv': False}, {'origin': 'https://evil.example'}, {'rp_id': 'evil.example'}])
 def test_finish_register_rejects_tampered_response(alice, authenticator, tamper):
