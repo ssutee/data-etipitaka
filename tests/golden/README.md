@@ -48,6 +48,23 @@ English-only stack and are intentionally same-stack:
   authorization server and the `mcp` service did not exist on the old stack.
   They advertise the canonical production issuer (`OAUTH_ISSUER_URL`,
   default `https://data.etipitaka.com`) regardless of the host under test.
+- The passkey snapshots (`apple_app_site_association`, `assetlinks_unset`,
+  `passkey_login_begin`, `passkey_login_finish_bad_challenge`,
+  `passkeys_list_anon`, `passkeys_list_alice`) are same-stack — these routes
+  did not exist on the old stack. Random WebAuthn challenge values are masked
+  as `<CHALLENGE>`. Record and assert **without** a `PASSKEY_RP_ID` /
+  `PASSKEY_WEB_ORIGIN` dev override so `rpId` is the production default
+  (`data.etipitaka.com`). `apple_app_site_association` is 200 in dev because
+  `PASSKEY_IOS_APP_IDS` has a non-empty default
+  (`A6DJDJ7527.com.watnapp.E-Tipitaka-Plus`); it would be a JSON 404 only if
+  that setting were emptied. `assetlinks_unset` is a JSON 404 because
+  `PASSKEY_ANDROID_PACKAGE` / `PASSKEY_ANDROID_CERT_SHA256` are unset by
+  default — both 404 bodies are the hardcoded literal `"Not found."`, not run
+  through `gettext`, so they stay English regardless of locale.
+  `passkey_login_finish_bad_challenge` (400) and `passkeys_list_anon` (401)
+  carry localized error messages — the harness sends no `Accept-Language`, so
+  they come out in the site's default language, currently Thai; a locale
+  change (e.g. changing `LANGUAGE_CODE`) will flip these two snapshots.
 
 All other golden snapshots (JSON data, tokens, file downloads, status codes)
 are not localized and remain valid cross-stack regression checks.

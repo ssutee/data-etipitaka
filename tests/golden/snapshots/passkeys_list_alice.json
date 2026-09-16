@@ -1,0 +1,13 @@
+{
+  "body": {
+    "json": {
+      "has_password": true,
+      "passkeys": []
+    }
+  },
+  "headers": {
+    "allow": "GET, OPTIONS",
+    "content-type": "application/json"
+  },
+  "status": 200
+}
