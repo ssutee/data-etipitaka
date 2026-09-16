@@ -17,6 +17,7 @@ from user_data import canon_views
 from user_data import oauth_views
 from user_data import passkey_views
 from user_data import passkey_web_views
+from user_data import recovery
 from user_data import wellknown_views
 from user_data.auth_urls import rest_auth_patterns
 
@@ -82,5 +83,9 @@ urlpatterns = [
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),
+    # Override Django's reset views (same names) with the recovery versions.
+    path('password_reset/', recovery.password_reset_view, name='password_reset'),
+    path('reset/<uidb64>/<token>/', recovery.AccountRecoveryConfirmView.as_view(),
+         name='password_reset_confirm'),
     path('', include('django.contrib.auth.urls')),
 ]
