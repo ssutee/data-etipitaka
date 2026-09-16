@@ -17,6 +17,7 @@ from user_data import canon_views
 from user_data import oauth_views
 from user_data import passkey_views
 from user_data import passkey_web_views
+from user_data import wellknown_views
 from user_data.auth_urls import rest_auth_patterns
 
 # Explicit allow-list, not oauth2_provider.urls.base_urlpatterns: that also
@@ -75,6 +76,8 @@ urlpatterns = [
     path('o/', include((oauth2_base_urlpatterns + oauth2_urls.dcr_urlpatterns,
                         'oauth2_provider'), namespace='oauth2_provider')),
     path('.well-known/oauth-authorization-server', OAuthServerMetadataView.as_view()),
+    path('.well-known/apple-app-site-association', wellknown_views.apple_app_site_association),
+    path('.well-known/assetlinks.json', wellknown_views.assetlinks),
     path('api/oauth/verify/', oauth_views.verify),
     path('rest-auth/', include((rest_auth_patterns, 'rest_auth'))),
     path('i18n/setlang/', set_language, name='set_language'),
