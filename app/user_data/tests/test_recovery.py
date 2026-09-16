@@ -808,3 +808,55 @@ def test_passkey_recovery_bypasses_passkey_cap(client, alice, authenticator, mon
     resp = _recover_with_passkey(client, uidb64, authenticator)
     assert resp.status_code == 200
     assert alice.passkeys.count() == 2
+
+
+# =============================================================================
+# Task 21: recovery confirm page -- "Create a new passkey"
+# =============================================================================
+
+
+def test_confirm_page_offers_passkey_button(client, alice):
+    _request_reset(client)
+    uidb64, set_password_url = _open_link(client)
+    html = client.get(set_password_url).content.decode()
+    assert 'id="passkey-recover-button"' in html
+    assert 'data-uidb64="%s"' % uidb64 in html
+    assert '/static/passkey_recover.js' in html
+
+
+def test_confirm_page_names_the_account(client, alice):
+    """Task 16 review: a victim following an attacker's reset link must be
+    able to see whose account they are about to create a passkey for --
+    otherwise they could unknowingly bind their authenticator to the
+    attacker's account. The username must appear next to the button.
+    """
+    _request_reset(client)
+    _uidb64, set_password_url = _open_link(client)
+    html = client.get(set_password_url).content.decode()
+    assert alice.username in html
+
+
+def test_confirm_page_does_not_leak_username_on_invalid_link(client, alice):
+    """The same page, reached with a tampered/expired link, must never
+    reveal whose account a valid link would have named -- validlink is
+    False here, so there is no `user` to name in the first place.
+    """
+    uidb64 = urlsafe_base64_encode(force_bytes(alice.pk))
+    resp = client.get('/reset/%s/garbage-token/' % uidb64)
+    assert resp.status_code == 200
+    assert resp.context['validlink'] is False
+    assert alice.username not in resp.content.decode()
+
+
+def test_confirm_page_hides_passkey_box_and_keeps_password_form(client, alice):
+    """Progressive enhancement: with JS off (or passkeys unsupported), the
+    box must render hidden and the ordinary set-password form must still
+    be fully present and usable.
+    """
+    _request_reset(client)
+    _uidb64, set_password_url = _open_link(client)
+    html = client.get(set_password_url).content.decode()
+    assert re.search(r'<div id="passkey-recover"[^>]*\bhidden\b', html)
+    assert 'name="new_password1"' in html
+    assert 'name="new_password2"' in html
+    assert '<form class="form-horizontal" method="post" action="">' in html
