@@ -494,6 +494,12 @@ msgstr "ความปลอดภัย"
 msgid "The passkey request was cancelled."
 msgstr "คำขอพาสคีย์ถูกยกเลิก"
 
+msgid "Too many attempts. Please wait a moment and try again."
+msgstr "พยายามหลายครั้งเกินไป โปรดรอสักครู่แล้วลองใหม่อีกครั้ง"
+
+msgid "Too many attempts. Please wait {seconds} seconds and try again."
+msgstr "พยายามหลายครั้งเกินไป โปรดรออีก {seconds} วินาทีแล้วลองใหม่อีกครั้ง"
+
 msgid "Create a new passkey for %(username)s to sign in again."
 msgstr "สร้างพาสคีย์ใหม่สำหรับ %(username)s เพื่อกลับเข้าสู่ระบบ"
 

@@ -19,6 +19,12 @@ from django.utils import translation
 #     'You have reached the maximum number of passkeys.' (passkey_views.py)
 #     and 'Enter your current password.' (account_security.html) exist in
 #     code but were missing from the plan's list entirely.
+#
+# Task 23 added two client-side strings, rendered into window.i18n by
+# base.html and read by passkey.js's errorMessage() on an HTTP 429. The
+# '{seconds}' in passkeyRateLimitedWait is a literal token passkey.js
+# substitutes itself with String.replace(), not Django interpolation --
+# see test_rate_limited_wait_translation_keeps_seconds_token below.
 LOCALE_DIR = Path(__file__).resolve().parents[2] / 'locale' / 'th' / 'LC_MESSAGES'
 PO_PATH = LOCALE_DIR / 'django.po'
 MO_PATH = LOCALE_DIR / 'django.mo'
@@ -57,6 +63,8 @@ NEW_MSGIDS = [
     'Your account has no password. You sign in with a passkey.',
     'Security',
     'The passkey request was cancelled.',
+    'Too many attempts. Please wait a moment and try again.',
+    'Too many attempts. Please wait {seconds} seconds and try again.',
     'Create a new passkey for %(username)s to sign in again.',
     'Create a new passkey',
     'Or set a new password:',
@@ -84,6 +92,19 @@ def test_all_new_msgids_have_thai_translations():
     with translation.override('th'):
         missing = [msgid for msgid in NEW_MSGIDS if translation.gettext(msgid) == msgid]
     assert not missing
+
+
+def test_rate_limited_wait_translation_keeps_seconds_token():
+    """'{seconds}' is not Django interpolation -- passkey.js splices the
+    retry-after value in with String.replace('{seconds}', ...) after
+    gettext runs. If a translation drops or mistypes the literal token, the
+    message silently shows no number instead of erroring, so this is
+    checked on its own rather than trusting the general "differs from the
+    English" assertion above to catch it."""
+    with translation.override('th'):
+        translated = translation.gettext(
+            'Too many attempts. Please wait {seconds} seconds and try again.')
+    assert '{seconds}' in translated
 
 
 def test_compiled_mo_is_not_older_than_po_source():
