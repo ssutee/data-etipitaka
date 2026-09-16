@@ -6,7 +6,8 @@ from django.db import transaction
 
 from .models import Passkey
 from .passkey_service import (AAGUID_NAMES, PasskeyError, bump_passkey_epoch,
-                              check_password, clean_name)
+                              check_password, clean_name, send_passkey_deleted_email,
+                              send_password_removed_email)
 
 
 class NotFound(PasskeyError):
@@ -102,6 +103,15 @@ def delete_passkey(user, passkey_id):
     same lock: a delete must move the counter forward exactly like an add
     does, or deleting the passkey that killed a reset token could quietly
     revive it. See passkey_service.bump_passkey_epoch.
+
+    The notification email is sent last, strictly after this function's
+    own transaction.atomic() block has returned (so only once the delete
+    has actually committed) -- never from inside it. send_passkey_deleted_
+    email is itself best-effort (see passkey_service._send_security_email),
+    so a mail outage here can never turn a successful delete into a 500 or,
+    worse, roll it back: someone holding a stolen session must not be able
+    to suppress the owner's own notification just by knocking out mail
+    delivery first.
     """
     with transaction.atomic():
         locked = get_user_model().objects.select_for_update().get(pk=user.pk)
@@ -114,6 +124,7 @@ def delete_passkey(user, passkey_id):
         # matching the pk+user lookup _own already did.
         Passkey.objects.filter(pk=passkey.pk, user=locked).delete()
         bump_passkey_epoch(locked)
+    send_passkey_deleted_email(locked, passkey.name)
 
 
 def remove_password(user, password):
@@ -123,6 +134,12 @@ def remove_password(user, password):
     session's auth-hash check. The caller -- the Task 12 view -- must call
     update_session_auth_hash(request, locked) with the user this returns,
     or the request's own session will be signed out on its next request.
+
+    The notification email is sent last, strictly after this function's
+    own transaction.atomic() block has returned (so only once the removal
+    has actually committed) -- never from inside it, and best-effort like
+    delete_passkey's own notification above: see that function's docstring
+    for why.
     """
     with transaction.atomic():
         locked = get_user_model().objects.select_for_update().get(pk=user.pk)
@@ -132,4 +149,5 @@ def remove_password(user, password):
             raise WrongPassword()
         locked.set_unusable_password()
         locked.save(update_fields=['password'])
+    send_password_removed_email(locked)
     return locked

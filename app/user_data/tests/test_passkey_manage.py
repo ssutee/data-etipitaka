@@ -1,9 +1,12 @@
 import threading
 
 import pytest
+from django.contrib.auth.models import User
+from django.core import mail
 from django.db import connection
 
 from user_data import passkey_manage as manage
+from user_data import passkey_service as service
 from user_data.models import Passkey, PasskeyEpoch
 
 from .conftest import add_passkey
@@ -213,3 +216,135 @@ def test_concurrent_deletes_of_a_passwordless_users_last_two_passkeys(alice):
     assert outcomes.count('ok') == 1, results
     assert outcomes.count('guard') == 1, results
     assert Passkey.objects.filter(user=alice).count() == 1
+
+
+# --- removal notification emails: best-effort, sent strictly after commit ---
+
+def test_delete_passkey_sends_exactly_one_email(alice, authenticator):
+    passkey = add_passkey(alice, authenticator, name='Phone')
+    add_passkey(alice, SoftAuthenticator())  # leave one behind after the delete
+    mail.outbox.clear()
+    manage.delete_passkey(alice, passkey.pk)
+    assert len(mail.outbox) == 1
+    assert mail.outbox[0].to == ['alice@example.com']
+    assert 'Phone' in mail.outbox[0].body
+
+
+def test_remove_password_sends_exactly_one_email(alice, authenticator):
+    add_passkey(alice, authenticator)
+    mail.outbox.clear()
+    manage.remove_password(alice, 'alicepass123')
+    assert len(mail.outbox) == 1
+    assert mail.outbox[0].to == ['alice@example.com']
+
+
+def test_delete_passkey_sends_no_email_for_user_without_email(authenticator):
+    user = User.objects.create_user('carol', '', 'carolpass123')
+    passkey = add_passkey(user, authenticator)
+    add_passkey(user, SoftAuthenticator())
+    mail.outbox.clear()
+    manage.delete_passkey(user, passkey.pk)  # must not error either
+    assert not Passkey.objects.filter(pk=passkey.pk).exists()
+    assert len(mail.outbox) == 0
+
+
+def test_remove_password_sends_no_email_for_user_without_email(authenticator):
+    user = User.objects.create_user('carol', '', 'carolpass123')
+    add_passkey(user, authenticator)
+    mail.outbox.clear()
+    manage.remove_password(user, 'carolpass123')  # must not error either
+    user.refresh_from_db()
+    assert user.has_usable_password() is False
+    assert len(mail.outbox) == 0
+
+
+def test_delete_passkey_keeps_working_when_email_fails(alice, authenticator, monkeypatch, caplog):
+    passkey = add_passkey(alice, authenticator)
+    add_passkey(alice, SoftAuthenticator())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError('smtp is down')
+    monkeypatch.setattr(service, 'send_mail', _boom)
+    manage.delete_passkey(alice, passkey.pk)
+    assert not Passkey.objects.filter(pk=passkey.pk).exists()
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_delete_passkey_keeps_working_when_email_render_fails(alice, authenticator, monkeypatch,
+                                                               caplog):
+    """render_to_string can raise just as easily as send_mail, and both run
+    only after the delete has already committed."""
+    passkey = add_passkey(alice, authenticator)
+    add_passkey(alice, SoftAuthenticator())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError('template is broken')
+    monkeypatch.setattr(service, 'render_to_string', _boom)
+    manage.delete_passkey(alice, passkey.pk)
+    assert not Passkey.objects.filter(pk=passkey.pk).exists()
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_remove_password_keeps_working_when_email_fails(alice, authenticator, monkeypatch, caplog):
+    add_passkey(alice, authenticator)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError('smtp is down')
+    monkeypatch.setattr(service, 'send_mail', _boom)
+    manage.remove_password(alice, 'alicepass123')
+    alice.refresh_from_db()
+    assert alice.has_usable_password() is False
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_remove_password_keeps_working_when_email_render_fails(alice, authenticator, monkeypatch,
+                                                                caplog):
+    add_passkey(alice, authenticator)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError('template is broken')
+    monkeypatch.setattr(service, 'render_to_string', _boom)
+    manage.remove_password(alice, 'alicepass123')
+    alice.refresh_from_db()
+    assert alice.has_usable_password() is False
+    assert any(record.name == 'user_data.passkey_service' and record.levelname == 'ERROR'
+              for record in caplog.records)
+
+
+def test_delete_last_passkey_lockout_guard_sends_no_email(alice, authenticator):
+    """The email must be sent strictly after delete_passkey's own
+    transaction.atomic() block returns -- a LockoutGuard raised from inside
+    that block must never reach the send at all."""
+    passkey = add_passkey(alice, authenticator)
+    _drop_password(alice)
+    mail.outbox.clear()
+    with pytest.raises(manage.LockoutGuard):
+        manage.delete_passkey(alice, passkey.pk)
+    assert len(mail.outbox) == 0
+    assert Passkey.objects.filter(pk=passkey.pk).exists()
+
+
+def test_delete_not_found_sends_no_email(alice, bob, authenticator):
+    passkey = add_passkey(bob, authenticator)
+    mail.outbox.clear()
+    with pytest.raises(manage.NotFound):
+        manage.delete_passkey(alice, passkey.pk)
+    assert len(mail.outbox) == 0
+
+
+def test_remove_password_lockout_guard_sends_no_email(alice):
+    mail.outbox.clear()
+    with pytest.raises(manage.LockoutGuard):
+        manage.remove_password(alice, 'alicepass123')
+    assert len(mail.outbox) == 0
+
+
+def test_remove_password_wrong_password_sends_no_email(alice, authenticator):
+    add_passkey(alice, authenticator)
+    mail.outbox.clear()
+    with pytest.raises(manage.WrongPassword):
+        manage.remove_password(alice, 'wrong')
+    assert len(mail.outbox) == 0

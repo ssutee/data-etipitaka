@@ -529,3 +529,22 @@ msgstr "คุณตรวจสอบพาสคีย์ของคุณไ
 
 msgid "If this was not you, recover your account now and remove the passkey:"
 msgstr "หากไม่ใช่คุณ โปรดกู้คืนบัญชีทันทีและลบพาสคีย์นั้น:"
+
+# --- Task 27: notify on passkey deletion and password removal -------------
+
+msgid "A passkey was deleted from your E-Tipitaka account"
+msgstr "มีการลบพาสคีย์ออกจากบัญชี E-Tipitaka ของคุณ"
+
+msgid "Your password was removed from your E-Tipitaka account"
+msgstr "มีการลบรหัสผ่านออกจากบัญชี E-Tipitaka ของคุณ"
+
+msgid "The passkey named \"%(passkey_name)s\" was deleted from your E-Tipitaka account."
+msgstr "มีการลบพาสคีย์ชื่อ \"%(passkey_name)s\" ออกจากบัญชี E-Tipitaka ของคุณ"
+
+msgid "If this was not you, recover your account now:"
+msgstr "หากไม่ใช่คุณ โปรดกู้คืนบัญชีของคุณทันที:"
+
+msgid ""
+"Your password was removed from your E-Tipitaka account. You now sign in "
+"with a passkey only."
+msgstr "มีการลบรหัสผ่านออกจากบัญชี E-Tipitaka ของคุณแล้ว ตอนนี้คุณเข้าสู่ระบบด้วยพาสคีย์เท่านั้น"

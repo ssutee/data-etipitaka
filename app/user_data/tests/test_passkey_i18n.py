@@ -75,6 +75,13 @@ NEW_MSGIDS = [
     'A new passkey named "%(passkey_name)s" was added to your E-Tipitaka account.',
     'You can review your passkeys here:',
     'If this was not you, recover your account now and remove the passkey:',
+    # Task 27: notify on passkey deletion and password removal.
+    'A passkey was deleted from your E-Tipitaka account',
+    'Your password was removed from your E-Tipitaka account',
+    'The passkey named "%(passkey_name)s" was deleted from your E-Tipitaka account.',
+    'If this was not you, recover your account now:',
+    'Your password was removed from your E-Tipitaka account. You now sign in '
+    'with a passkey only.',
 ]
 
 
@@ -123,6 +130,27 @@ def test_passkey_added_email_renders_in_thai():
     assert 'สวัสดี alice' in body
     assert '"Phone"' in body
     assert 'https://x/account/security/' in body
+
+
+def test_passkey_deleted_email_renders_in_thai():
+    with translation.override('th'):
+        body = render_to_string('email/passkey_deleted.txt', {
+            'username': 'alice', 'passkey_name': 'Phone',
+            'security_url': 'https://x/account/security/', 'reset_url': 'https://x/password_reset/'})
+    assert 'สวัสดี alice' in body
+    assert '"Phone"' in body
+    assert 'https://x/account/security/' in body
+    assert 'https://x/password_reset/' in body
+
+
+def test_password_removed_email_renders_in_thai():
+    with translation.override('th'):
+        body = render_to_string('email/password_removed.txt', {
+            'username': 'alice',
+            'security_url': 'https://x/account/security/', 'reset_url': 'https://x/password_reset/'})
+    assert 'สวัสดี alice' in body
+    assert 'https://x/account/security/' in body
+    assert 'https://x/password_reset/' in body
 
 
 @pytest.mark.django_db

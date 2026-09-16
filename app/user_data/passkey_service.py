@@ -342,22 +342,70 @@ def bump_passkey_epoch(user):
     PasskeyEpoch.objects.filter(user=user).update(value=F('value') + 1)
 
 
-def _send_passkey_added_email(user, passkey):
+def _send_security_email(user, subject, template, context, description):
+    """Render and send a best-effort account-security notification.
+
+    Shared by every passkey/password add-or-remove notification
+    (_send_passkey_added_email, send_passkey_deleted_email,
+    send_password_removed_email) so the "render, send, swallow and log"
+    sequence exists exactly once. `description` names the action for the
+    log message only (e.g. 'passkey-added', 'passkey-deleted').
+
+    if not user.email: return must come first, and everything after it --
+    rendering included -- must stay inside the same try as send_mail:
+    render_to_string can raise just as easily as send_mail (a broken
+    template, a bad config.web_origin()), and every caller here runs this
+    strictly after its own change has already committed, so nothing below
+    can turn an already-successful add/remove into an unhandled 500.
+    """
     if not user.email:
         return
     try:
-        # Rendering the template can raise too (a broken template, a bad
-        # config.web_origin()) -- everything from here on must stay inside
-        # the same best-effort try as send_mail, so nothing after the
-        # passkey is already committed can turn into an unhandled 500.
-        body = render_to_string('email/passkey_added.txt', {
-            'username': user.username, 'passkey_name': passkey.name,
-            'security_url': config.web_origin() + '/account/security/',
-            'reset_url': config.web_origin() + '/password_reset/'})
-        send_mail(_('A passkey was added to your E-Tipitaka account'), body,
-                  settings.DEFAULT_FROM_EMAIL, [user.email])
-    except Exception:  # a mail outage must not look like a failed registration
-        log.exception('failed to send passkey-added email to user %s', user.pk)
+        body = render_to_string(template, context)
+        send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [user.email])
+    except Exception:  # a mail outage must not look like a failed add/remove
+        log.exception('failed to send %s email to user %s', description, user.pk)
+
+
+def _send_passkey_added_email(user, passkey):
+    _send_security_email(
+        user, _('A passkey was added to your E-Tipitaka account'),
+        'email/passkey_added.txt',
+        {'username': user.username, 'passkey_name': passkey.name,
+         'security_url': config.web_origin() + '/account/security/',
+         'reset_url': config.web_origin() + '/password_reset/'},
+        'passkey-added')
+
+
+def send_passkey_deleted_email(user, passkey_name):
+    """Notify `user` that a passkey (already deleted) named `passkey_name`
+    is gone -- called by passkey_manage.delete_passkey, after its own
+    transaction.atomic() block has committed. `passkey_name` is the
+    deleted Passkey's .name, already sanitised by clean_name before it was
+    ever stored (see clean_name's own docstring), so nothing here can
+    inject a mail header or a newline.
+    """
+    _send_security_email(
+        user, _('A passkey was deleted from your E-Tipitaka account'),
+        'email/passkey_deleted.txt',
+        {'username': user.username, 'passkey_name': passkey_name,
+         'security_url': config.web_origin() + '/account/security/',
+         'reset_url': config.web_origin() + '/password_reset/'},
+        'passkey-deleted')
+
+
+def send_password_removed_email(user):
+    """Notify `user` that their password was removed -- called by
+    passkey_manage.remove_password, after its own transaction.atomic()
+    block has committed.
+    """
+    _send_security_email(
+        user, _('Your password was removed from your E-Tipitaka account'),
+        'email/password_removed.txt',
+        {'username': user.username,
+         'security_url': config.web_origin() + '/account/security/',
+         'reset_url': config.web_origin() + '/password_reset/'},
+        'password-removed')
 
 
 def _begin_registration(user, purpose):
