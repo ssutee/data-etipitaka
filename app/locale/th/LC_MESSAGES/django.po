@@ -391,3 +391,135 @@ msgstr "ข้อผิดพลาด"
 
 msgid "Read your E-Tipitaka bookmarks, highlights, tags, history and saved lexicon"
 msgstr "อ่านที่คั่นหน้า ไฮไลต์ แท็ก ประวัติ และคำศัพท์ที่บันทึกไว้ใน E-Tipitaka ของคุณ"
+
+# --- Task 22: passkey login / signup / account security / recovery --------
+
+msgid "Malformed request."
+msgstr "คำขอไม่ถูกต้อง"
+
+msgid "A passkey was added to your E-Tipitaka account"
+msgstr "มีการเพิ่มพาสคีย์ในบัญชี E-Tipitaka ของคุณ"
+
+msgid "Passkey registration failed."
+msgstr "ลงทะเบียนพาสคีย์ไม่สำเร็จ"
+
+msgid "Re-authentication failed."
+msgstr "ยืนยันตัวตนอีกครั้งไม่สำเร็จ"
+
+msgid "Passkey not found."
+msgstr "ไม่พบพาสคีย์"
+
+msgid "Enter a name for this passkey."
+msgstr "โปรดตั้งชื่อพาสคีย์นี้"
+
+msgid "Your account must keep at least one way to sign in."
+msgstr "บัญชีของคุณต้องมีวิธีเข้าสู่ระบบอย่างน้อยหนึ่งวิธี"
+
+msgid "You have reached the maximum number of passkeys."
+msgstr "คุณมีพาสคีย์ครบจำนวนสูงสุดแล้ว"
+
+msgid ""
+"Enter a valid username. This value may contain only letters, numbers, and @/./"
+"+/-/_ characters."
+msgstr ""
+"โปรดกรอกชื่อผู้ใช้ที่ถูกต้อง ชื่อผู้ใช้ประกอบด้วยตัวอักษร ตัวเลข และอักขระ @/./+/-/_ "
+"เท่านั้น"
+
+msgid "Sign in with a passkey"
+msgstr "เข้าสู่ระบบด้วยพาสคีย์"
+
+msgid "Create account with a passkey"
+msgstr "สร้างบัญชีด้วยพาสคีย์"
+
+msgid "Sign up with a password instead"
+msgstr "สมัครด้วยรหัสผ่านแทน"
+
+msgid "Sign-in and security"
+msgstr "การเข้าสู่ระบบและความปลอดภัย"
+
+msgid "This browser does not support passkeys."
+msgstr "เบราว์เซอร์นี้ไม่รองรับพาสคีย์"
+
+msgid "Passkeys"
+msgstr "พาสคีย์"
+
+msgid "Name"
+msgstr "ชื่อ"
+
+msgid "Type"
+msgstr "ประเภท"
+
+msgid "Last used"
+msgstr "ใช้ล่าสุด"
+
+msgid "You have no passkeys yet."
+msgstr "คุณยังไม่มีพาสคีย์"
+
+msgid "Current password"
+msgstr "รหัสผ่านปัจจุบัน"
+
+msgid "Enter your current password."
+msgstr "โปรดกรอกรหัสผ่านปัจจุบันของคุณ"
+
+msgid "Add a passkey"
+msgstr "เพิ่มพาสคีย์"
+
+msgid "Remove password"
+msgstr "ลบรหัสผ่าน"
+
+msgid "Never"
+msgstr "ยังไม่เคยใช้"
+
+msgid "Synced"
+msgstr "ซิงค์ข้ามอุปกรณ์"
+
+msgid "This device only"
+msgstr "เฉพาะอุปกรณ์นี้"
+
+msgid "Rename"
+msgstr "เปลี่ยนชื่อ"
+
+msgid "New name for this passkey"
+msgstr "ชื่อใหม่ของพาสคีย์นี้"
+
+msgid "Your account has a password."
+msgstr "บัญชีของคุณมีรหัสผ่าน"
+
+msgid "Your account has no password. You sign in with a passkey."
+msgstr "บัญชีของคุณไม่มีรหัสผ่าน คุณเข้าสู่ระบบด้วยพาสคีย์"
+
+msgid "Security"
+msgstr "ความปลอดภัย"
+
+msgid "The passkey request was cancelled."
+msgstr "คำขอพาสคีย์ถูกยกเลิก"
+
+msgid "Create a new passkey for %(username)s to sign in again."
+msgstr "สร้างพาสคีย์ใหม่สำหรับ %(username)s เพื่อกลับเข้าสู่ระบบ"
+
+msgid "Create a new passkey"
+msgstr "สร้างพาสคีย์ใหม่"
+
+msgid "Or set a new password:"
+msgstr "หรือตั้งรหัสผ่านใหม่:"
+
+msgid "Hello %(username)s,"
+msgstr "สวัสดี %(username)s"
+
+msgid "We received a request to recover your E-Tipitaka account."
+msgstr "เราได้รับคำขอกู้คืนบัญชี E-Tipitaka ของคุณ"
+
+msgid "Open the link below to set a new password or create a new passkey:"
+msgstr "เปิดลิงก์ด้านล่างเพื่อตั้งรหัสผ่านใหม่หรือสร้างพาสคีย์ใหม่:"
+
+msgid "If you did not ask for this, you can ignore this e-mail."
+msgstr "หากคุณไม่ได้ส่งคำขอนี้ โปรดเพิกเฉยต่ออีเมลนี้"
+
+msgid "A new passkey named \"%(passkey_name)s\" was added to your E-Tipitaka account."
+msgstr "มีการเพิ่มพาสคีย์ชื่อ \"%(passkey_name)s\" ในบัญชี E-Tipitaka ของคุณ"
+
+msgid "You can review your passkeys here:"
+msgstr "คุณตรวจสอบพาสคีย์ของคุณได้ที่:"
+
+msgid "If this was not you, recover your account now and remove the passkey:"
+msgstr "หากไม่ใช่คุณ โปรดกู้คืนบัญชีทันทีและลบพาสคีย์นั้น:"
