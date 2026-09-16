@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 from django.test import Client
@@ -33,11 +34,28 @@ def test_web_login_starts_session_and_honours_next(client, alice, authenticator)
     {'a': 1}, [1, 2],
     '\n//evil.example/',      # leading control char before a scheme-relative bypass
     '\x00//evil.example/',    # NUL used the same way
+    # Same bypass, but with the tab/CR/LF *not* at the very start: a leading
+    # '/' hides it from url_has_allowed_host_and_scheme's own
+    # startswith('///') guard, which runs before that function's urlsplit()
+    # strips these characters (at any position) the same way a real browser
+    # does -- '/\r\n//evil.example' reads as one safe leading slash to the
+    # guard, but a browser deletes the \r\n first and navigates to
+    # //evil.example (off-host). See _safe_redirect_target's own docstring.
+    '/\r\n//evil.example', '/\t//evil.example', '//\t/evil.example',
 ])
 def test_web_login_unsafe_next_falls_back_to_root(client, alice, authenticator, next_url):
     add_passkey(alice, authenticator)
     body = dict(_assertion(client, authenticator), next=next_url)
     assert _post_json(client, '/login/passkey/', body).json() == {'redirect': '/'}
+
+
+@pytest.mark.parametrize('next_url', [
+    '/o/authorize/?client_id=x', '/a/b?c=d#e', 'http://testserver/x',
+])
+def test_web_login_safe_next_still_works(client, alice, authenticator, next_url):
+    add_passkey(alice, authenticator)
+    body = dict(_assertion(client, authenticator), next=next_url)
+    assert _post_json(client, '/login/passkey/', body).json() == {'redirect': next_url}
 
 
 def test_web_login_rejects_bad_assertion(client, alice, authenticator):
@@ -151,3 +169,61 @@ def test_web_login_huge_body_is_400_not_500(client):
     resp = client.post('/login/passkey/', huge, content_type='application/json')
     assert resp.status_code == 400
     assert '_auth_user_id' not in client.session
+
+
+def test_web_login_recursion_is_logged_as_a_warning(client, caplog):
+    # Scoped to this module's own logger: Django's request logging already
+    # emits an unrelated WARNING for every 400 response ("Bad Request: ..."),
+    # which a plain caplog.at_level(WARNING) would also pick up and make this
+    # assertion pass regardless of whether json_body() logs anything at all.
+    with caplog.at_level(logging.WARNING, logger='user_data.passkey_web_views'):
+        resp = client.post('/login/passkey/', _nested_body(20000), content_type='application/json')
+    assert resp.status_code == 400
+    assert any(record.name == 'user_data.passkey_web_views' and record.levelno >= logging.WARNING
+              for record in caplog.records)
+
+
+def test_web_login_success_sets_cache_control_no_store(client, alice, authenticator):
+    # The 200 response sets a session cookie -- it must never be cached.
+    add_passkey(alice, authenticator)
+    resp = _post_json(client, '/login/passkey/', _assertion(client, authenticator))
+    assert resp.status_code == 200
+    assert resp.headers.get('Cache-Control') == 'no-store'
+
+
+# --- multipart bodies must never turn CSRF validation itself into a 500 -----
+
+def test_web_login_multipart_body_with_valid_csrf_is_400_not_500(alice, authenticator):
+    """CsrfViewMiddleware._check_token() reads request.POST first (looking
+    for a form-field token) on *every* POST, even when the real token
+    arrives via the X-CSRFToken header -- and reading request.POST on a
+    multipart body consumes the input stream. json_body() then calling
+    request.body raises RawPostDataException, not a SuspiciousOperation, so
+    it would otherwise escape as an unhandled 500 -- reachable by any
+    anonymous caller on this unthrottled endpoint.
+    """
+    add_passkey(alice, authenticator)
+    csrf_client = Client(enforce_csrf_checks=True)
+    csrf_client.get('/login/')
+    token = csrf_client.cookies['csrftoken'].value
+    # A plain dict body (no content_type override) is multipart/form-data by
+    # default in the Django test client -- unlike every other test in this
+    # file, which posts JSON directly.
+    resp = csrf_client.post('/login/passkey/', {'challenge_id': 'x'}, HTTP_X_CSRFTOKEN=token)
+    assert resp.status_code == 400
+
+
+# --- @csrf_protect itself must be the thing enforcing CSRF, not just the ---
+# --- globally configured middleware -----------------------------------------
+
+def test_web_login_csrf_protect_decorator_enforces_without_middleware(settings):
+    """Remove CsrfViewMiddleware from MIDDLEWARE entirely -- @csrf_protect
+    enforces CSRF protection on its own, exactly like the middleware would,
+    so this must still 403. Without this test, deleting @csrf_protect from
+    the view would go unnoticed: the globally configured middleware would
+    keep giving a 403 in every other test in this file regardless.
+    """
+    settings.MIDDLEWARE = [m for m in settings.MIDDLEWARE if 'csrf' not in m.lower()]
+    csrf_client = Client(enforce_csrf_checks=True)
+    resp = _post_json(csrf_client, '/login/passkey/', {})
+    assert resp.status_code == 403

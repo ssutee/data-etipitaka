@@ -2,10 +2,12 @@ import json
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import RequestFactory
 
 from user_data.models import UserData, SyncData, Sharing
 from user_data.tests.conftest import make_syncdata, make_userdata
 from user_data.tests.test_oauth import DCR_BODY, _authz_params, _pkce
+from user_data.views import _safe_redirect_target
 
 pytestmark = pytest.mark.django_db
 
@@ -361,6 +363,41 @@ def test_login_view_post_without_next_redirects_root(api, alice):
     resp = api.post('/login/', {'username': 'alice', 'password': 'alicepass123'})
     assert resp.status_code == 302
     assert resp['Location'] == '/'
+
+
+@pytest.mark.parametrize('next_url', [
+    # A leading '/' hides the embedded tab/CR/LF from
+    # url_has_allowed_host_and_scheme's own startswith('///') guard, which
+    # runs before that function's urlsplit() strips these characters (at any
+    # position) the same way a real browser does -- see
+    # _safe_redirect_target's docstring. The password-login path shares that
+    # helper with /login/passkey/, so it inherits the same fix.
+    '/\r\n//evil.example', '/\t//evil.example', '//\t/evil.example',
+])
+def test_login_view_post_with_browser_parsed_offhost_next_falls_back_to_root(api, alice, next_url):
+    resp = api.post('/login/', {
+        'username': 'alice', 'password': 'alicepass123', 'next': next_url,
+    })
+    assert resp.status_code == 302
+    assert resp['Location'] == '/'
+
+
+# --- _safe_redirect_target: direct unit tests --------------------------------
+
+@pytest.mark.parametrize('next_url', [
+    '/\r\n//evil.example', '/\t//evil.example', '//\t/evil.example',
+])
+def test_safe_redirect_target_rejects_tab_cr_lf_bypass(next_url):
+    request = RequestFactory().post('/login/passkey/')
+    assert _safe_redirect_target(request, next_url) == '/'
+
+
+@pytest.mark.parametrize('next_url', [
+    '/o/authorize/?client_id=x', '/a/b?c=d#e', 'http://testserver/x',
+])
+def test_safe_redirect_target_still_allows_safe_targets(next_url):
+    request = RequestFactory().post('/login/passkey/')
+    assert _safe_redirect_target(request, next_url) == next_url
 
 
 def test_login_view_invalid_credentials_preserves_next(api, alice):

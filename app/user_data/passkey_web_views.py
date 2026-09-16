@@ -12,15 +12,18 @@ the only throttle in front of this view; see Task 23 for the
 `/login/passkey/`-specific zone.
 """
 import json
+import logging
 
 from django.contrib.auth import login
-from django.http import JsonResponse
+from django.http import JsonResponse, RawPostDataException, UnreadablePostError
 from django.utils.translation import gettext as _
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_POST
 
 from . import passkey_service as service
 from .views import _safe_redirect_target
+
+log = logging.getLogger(__name__)
 
 # Matches django.contrib.auth's own default AUTHENTICATION_BACKENDS (this
 # project sets none of its own in settings.py), pinned explicitly here so a
@@ -40,10 +43,32 @@ def json_body(request):
     EXCEPTION_HANDLER never runs for it. Without this, that RecursionError
     would propagate out of this view as an unhandled 500 instead of the
     clean 400 every other malformed body already gets here.
+
+    Also catches RawPostDataException/UnreadablePostError: @csrf_protect's
+    _check_token() reads request.POST first, looking for a
+    csrfmiddlewaretoken form field, on *every* POST -- even one whose real
+    token arrives via the X-CSRFToken header. Reading request.POST on a
+    multipart body consumes the input stream, so request.body here would
+    otherwise raise RawPostDataException (not a SuspiciousOperation, so
+    Django's own exception handling would not turn it into a clean 400 the
+    way it does for RequestDataTooBig) -- reachable by any anonymous caller
+    on this unthrottled endpoint.
     """
     try:
         data = json.loads(request.body or b'{}')
-    except (ValueError, UnicodeDecodeError, RecursionError):
+    except RecursionError:
+        # Matches drf_handlers.exception_handler's own reasoning: a
+        # pathologically deep body and a genuine runaway recursion in this
+        # project's own code would otherwise be indistinguishable once both
+        # collapse to the same clean 400 below -- log which one this was.
+        # Guarded because logging itself must never turn this already-
+        # exceptional path into a second, unhandled exception.
+        try:
+            log.warning('recursion limit hit while parsing the body of %s', request.path)
+        except Exception:
+            pass
+        return {}
+    except (ValueError, UnicodeDecodeError, RawPostDataException, UnreadablePostError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -62,4 +87,8 @@ def login_passkey(request):
                             status=400)
     login(request, user, backend=SESSION_BACKEND)
     next_url = data.get('next') if isinstance(data.get('next'), str) else ''
-    return JsonResponse({'redirect': _safe_redirect_target(request, next_url)})
+    response = JsonResponse({'redirect': _safe_redirect_target(request, next_url)})
+    # This response sets a session cookie -- it must never be cached and
+    # replayed back to a later, different visitor of a shared cache/browser.
+    response['Cache-Control'] = 'no-store'
+    return response

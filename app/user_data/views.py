@@ -218,6 +218,20 @@ def index_view(request):
         return HttpResponseRedirect('/user_data/')
     return render(request, 'index.html', {})
 
+# ASCII tab (0x09), LF (0x0A) and CR (0x0D): url_has_allowed_host_and_scheme's
+# own startswith('///') guard -- there specifically to reject a URL a browser
+# would treat as absolute despite Python's urlsplit calling it same-host --
+# runs against the RAW string, before urlsplit's *own* WHATWG-aligned
+# stripping of these three characters (at any position, not just the ends)
+# ever happens. So e.g. '/\r\n//evil.example' reads as one leading slash
+# (safe) to that guard, while stripping \r\n the same way urlsplit (and every
+# real browser) does first reveals the '///evil.example' the guard exists to
+# catch. Stripped here, before any check, so this function judges the string
+# exactly as whatever parses it next -- urlsplit or a browser -- actually
+# will.
+_URL_STRIPPED = {0x09: None, 0x0A: None, 0x0D: None}
+
+
 def _safe_redirect_target(request, next_url):
     """Validate `next` against the current host; unsafe or absent falls back to '/'.
 
@@ -225,6 +239,8 @@ def _safe_redirect_target(request, next_url):
     so it is deliberately strict: relative paths and same-host absolute URLs
     only, matching the request's own scheme requirement.
     """
+    if isinstance(next_url, str):
+        next_url = next_url.translate(_URL_STRIPPED)
     if next_url and url_has_allowed_host_and_scheme(
             next_url, allowed_hosts={request.get_host()},
             require_https=request.is_secure()):
