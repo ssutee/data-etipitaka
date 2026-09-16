@@ -105,3 +105,21 @@ def test_signup_page_fallback_link_does_not_navigate(client):
     tag_end = html.index('>', marker)
     tag = html[tag_start:tag_end]
     assert 'href="#"' in tag
+
+
+def test_security_page_requires_login(client):
+    resp = client.get('/account/security/')
+    assert resp.status_code == 302
+    assert resp['Location'] == '/login/?next=/account/security/'
+
+
+def test_security_page_renders(client, alice):
+    client.force_login(alice)
+    resp = client.get('/account/security/')
+    html = resp.content.decode()
+    assert resp.status_code == 200
+    assert 'id="passkey-rows"' in html
+    assert 'id="security" ng-non-bindable' in html
+    assert 'csrfmiddlewaretoken' in html
+    assert '/static/account_security.js' in html
+    assert 'csrftoken' in resp.cookies

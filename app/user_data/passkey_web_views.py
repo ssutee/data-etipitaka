@@ -15,9 +15,11 @@ import json
 import logging
 
 from django.contrib.auth import login
+from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, RawPostDataException, UnreadablePostError
+from django.shortcuts import render
 from django.utils.translation import gettext as _
-from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 from . import passkey_service as service
@@ -92,3 +94,9 @@ def login_passkey(request):
     # replayed back to a later, different visitor of a shared cache/browser.
     response['Cache-Control'] = 'no-store'
     return response
+
+
+@login_required
+@ensure_csrf_cookie
+def account_security(request):
+    return render(request, 'account_security.html', {})

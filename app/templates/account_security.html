@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+
+{% load static i18n %}
+
+{% block title %}{% trans "Sign-in and security" %}{% endblock %}
+
+{% block body %}
+{# ng-non-bindable: passkey names are user-controlled and inserted by account_security.js. #}
+<div class="container" id="security" ng-non-bindable
+     data-never="{% trans 'Never' %}"
+     data-synced="{% trans 'Synced' %}"
+     data-device-bound="{% trans 'This device only' %}"
+     data-rename="{% trans 'Rename' %}"
+     data-remove="{% trans 'Delete' %}"
+     data-rename-prompt="{% trans 'New name for this passkey' %}"
+     data-has-password="{% trans 'Your account has a password.' %}"
+     data-no-password="{% trans 'Your account has no password. You sign in with a passkey.' %}">
+  {% csrf_token %}
+  <h1>{% trans "Sign-in and security" %}</h1>
+  <p class="label label-warning" id="passkey-unsupported" hidden>{% trans "This browser does not support passkeys." %}</p>
+
+  <h3>{% trans "Passkeys" %}</h3>
+  <table class="table table-striped">
+    <thead>
+      <tr>
+        <th>{% trans "Name" %}</th>
+        <th>{% trans "Type" %}</th>
+        <th>{% trans "Created" %}</th>
+        <th>{% trans "Last used" %}</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="passkey-rows"></tbody>
+  </table>
+  <p id="passkey-empty" hidden>{% trans "You have no passkeys yet." %}</p>
+  <div id="add-passkey" class="form-inline" hidden>
+    <span id="step-up-password" hidden>
+      <label for="step-up-password-input">{% trans "Current password" %}</label>
+      <input type="password" id="step-up-password-input" class="form-control" autocomplete="current-password">
+    </span>
+    <button type="button" class="btn btn-primary" id="add-passkey-button">{% trans "Add a passkey" %}</button>
+  </div>
+
+  <h3>{% trans "Password" %}</h3>
+  <p id="password-status"></p>
+  <div id="remove-password" class="form-inline" hidden>
+    <label for="remove-password-input">{% trans "Current password" %}</label>
+    <input type="password" id="remove-password-input" class="form-control" autocomplete="current-password">
+    <button type="button" class="btn btn-danger" id="remove-password-button">{% trans "Remove password" %}</button>
+  </div>
+
+  <p class="error-msg" id="security-error"></p>
+</div>
+{% endblock %}
+
+{% block script %}
+<script src="{% static 'passkey.js' %}"></script>
+<script src="{% static 'account_security.js' %}"></script>
+{% endblock %}
