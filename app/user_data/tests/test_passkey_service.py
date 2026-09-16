@@ -102,6 +102,17 @@ def test_finish_register_bumps_passkey_epoch(alice, authenticator):
     assert PasskeyEpoch.objects.get(user=alice).value == 2
 
 
+@pytest.mark.django_db(transaction=True)
+def test_bump_passkey_epoch_requires_an_atomic_block(alice):
+    """Mirrors account_tokens.test_lock_user_tokens_requires_an_atomic_block:
+    transaction=True (no wrapping atomic() of its own, unlike the plain
+    `db` fixture) is what lets this test actually observe the guard,
+    rather than always passing because pytest-django's own test-isolation
+    transaction is open."""
+    with pytest.raises(RuntimeError):
+        service.bump_passkey_epoch(alice)
+
+
 def test_default_name_comes_from_aaguid(alice):
     assert _register(alice, SoftAuthenticator(aaguid=APPLE_AAGUID)).name == 'Apple Passwords'
 

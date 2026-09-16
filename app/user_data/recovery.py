@@ -33,6 +33,15 @@ from django.db import OperationalError
 
 from .account_tokens import revoke_all_tokens
 from .models import PasskeyEpoch
+# Reused directly from passkey_service (also private there, and also
+# undocumented as a public API) rather than re-implemented here: same
+# SQLSTATE set, same attempt cap. Keeping one definition means a future
+# change to which Postgres error codes count as transient -- or to how
+# many attempts are worth making -- only has to happen in one place;
+# _revoke_tokens_after_reset below keeps only what's genuinely different
+# about this call site (swallowing a persistent failure instead of
+# raising it) local.
+from .passkey_service import _MAX_RECOVERY_ATTEMPTS, _is_retryable_db_error
 
 log = logging.getLogger(__name__)
 UserModel = get_user_model()
@@ -71,6 +80,18 @@ class AccountRecoveryTokenGenerator(PasswordResetTokenGenerator):
         # is what test_token_invalidated_by_new_passkey and
         # test_token_stays_dead_after_passkey_deleted pin against), so this
         # must re-query every time rather than trust any instance cache.
+        #
+        # This only fixes the epoch half of the hash, not the whole thing:
+        # the super() call below still reads password/last_login/email off
+        # this same in-memory `user` instance, with no equivalent
+        # re-fetch, so those three are just as susceptible to the same
+        # stale-instance hazard in principle. That is harmless in
+        # practice, not by design here -- every real caller (make_token in
+        # PasswordResetForm.save, check_token in
+        # AccountRecoveryConfirmView.get_user's super() call) loads a
+        # fresh row right before touching the token generator, so no
+        # caller of this class ever actually holds a `user` object across
+        # one of those three fields changing.
         epoch = PasskeyEpoch.objects.filter(user=user).values_list('value', flat=True).first()
         return ':'.join([super()._make_hash_value(user, timestamp),
                          '' if epoch is None else str(epoch)])
@@ -109,22 +130,12 @@ password_reset_view = PasswordResetView.as_view(
     email_template_name='registration/password_reset_email.txt')
 
 
-# Retryable Postgres error codes and cap, mirroring
-# passkey_service._is_retryable_db_error / _MAX_RECOVERY_ATTEMPTS exactly --
-# see that module for why only these two (deadlock_detected,
-# serialization_failure) count as transient rather than an application bug.
-_RETRYABLE_SQLSTATES = {'40P01', '40001'}
-_MAX_REVOKE_ATTEMPTS = 5
-
-
-def _is_retryable_db_error(exc):
-    return getattr(exc.__cause__, 'sqlstate', None) in _RETRYABLE_SQLSTATES
-
-
 def _revoke_tokens_after_reset(user):
     """Best-effort: revoke every API token for `user`, retrying a transient
-    Postgres deadlock or serialization failure, but never letting a
-    persistent failure propagate as a 500.
+    Postgres deadlock or serialization failure (using passkey_service's own
+    _is_retryable_db_error / _MAX_RECOVERY_ATTEMPTS -- see that module for
+    why only deadlock_detected and serialization_failure count as
+    transient), but never letting a persistent failure propagate as a 500.
 
     Unlike passkey_service.finish_recover's transaction A -- which can
     still fail loudly, because nothing has committed yet at that point --
@@ -136,14 +147,17 @@ def _revoke_tokens_after_reset(user):
     little longer than intended. So a retryable error gets the same
     jittered-backoff retry passkey_service._run_with_retry uses, and
     whatever survives that -- retries exhausted, or a non-retryable error
-    -- is logged with log.exception and swallowed instead of raised.
+    -- is logged with log.exception and swallowed instead of raised. That
+    swallow-vs-raise choice is the one genuine difference from
+    _run_with_retry; everything about *which* errors are worth a retry is
+    shared with it, not duplicated.
     """
-    for attempt in range(1, _MAX_REVOKE_ATTEMPTS + 1):
+    for attempt in range(1, _MAX_RECOVERY_ATTEMPTS + 1):
         try:
             revoke_all_tokens(user)
             return
         except OperationalError as exc:
-            if attempt < _MAX_REVOKE_ATTEMPTS and _is_retryable_db_error(exc):
+            if attempt < _MAX_RECOVERY_ATTEMPTS and _is_retryable_db_error(exc):
                 log.warning('password-reset token revocation retrying after a '
                            'deadlock/serialization failure for user %s (attempt %d)',
                            user.pk, attempt)

@@ -17,6 +17,7 @@ from user_data import recovery
 from user_data.recovery import recovery_token_generator
 
 from .conftest import add_passkey, make_oauth_token
+from .soft_authenticator import SoftAuthenticator
 
 pytestmark = pytest.mark.django_db
 
@@ -207,6 +208,26 @@ def test_token_stays_dead_after_passkey_deleted(alice, authenticator):
     assert not recovery_token_generator.check_token(alice, token)
 
 
+def test_token_dies_when_a_passkey_is_removed(alice, authenticator):
+    """test_token_stays_dead_after_passkey_deleted mints its token with
+    zero passkeys on the account, so its epoch goes None -> 1 -- that
+    proves monotonicity (the token does not come back once dead), but it
+    would pass just as well with the delete-side bump in
+    passkey_manage.delete_passkey removed entirely, since nothing there
+    ever asks the epoch to move a *second* time. This test starts from two
+    passkeys (epoch already at 2) and mints the token only then, so the
+    only thing that can kill it is the delete itself moving the epoch to
+    3 -- pinning bump_passkey_epoch's call from delete_passkey specifically,
+    not just the counter's monotonicity.
+    """
+    passkey_one = add_passkey(alice, authenticator)
+    add_passkey(alice, SoftAuthenticator())
+    token = recovery_token_generator.make_token(alice)
+    assert recovery_token_generator.check_token(alice, token)
+    manage.delete_passkey(alice, passkey_one.pk)
+    assert not recovery_token_generator.check_token(alice, token)
+
+
 # --- the confirm view must not work for a deactivated user ---------------
 
 
@@ -273,7 +294,7 @@ def test_token_revocation_gives_up_after_max_deadlock_retries(client, alice, mon
     """Exhausting every retry on a persistent deadlock must also log and
     swallow, not propagate -- the same "the reset already succeeded"
     reasoning as any other persistent revocation failure, just reached via
-    the retry path (attempt == _MAX_REVOKE_ATTEMPTS) instead of a
+    the retry path (attempt == _MAX_RECOVERY_ATTEMPTS) instead of a
     first-attempt non-retryable error.
     """
     make_oauth_token(alice)
@@ -294,7 +315,7 @@ def test_token_revocation_gives_up_after_max_deadlock_retries(client, alice, mon
     assert resp.status_code == 302
     # the primary revoke's full retry budget, then one more attempt from
     # the post-commit sweep (which is not itself retried).
-    assert calls['n'] == recovery._MAX_REVOKE_ATTEMPTS + 1
+    assert calls['n'] == recovery._MAX_RECOVERY_ATTEMPTS + 1
     alice.refresh_from_db()
     assert alice.check_password('N3w-pass-phrase!')
     assert any(record.name == 'user_data.recovery' and record.levelname == 'ERROR'

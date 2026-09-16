@@ -17,7 +17,7 @@ import unicodedata
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.models import F
 from django.db.models.functions import Greatest
 from django.template.loader import render_to_string
@@ -320,7 +320,23 @@ def bump_passkey_epoch(user):
     one, so a plain get-or-create-then-F-increment can never race here,
     with no extra locking of the PasskeyEpoch row itself needed. Do not
     call this without that lock already held.
+
+    The atomic-block half of that precondition is enforced, not just
+    documented: mirrors account_tokens.lock_user_tokens's own RuntimeError
+    guard, and for the same reason -- a caller that got this far without
+    ever opening transaction.atomic() cannot possibly be holding the user
+    row's FOR UPDATE lock either (that lock only exists inside one), so
+    failing loudly here is strictly better than silently racing. This
+    cannot by itself prove the *lock* is held (only that some atomic block
+    is open), but every real caller takes the lock as the first statement
+    of that same block, so an out-of-band call -- the one mistake this
+    guard can actually catch -- has no way to slip through unnoticed.
     """
+    if not connection.in_atomic_block:
+        raise RuntimeError(
+            'bump_passkey_epoch() must run inside transaction.atomic(), with the '
+            'user row already locked FOR UPDATE in that same block -- see this '
+            'function\'s own docstring for why an unlocked call can race.')
     PasskeyEpoch.objects.get_or_create(user=user)
     PasskeyEpoch.objects.filter(user=user).update(value=F('value') + 1)
 
