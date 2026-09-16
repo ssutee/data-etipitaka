@@ -310,7 +310,12 @@ def recover_passkey_begin(request):
     # it is deliberately never caught -- see recover_passkey_finish's own
     # comment on the same point for why.
     challenge_id, options = service.begin_recover(user)
-    return JsonResponse({'challenge_id': challenge_id, 'options': options})
+    response = JsonResponse({'challenge_id': challenge_id, 'options': options})
+    # The body carries the challenge, the user's stable passkey handle and
+    # every existing credential's descriptor -- never let a shared cache or
+    # browser replay it to a later, different visitor.
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 @require_POST
@@ -336,7 +341,24 @@ def recover_passkey_finish(request):
     # `data` (the request body), which an anonymous caller fully controls
     # -- a client-supplied value there could name an arbitrary session and
     # shield it from revocation. See
-    # test_passkey_recovery_ignores_client_supplied_keep_session_key.
+    # test_passkey_recovery_ignores_client_supplied_keep_session_key, and
+    # test_passkey_recovery_keeps_own_session_but_signs_out_other_browser
+    # for the fixation defence itself (the session key must differ before
+    # vs after) -- deleting this single call breaks neither of those tests
+    # on its own, so both are needed to keep it from regressing unnoticed.
+    #
+    # cycle_key() itself is not transactional with the rest of this view:
+    # its create()/delete() already committed by the time it returns. If
+    # finish_recover then raises (OperationalError, ImproperlyConfigured,
+    # ...), the resulting 500 makes Django's SessionMiddleware skip saving
+    # the session and skip re-cookieing the client entirely ("Skip session
+    # save for 5xx responses") -- so THIS browser is left holding a cookie
+    # for the row cycle_key() already deleted. That is harmless, not a
+    # lockout: the emailed link itself was never touched (the epoch bump
+    # that spends it only happens inside a successful _store_passkey), so
+    # the user simply clicks the same email link again, which mints a
+    # fresh session with the still-valid token. See
+    # test_recover_passkey_finish_does_not_swallow_operational_error.
     request.session.cycle_key()
     try:
         # finish_recover can also raise a bare OperationalError, once its
@@ -361,4 +383,11 @@ def recover_passkey_finish(request):
         return JsonResponse({'detail': _('Passkey registration failed.')}, status=400)
     request.session.pop(INTERNAL_RESET_SESSION_TOKEN, None)
     login(request, user, backend=SESSION_BACKEND)
-    return JsonResponse({'redirect': '/account/security/'})
+    response = JsonResponse({'redirect': '/account/security/'})
+    # This response sets a session cookie for a full account takeover
+    # reached by nothing more than possessing the reset email -- it must
+    # never be cached and replayed back to a later, different visitor of a
+    # shared cache/browser. Mirrors login_passkey's own no-store header
+    # (passkey_web_views.py).
+    response['Cache-Control'] = 'no-store'
+    return response

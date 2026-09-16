@@ -429,6 +429,10 @@ def test_passkey_recovery_signs_in_and_revokes_tokens(client, alice, authenticat
     assert resp.status_code == 200
     assert resp.json() == {'redirect': '/account/security/'}
     assert client.session['_auth_user_id'] == str(alice.pk)
+    # The reset-flow session token must not survive a completed recovery --
+    # removing the pop() currently breaks nothing else (the epoch bump
+    # already kills the token itself), so this needs its own pin.
+    assert recovery.INTERNAL_RESET_SESSION_TOKEN not in client.session
     assert alice.passkeys.count() == 1
     assert not Token.objects.filter(user=alice).exists()
     assert not AccessToken.objects.filter(user=alice).exists()
@@ -600,6 +604,15 @@ def test_passkey_recovery_keeps_own_session_but_signs_out_other_browser(client, 
     account before completing recovery through it: it must still get a 200
     and stay signed in, while a second, unrelated browser session for the
     same user is revoked exactly as before.
+
+    Also pins that the recovering browser's OWN session key actually
+    changes -- request.session.cycle_key() is what defeats session
+    fixation here, the same reason login_passkey's own login() call cycles
+    it, and nothing else in this flow forces a new key (login() itself
+    only cycles when SESSION_KEY was *absent*, which is not this test's
+    case -- see recover_passkey_finish's own comment). Deleting that one
+    cycle_key() call leaves every other assertion in this file passing, so
+    without this the fixation defence would be free to regress silently.
     """
     other_key = _login_session(alice)
 
@@ -612,10 +625,12 @@ def test_passkey_recovery_keeps_own_session_but_signs_out_other_browser(client, 
     client.force_login(alice)  # the browser doing the recovery is already signed in
     _request_reset(client)
     uidb64, _url = _open_link(client)
+    before = client.session.session_key
     resp = _recover_with_passkey(client, uidb64, authenticator)
     assert resp.status_code == 200
     assert resp.json() == {'redirect': '/account/security/'}
     assert client.session['_auth_user_id'] == str(alice.pk)
+    assert client.session.session_key != before  # cycle_key() ran -- fixation defeated
     assert not SessionStore.get_model_class().objects.filter(session_key=other_key).exists()
 
 
@@ -734,3 +749,62 @@ def test_recover_passkey_finish_does_not_swallow_improperly_configured(alice, se
     settings.SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
     with pytest.raises(ImproperlyConfigured):
         recovery.recover_passkey_finish(request)
+
+
+# --- responses must never be cached: both set/rely on a session -------------
+
+
+def test_passkey_recovery_begin_sets_cache_control_no_store(client, alice):
+    """The begin response body carries the challenge, the user's stable
+    passkey handle, and every existing credential's descriptor -- exactly
+    the kind of response a shared cache/browser must never replay to a
+    later, different visitor. Mirrors login_passkey's own no-store header
+    (passkey_web_views.py), which reasons about the session cookie a login
+    response sets; this endpoint sets no cookie of its own, but the body
+    itself is just as sensitive.
+    """
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    resp = _begin_recovery(client, uidb64)
+    assert resp.status_code == 200
+    assert resp.headers.get('Cache-Control') == 'no-store'
+
+
+def test_passkey_recovery_finish_sets_cache_control_no_store(client, alice, authenticator):
+    """The finish response sets a session cookie for a full account
+    takeover reached by nothing more than possessing the reset email --
+    more sensitive than login_passkey's own response, which already earns
+    this header for the weaker case of an already-registered device
+    logging in.
+    """
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    resp = _recover_with_passkey(client, uidb64, authenticator)
+    assert resp.status_code == 200
+    assert resp.headers.get('Cache-Control') == 'no-store'
+
+
+# --- recovery must bypass the passkey cap: it is how you replace the -------
+# --- device that made the account unreachable in the first place -----------
+
+
+def test_passkey_recovery_bypasses_passkey_cap(client, alice, authenticator, monkeypatch):
+    """Complements test_recover_succeeds_at_the_cap (test_passkey_service.py,
+    which fills the account to the real default cap and drives
+    service.finish_recover directly). This one exercises the same property
+    through the actual HTTP endpoints, with the cap monkeypatched down to
+    1 so a future change to _store_passkey's own enforce_cap default would
+    trip this immediately -- at just one existing passkey -- rather than
+    needing 20 dummy rows to notice. Without this, a regression here would
+    lock out exactly the users recovery exists for: the ones who lost the
+    device holding their only passkey.
+    """
+    monkeypatch.setattr(recovery.service, 'PASSKEY_MAX_PER_USER', 1)
+    add_passkey(alice, SoftAuthenticator())  # fills the (lowered) cap exactly
+    assert alice.passkeys.count() == 1
+
+    _request_reset(client)
+    uidb64, _url = _open_link(client)
+    resp = _recover_with_passkey(client, uidb64, authenticator)
+    assert resp.status_code == 200
+    assert alice.passkeys.count() == 2
