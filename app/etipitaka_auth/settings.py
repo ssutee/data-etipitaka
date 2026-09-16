@@ -44,6 +44,19 @@ ALLOWED_HOSTS = ['data.etipitaka.com', '128.199.181.198', 'localhost', '127.0.0.
 TRUST_PROXY_PROTO = os.environ.get('TRUST_PROXY_PROTO', '').strip().lower() in ('1', 'true', 'yes')
 if TRUST_PROXY_PROTO:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    # Once the proxy is confirmed to always set (never pass through a
+    # client-supplied) X-Forwarded-Proto -- the precondition TRUST_PROXY_PROTO
+    # itself gates on -- request.is_secure() is trustworthy, so it is also
+    # safe to mark the session and CSRF cookies HTTPS-only and stop sending
+    # them in the clear. It also makes the password-reset email link go out
+    # as https://: PasswordResetView.form_valid passes
+    # use_https=self.request.is_secure() to the form, so recovery.py's reset
+    # link inherits this the same way. Off by default (bundled into this
+    # same switch, not a separate env var) so the local http-only compose
+    # stack keeps working: turned on over plain http, the browser would
+    # never send these cookies back and login/CSRF would silently break.
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 
 # Application definition
@@ -80,6 +93,31 @@ REST_FRAMEWORK = {
         'login': '10/min',
         'passkey': '20/min',
     },
+    # nginx (nginx.conf) always appends the real client address as the LAST
+    # entry of X-Forwarded-For via $proxy_add_x_forwarded_for -- it never
+    # merely passes a client-supplied value through -- so DRF's throttle
+    # should key on that last entry, not the whole header. Without this,
+    # SimpleRateThrottle.get_ident falls back to using the entire raw
+    # X-Forwarded-For string as the cache-key ident (api_settings.NUM_PROXIES
+    # is None by default), and since a client can set that header to
+    # anything on its *own* request, it can pick a fresh, never-seen ident on
+    # every request and dodge the bucket entirely -- making every IP-keyed
+    # DRF throttle in this project (LoginRateThrottle, PasskeyRateThrottle)
+    # useless. NUM_PROXIES: 1 makes get_ident() take addrs[-1] instead: see
+    # test_num_proxies_pins_ident_to_real_client_despite_spoofed_forwarded_for
+    # in user_data/tests/test_passkey_views.py. This is 1 regardless of how
+    # many real network hops sit in front of this container (in production a
+    # host-level TLS terminator also sits ahead of nginx/ -- see
+    # docs/remote-mcp-oauth-deploy.md): that host proxy is required to
+    # *overwrite* X-Forwarded-For with just the client's address rather than
+    # append to it, and this container's own nginx then resolves the real
+    # peer through set_real_ip_from/real_ip_recursive before appending it via
+    # $proxy_add_x_forwarded_for -- so the entry this container's nginx adds
+    # is always the last one and always correct, no matter what a client (or
+    # an untrusted earlier hop) put in front of it. NUM_PROXIES only needs to
+    # change if this container's nginx stops being the sole thing appending
+    # the header value Django ultimately trusts.
+    'NUM_PROXIES': 1,
     # Maps a RecursionError from parsing a pathologically deep JSON body
     # (json.loads has no nesting-depth limit of its own) to a clean 400
     # instead of an unhandled 500; delegates every other exception to DRF's

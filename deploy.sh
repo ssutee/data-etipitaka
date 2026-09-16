@@ -15,6 +15,18 @@ else
 fi
 echo "[deploy] using: $DC"
 
+# Build the nginx image and validate its config before rolling it out --
+# `up -d --build` below would otherwise recreate the currently-running
+# nginx container straight from a possibly-broken config and take the site
+# down.
+$DC build nginx
+if $DC run --rm --no-deps nginx nginx -t; then
+    echo "[deploy] nginx config check passed"
+else
+    echo "[deploy] nginx config check FAILED" >&2
+    exit 1
+fi
+
 $DC up -d --build
 $DC run --rm web python manage.py migrate --noinput
 $DC run --rm web python manage.py collectstatic --noinput
@@ -24,6 +36,12 @@ if curl -fsS -o /dev/null http://localhost:1338/; then
     echo "[deploy] health check passed"
 else
     echo "[deploy] health check FAILED" >&2
+    exit 1
+fi
+if curl -fsS http://localhost:1338/.well-known/apple-app-site-association | grep -q '"webcredentials"'; then
+    echo "[deploy] passkey association check passed"
+else
+    echo "[deploy] passkey association check FAILED" >&2
     exit 1
 fi
 echo "[deploy] done"

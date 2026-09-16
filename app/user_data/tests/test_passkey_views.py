@@ -1,10 +1,11 @@
 import logging
 
 import pytest
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
-from django.test import Client
+from django.test import Client, override_settings
 from django.utils import translation
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.authtoken.models import Token
@@ -329,6 +330,50 @@ def test_passkey_endpoints_are_throttled(api, monkeypatch):
     finally:
         cache.clear()
     assert codes == [200, 200, 429]
+
+
+def _spoofed(client, xff):
+    return client.post('/api/passkeys/login/begin/', {}, format='json',
+                       HTTP_X_FORWARDED_FOR=xff)
+
+
+def test_num_proxies_pins_ident_to_real_client_despite_spoofed_forwarded_for(api, monkeypatch):
+    """settings.py sets REST_FRAMEWORK['NUM_PROXIES'] = 1 because nginx.conf's
+    $proxy_add_x_forwarded_for always appends the real client address as the
+    LAST X-Forwarded-For entry (see that setting's comment) -- so two
+    requests that share a real client but spoof different *leading* entries
+    must still land in the same throttle bucket.
+    """
+    assert settings.REST_FRAMEWORK['NUM_PROXIES'] == 1
+    cache.clear()
+    monkeypatch.setattr(PasskeyRateThrottle, 'rate', '1/min')
+    try:
+        first = _spoofed(api, '203.0.113.5, 10.0.0.5')
+        second = _spoofed(api, '198.51.100.9, 10.0.0.5')
+    finally:
+        cache.clear()
+    assert (first.status_code, second.status_code) == (200, 429)
+
+
+def test_forwarded_for_bypasses_throttle_without_num_proxies(api, monkeypatch):
+    """The bug NUM_PROXIES: 1 fixes, pinned so it cannot silently come back:
+    with NUM_PROXIES unset (DRF's own default), get_ident() uses the whole
+    raw X-Forwarded-For string as the cache-key ident, so a caller can dodge
+    the bucket by varying that header on its own request -- even though, as
+    the previous test shows, the real client (the trailing entry nginx
+    appends) never changed between the two requests.
+    """
+    cache.clear()
+    monkeypatch.setattr(PasskeyRateThrottle, 'rate', '1/min')
+    rf_without_num_proxies = {k: v for k, v in settings.REST_FRAMEWORK.items()
+                              if k != 'NUM_PROXIES'}
+    try:
+        with override_settings(REST_FRAMEWORK=rf_without_num_proxies):
+            first = _spoofed(api, '203.0.113.5, 10.0.0.5')
+            second = _spoofed(api, '198.51.100.9, 10.0.0.5')
+    finally:
+        cache.clear()
+    assert (first.status_code, second.status_code) == (200, 200)
 
 
 # --- account endpoints ------------------------------------------------------
