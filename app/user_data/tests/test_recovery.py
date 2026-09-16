@@ -860,3 +860,37 @@ def test_confirm_page_hides_passkey_box_and_keeps_password_form(client, alice):
     assert 'name="new_password1"' in html
     assert 'name="new_password2"' in html
     assert '<form class="form-horizontal" method="post" action="">' in html
+
+
+def test_confirm_page_escapes_username_and_keeps_it_non_bindable(client):
+    """Task 21 review: the username shown next to the passkey-recovery
+    button is safe today only because two things stay true together --
+    ng-non-bindable on its container, and nothing between here and the
+    template ever turning autoescaping off -- with nothing pinning that
+    pair. Reaches a payload a normal signup could never submit by writing
+    directly via the ORM: create_user() never calls full_clean(), so
+    UnicodeUsernameValidator (which SignupSerializer/AccountIdentitySerializer
+    enforce) never runs on this write. Mirrors
+    test_passkey_name_xss_payload_survives_clean_name_unescaped's own
+    technique in test_passkey_pages.py of exercising the render path in
+    isolation from what a real request could ever submit.
+    """
+    payload = 'ev<il<[7*7]>'
+    user = recovery.UserModel.objects.create_user(payload, 'evil@example.com', 'password123!')
+    _request_reset(client, email=user.email)
+    _uidb64, set_password_url = _open_link(client)
+    html = client.get(set_password_url).content.decode()
+
+    escaped = 'ev&lt;il&lt;[7*7]&gt;'
+    assert payload not in html  # the raw '<' must never reach the body unescaped
+    assert escaped in html
+    assert '49' not in html  # '{{ 7*7 }}' must never be evaluated
+
+    box_start = html.index('id="passkey-recover"')
+    box_open_start = html.rindex('<div', 0, box_start)
+    box_open_end = html.index('>', box_start)
+    open_tag = html[box_open_start:box_open_end]
+    assert 'ng-non-bindable' in open_tag
+    username_pos = html.index(escaped, box_open_end)
+    box_close_pos = html.index('</div>', box_open_end)
+    assert box_open_end < username_pos < box_close_pos  # inside the ng-non-bindable box

@@ -46,6 +46,14 @@
     if (data && typeof data === 'object' && (data.email || data.username)) {
       if (data.email && data.email.length) { emailErrorEl.textContent = String(data.email[0]); }
       if (data.username && data.username.length) { usernameErrorEl.textContent = String(data.username[0]); }
+      // Not reachable today (the server never emits an empty field-error
+      // array), but data.email/data.username are truthy on an empty array
+      // too -- so a hypothetical {'username': []} would take this branch
+      // and, without this fallback, leave both spans blank and the user
+      // with no error message at all instead of the generic one.
+      if (!emailErrorEl.textContent && !usernameErrorEl.textContent) {
+        errorEl.textContent = P.errorMessage(err);
+      }
       return;
     }
     errorEl.textContent = P.errorMessage(err);
