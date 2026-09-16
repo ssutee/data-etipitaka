@@ -454,6 +454,23 @@ def test_login_form_omits_hidden_next_field_when_absent(api):
     assert 'name="next"' not in _login_form_html(resp)
 
 
+def test_login_page_has_two_next_inputs_navbar_and_login_form(api):
+    # base.html's language-switcher form always renders its own hidden
+    # `next` field (holding request.path); the login form (`#signup`) has a
+    # second, conditional one holding the real redirect target and comes
+    # later in the DOM. passkey_login.js (Task 18) must scope its lookup to
+    # `#signup input[name=next]` rather than the first `input[name=next]` on
+    # the page, or it would post the wrong value. This guards the invariant
+    # that assumption relies on.
+    resp = api.get('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc')
+    content = resp.content.decode()
+    assert content.count('name="next"') == 2
+    navbar_html = content[:content.index('id="signup"')]
+    assert 'value="/login/"' in navbar_html
+    form_html = _login_form_html(resp)
+    assert 'value="/o/authorize/?client_id=abc"' in form_html
+
+
 def test_login_form_never_interpolates_next_value(api):
     # base.html boots AngularJS with <[ ]> delimiters; a `next` value is
     # reflected verbatim into the hidden field and must never be evaluated

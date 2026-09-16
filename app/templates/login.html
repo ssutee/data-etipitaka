@@ -11,3 +11,8 @@
     {% include "forms/login_form.html" %}
 </div>
 {% endblock %}
+
+{% block script %}
+<script src="{% static 'passkey.js' %}"></script>
+<script src="{% static 'passkey_login.js' %}"></script>
+{% endblock %}

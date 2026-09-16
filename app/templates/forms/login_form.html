@@ -1,5 +1,12 @@
 {% load i18n %}
 <div>
+{# ng-non-bindable: error text is inserted by passkey_login.js; AngularJS must never interpolate it. #}
+<div id="passkey-login" class="form-group row" hidden ng-non-bindable>
+  <div class="col-sm-offset-2 col-sm-6">
+    <button type="button" class="btn btn-primary" id="passkey-login-button">{% trans "Sign in with a passkey" %}</button>
+    <br/><span class="error-msg" id="passkey-login-error"></span>
+  </div>
+</div>
 <form class="form-horizontal" id="signup" role="form" method="post" action="/login/">{% csrf_token %}
   {% if next %}
   {# ng-non-bindable: base.html boots AngularJS; client-supplied text must never be interpolated. #}
@@ -16,14 +23,14 @@
   <div class="form-group row">
     <label for="username" class="col-sm-2 control-label">{% trans "Username" %}</label>
     <div class="col-sm-6">
-      <input required name="username" type="text" class="form-control" id="username" placeholder="{% trans 'Username' %}">
+      <input required name="username" type="text" class="form-control" id="username" placeholder="{% trans 'Username' %}" autocomplete="username webauthn">
     </div>
   </div>
 
   <div class="form-group row">
     <label for="password1" class="col-sm-2 control-label">{% trans "Password" %}</label>
     <div class="col-sm-6">
-      <input required name="password" type="password" class="form-control" id="password" placeholder="{% trans 'Password' %}">
+      <input required name="password" type="password" class="form-control" id="password" placeholder="{% trans 'Password' %}" autocomplete="current-password">
     </div>
   </div>
 
