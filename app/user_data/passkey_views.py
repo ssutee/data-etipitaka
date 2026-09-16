@@ -13,14 +13,18 @@ crafted request can only ever reach a 400, never a 500.
 """
 import logging
 
+from django.contrib.auth import update_session_auth_hash
 from django.utils.translation import gettext as _
 from rest_framework import status
+from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import (api_view, authentication_classes,
                                        permission_classes, throttle_classes)
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
+from . import passkey_manage as manage
 from . import passkey_service as service
 from .auth_views import _send_verification_email
 
@@ -37,6 +41,12 @@ class PasskeyRateThrottle(UserRateThrottle):
     """
     scope = 'passkey'
     rate = None
+
+
+# Account endpoints accept DRF Token and Session authentication only -- never
+# OAuth bearer tokens, so a read-scoped MCP connector cannot manage a user's
+# credentials (see the module docstring).
+ACCOUNT_AUTHENTICATION = [TokenAuthentication, SessionAuthentication]
 
 
 def _body(request):
@@ -129,3 +139,113 @@ def signup_finish(request):
         log.exception('failed to send verification email to user %s after passkey signup',
                       user.pk)
     return Response({'detail': _('Verification e-mail sent.')}, status=status.HTTP_201_CREATED)
+
+
+# --- account endpoints: signed-in callers only (Token or Session auth) -----
+
+
+def _lockout():
+    return Response({'detail': _('Your account must keep at least one way to sign in.')},
+                    status=status.HTTP_409_CONFLICT)
+
+
+def _too_many_passkeys():
+    return Response({'detail': _('You have reached the maximum number of passkeys.')},
+                    status=status.HTTP_409_CONFLICT)
+
+
+@api_view(['POST'])
+@authentication_classes(ACCOUNT_AUTHENTICATION)
+@permission_classes([IsAuthenticated])
+@throttle_classes([PasskeyRateThrottle])
+def register_begin(request):
+    data = _body(request)
+    if data is None:
+        return _bad_request()
+    try:
+        service.verify_step_up(request.user, password=data.get('password'),
+                               assertion=data.get('step_up'))
+    except service.StepUpFailed:
+        return Response({'detail': _('Re-authentication failed.')},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        return _ceremony(*service.begin_register(request.user))
+    except service.TooManyPasskeys:
+        return _too_many_passkeys()
+
+
+@api_view(['POST'])
+@authentication_classes(ACCOUNT_AUTHENTICATION)
+@permission_classes([IsAuthenticated])
+@throttle_classes([PasskeyRateThrottle])
+def register_finish(request):
+    data = _body(request)
+    if data is None:
+        return _bad_request()
+    try:
+        passkey = service.finish_register(request.user, data.get('challenge_id'),
+                                          data.get('credential'), data.get('name'))
+    except service.TooManyPasskeys:
+        return _too_many_passkeys()
+    except service.RegistrationFailed:
+        return Response({'detail': _('Passkey registration failed.')},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return Response(manage.passkey_to_dict(passkey), status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@authentication_classes(ACCOUNT_AUTHENTICATION)
+@permission_classes([IsAuthenticated])
+@throttle_classes([PasskeyRateThrottle])
+def passkey_list(request):
+    if _body(request) is None:
+        return _bad_request()
+    return Response(manage.list_passkeys(request.user))
+
+
+@api_view(['PATCH', 'DELETE'])
+@authentication_classes(ACCOUNT_AUTHENTICATION)
+@permission_classes([IsAuthenticated])
+@throttle_classes([PasskeyRateThrottle])
+def passkey_detail(request, passkey_id):
+    data = _body(request)
+    if data is None:
+        return _bad_request()
+    try:
+        if request.method == 'DELETE':
+            manage.delete_passkey(request.user, passkey_id)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        passkey = manage.rename_passkey(request.user, passkey_id, data.get('name'))
+    except manage.NotFound:
+        return Response({'detail': _('Passkey not found.')}, status=status.HTTP_404_NOT_FOUND)
+    except manage.InvalidName:
+        return Response({'name': [_('Enter a name for this passkey.')]},
+                        status=status.HTTP_400_BAD_REQUEST)
+    except manage.LockoutGuard:
+        return _lockout()
+    return Response(manage.passkey_to_dict(passkey))
+
+
+@api_view(['POST'])
+@authentication_classes(ACCOUNT_AUTHENTICATION)
+@permission_classes([IsAuthenticated])
+@throttle_classes([PasskeyRateThrottle])
+def password_remove(request):
+    data = _body(request)
+    if data is None:
+        return _bad_request()
+    try:
+        user = manage.remove_password(request.user, data.get('password'))
+    except manage.LockoutGuard:
+        return _lockout()
+    except manage.WrongPassword:
+        return Response({'detail': _('Re-authentication failed.')},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if isinstance(request.successful_authenticator, SessionAuthentication):
+        # The session auth hash derives from the password hash; keep this
+        # browser signed in -- a Token-authenticated caller has no session
+        # to touch, and request.successful_authenticator (not e.g. checking
+        # for a session on the request, which a Token-authenticated request
+        # still has) is what tells the two apart.
+        update_session_auth_hash(request, user)
+    return Response({'has_password': False})

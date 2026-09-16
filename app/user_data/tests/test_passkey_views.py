@@ -4,14 +4,18 @@ import pytest
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
+from django.test import Client
 from django.utils import translation
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from user_data import passkey_views
+from user_data.models import Passkey
+from user_data.passkey_service import PASSKEY_MAX_PER_USER
 from user_data.passkey_views import PasskeyRateThrottle
 
 from .conftest import add_passkey, make_oauth_token
+from .soft_authenticator import SoftAuthenticator
 
 pytestmark = pytest.mark.django_db
 
@@ -323,3 +327,256 @@ def test_passkey_endpoints_are_throttled(api, monkeypatch):
     finally:
         cache.clear()
     assert codes == [200, 200, 429]
+
+
+# --- account endpoints ------------------------------------------------------
+
+def _register_via_api(client, authenticator, proof):
+    begin = _post(client, '/api/passkeys/register/begin/', proof)
+    assert begin.status_code == 200, begin.content
+    body = begin.json()
+    return _post(client, '/api/passkeys/register/finish/', {
+        'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options']), 'name': 'Phone'})
+
+
+def test_register_with_password_step_up(auth_alice, alice, authenticator):
+    resp = _register_via_api(auth_alice, authenticator, {'password': 'alicepass123'})
+    assert resp.status_code == 201
+    assert resp.json()['name'] == 'Phone'
+    assert alice.passkeys.count() == 1
+
+
+@pytest.mark.parametrize('proof', [{}, {'password': 'wrong'}, {'step_up': 'x'}])
+def test_register_rejects_missing_or_wrong_step_up(auth_alice, proof):
+    assert _post(auth_alice, '/api/passkeys/register/begin/', proof).status_code == 400
+
+
+def test_register_with_passkey_step_up(auth_alice, alice, authenticator):
+    add_passkey(alice, authenticator)
+    alice.set_unusable_password()
+    alice.save()
+    begin = _post(APIClient(), '/api/passkeys/login/begin/').json()
+    step_up = {'challenge_id': begin['challenge_id'],
+               'credential': authenticator.assert_(begin['options'])}
+    resp = _register_via_api(auth_alice, SoftAuthenticator(), {'step_up': step_up})
+    assert resp.status_code == 201
+    assert alice.passkeys.count() == 2
+
+
+def test_register_finish_bad_response(auth_alice, authenticator):
+    body = _post(auth_alice, '/api/passkeys/register/begin/',
+                 {'password': 'alicepass123'}).json()
+    resp = _post(auth_alice, '/api/passkeys/register/finish/', {
+        'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options'], uv=False)})
+    assert resp.status_code == 400
+
+
+ACCOUNT_ENDPOINTS = [
+    ('get', '/api/passkeys/'), ('post', '/api/passkeys/register/begin/'),
+    ('post', '/api/passkeys/register/finish/'), ('patch', '/api/passkeys/1/'),
+    ('delete', '/api/passkeys/1/'), ('post', '/api/passkeys/password/remove/')]
+
+
+@pytest.mark.parametrize('method,url', ACCOUNT_ENDPOINTS)
+def test_account_endpoints_reject_anonymous(method, url):
+    assert getattr(APIClient(), method)(url, {}, format='json').status_code == 401
+
+
+@pytest.mark.parametrize('method,url', ACCOUNT_ENDPOINTS)
+def test_account_endpoints_reject_oauth_bearer(oauth_alice, method, url):
+    assert getattr(oauth_alice, method)(url, {}, format='json').status_code == 401
+
+
+def test_session_auth_is_accepted(client, alice):
+    client.force_login(alice)
+    assert client.get('/api/passkeys/').status_code == 200
+
+
+def test_session_post_requires_csrf(alice):
+    csrf_client = Client(enforce_csrf_checks=True)
+    csrf_client.force_login(alice)
+    resp = csrf_client.post('/api/passkeys/register/begin/', {'password': 'alicepass123'},
+                            content_type='application/json')
+    assert resp.status_code == 403
+
+
+def test_list_rename_delete(auth_alice, alice, authenticator):
+    passkey = add_passkey(alice, authenticator)
+    url = '/api/passkeys/%d/' % passkey.pk
+    listing = auth_alice.get('/api/passkeys/').json()
+    assert listing['has_password'] is True
+    assert [p['id'] for p in listing['passkeys']] == [passkey.pk]
+    renamed = auth_alice.patch(url, {'name': 'Laptop'}, format='json')
+    assert renamed.status_code == 200 and renamed.json()['name'] == 'Laptop'
+    assert auth_alice.patch(url, {'name': ' '}, format='json').status_code == 400
+    assert auth_alice.delete(url).status_code == 204
+    assert auth_alice.delete(url).status_code == 404
+
+
+def test_other_users_passkey_is_404(auth_alice, bob, authenticator):
+    passkey = add_passkey(bob, authenticator)
+    assert auth_alice.delete('/api/passkeys/%d/' % passkey.pk).status_code == 404
+
+
+def test_remove_password_then_last_passkey_is_guarded(auth_alice, alice, authenticator):
+    passkey = add_passkey(alice, authenticator)
+    remove = '/api/passkeys/password/remove/'
+    assert _post(auth_alice, remove, {'password': 'wrong'}).status_code == 400
+    resp = _post(auth_alice, remove, {'password': 'alicepass123'})
+    assert resp.status_code == 200 and resp.json() == {'has_password': False}
+    assert auth_alice.delete('/api/passkeys/%d/' % passkey.pk).status_code == 409
+    assert _post(auth_alice, remove, {'password': 'alicepass123'}).status_code == 409
+
+
+def test_remove_password_keeps_session_signed_in(client, alice, authenticator):
+    add_passkey(alice, authenticator)
+    client.force_login(alice)
+    resp = client.post('/api/passkeys/password/remove/', {'password': 'alicepass123'},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert client.get('/api/passkeys/').status_code == 200
+
+
+def test_remove_password_via_token_does_not_touch_session(auth_alice, alice, authenticator,
+                                                           monkeypatch):
+    """`request.successful_authenticator` -- not e.g. `hasattr(request, 'session')`,
+    which a Token-authenticated request still has, just an anonymous one -- is
+    what must gate update_session_auth_hash: a token-authenticated removal
+    must never touch (or even look at) the caller's session.
+    """
+    add_passkey(alice, authenticator)
+    calls = []
+    monkeypatch.setattr(passkey_views, 'update_session_auth_hash',
+                        lambda request, user: calls.append(user))
+    resp = _post(auth_alice, '/api/passkeys/password/remove/', {'password': 'alicepass123'})
+    assert resp.status_code == 200
+    assert calls == []
+
+
+def test_remove_password_via_session_updates_session_auth_hash(client, alice, authenticator,
+                                                                monkeypatch):
+    add_passkey(alice, authenticator)
+    client.force_login(alice)
+    calls = []
+    monkeypatch.setattr(passkey_views, 'update_session_auth_hash',
+                        lambda request, user: calls.append(user))
+    resp = client.post('/api/passkeys/password/remove/', {'password': 'alicepass123'},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert calls == [alice]
+
+
+# --- passkey cap: TooManyPasskeys must be a 409, never a 500 ----------------
+
+def _fill_passkeys(user, count=PASSKEY_MAX_PER_USER):
+    """Reach the passkey cap with plain ORM rows -- running `count` real
+    WebAuthn ceremonies would work too but is needlessly slow."""
+    Passkey.objects.bulk_create([
+        Passkey(user=user, credential_id='dummy-%d-%d' % (user.pk, i),
+               public_key=b'', sign_count=0, transports=[], aaguid='', name='Dummy')
+        for i in range(count)])
+
+
+def test_register_begin_rejects_when_cap_already_reached(auth_alice, alice):
+    _fill_passkeys(alice)
+    resp = _post(auth_alice, '/api/passkeys/register/begin/', {'password': 'alicepass123'})
+    assert resp.status_code == 409
+
+
+def test_register_finish_rejects_when_cap_reached_between_begin_and_finish(
+        auth_alice, alice, authenticator):
+    begin = _post(auth_alice, '/api/passkeys/register/begin/', {'password': 'alicepass123'})
+    assert begin.status_code == 200
+    body = begin.json()
+    _fill_passkeys(alice)  # fills the cap after begin, before finish
+    resp = _post(auth_alice, '/api/passkeys/register/finish/', {
+        'challenge_id': body['challenge_id'],
+        'credential': authenticator.register(body['options']), 'name': 'Phone'})
+    assert resp.status_code == 409
+
+
+# --- account endpoints: throttled, like every other passkey endpoint -------
+
+@pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_begin',
+                                  'register_finish', 'password_remove'])
+def test_account_endpoints_are_throttled(name):
+    view = getattr(passkey_views, name)
+    assert view.cls.throttle_classes == [PasskeyRateThrottle]
+
+
+# --- account endpoints: crafted input must never reach a 500 ----------------
+
+@pytest.mark.parametrize('password', [{'a': 1}, [1, 2], 42, None])
+def test_register_begin_rejects_crafted_password_types(auth_alice, password):
+    resp = _post(auth_alice, '/api/passkeys/register/begin/', {'password': password})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('step_up', [{'a': 1}, [1, 2], 42, None])
+def test_register_begin_rejects_crafted_step_up_types(auth_alice, step_up):
+    resp = _post(auth_alice, '/api/passkeys/register/begin/', {'step_up': step_up})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('step_up', [
+    {'challenge_id': 'not-a-real-id', 'credential': {}},
+    {'challenge_id': None, 'credential': 'not-a-dict'},
+    {'challenge_id': {'a': 1}, 'credential': [1, 2]},
+    {'challenge_id': 'not-a-real-id', 'credential': {'garbage': True}},
+])
+def test_register_begin_rejects_junk_step_up_assertion(auth_alice, step_up):
+    resp = _post(auth_alice, '/api/passkeys/register/begin/', {'step_up': step_up})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('name', [{'a': 1}, 42, ['x']])
+def test_patch_rejects_crafted_name_types_with_invalid_name(auth_alice, alice, authenticator,
+                                                             name):
+    passkey = add_passkey(alice, authenticator)
+    resp = auth_alice.patch('/api/passkeys/%d/' % passkey.pk, {'name': name}, format='json')
+    assert resp.status_code == 400
+    assert 'name' in resp.json()
+
+
+def test_patch_with_no_name_key_is_400(auth_alice, alice, authenticator):
+    passkey = add_passkey(alice, authenticator)
+    resp = auth_alice.patch('/api/passkeys/%d/' % passkey.pk, {}, format='json')
+    assert resp.status_code == 400
+    assert 'name' in resp.json()
+
+
+ACCOUNT_BODY_ENDPOINTS = [
+    ('post', '/api/passkeys/register/begin/'),
+    ('post', '/api/passkeys/register/finish/'),
+    ('patch', '/api/passkeys/1/'),
+    ('post', '/api/passkeys/password/remove/'),
+]
+
+
+@pytest.mark.parametrize('method,url', ACCOUNT_BODY_ENDPOINTS)
+@pytest.mark.parametrize('body', [[1, 2], 'just a string', 42, True])
+def test_account_endpoints_reject_non_object_body(auth_alice, method, url, body):
+    assert getattr(auth_alice, method)(url, body, format='json').status_code == 400
+
+
+def test_passkey_list_rejects_non_object_body(auth_alice):
+    resp = auth_alice.generic('GET', '/api/passkeys/', data='[1, 2]',
+                              content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_passkey_delete_rejects_non_object_body(auth_alice, alice, authenticator):
+    passkey = add_passkey(alice, authenticator)
+    resp = auth_alice.delete('/api/passkeys/%d/' % passkey.pk, [1, 2], format='json')
+    assert resp.status_code == 400
+    # the crafted body must not have deleted the passkey it never named
+    assert Passkey.objects.filter(pk=passkey.pk).exists()
+
+
+@pytest.mark.parametrize('method,url', ACCOUNT_ENDPOINTS)
+def test_account_endpoints_malformed_json_body_is_400(auth_alice, method, url):
+    resp = auth_alice.generic(method.upper(), url, data='{not valid json',
+                              content_type='application/json')
+    assert resp.status_code == 400
