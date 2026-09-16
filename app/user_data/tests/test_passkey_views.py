@@ -8,6 +8,7 @@ from django.utils import translation
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
+from user_data import passkey_views
 from user_data.passkey_views import PasskeyRateThrottle
 
 from .conftest import add_passkey, make_oauth_token
@@ -214,25 +215,42 @@ def test_malformed_json_body_is_400(api, url):
 # adds an authentication class back (e.g. copy-pasting TokenAuthentication
 # from another view in this module) while leaving permission_classes([])
 # alone: nothing about permissions would catch it, since an empty permission
-# list still lets the request through. What DOES catch it is a garbage
-# Authorization: Token value -- today it is inert (no authenticator reads
-# it), but TokenAuthentication.authenticate_credentials() raises
-# AuthenticationFailed (401) for an unrecognised key, and that exception is
-# raised during DRF's initial() step, before the view body ever runs, so no
-# amount of code inside the view could prevent it once the decorator regresses.
+# list still lets the request through. A garbage credential of a kind that
+# *is* recognised by the class being (hypothetically) added back is what
+# catches it: TokenAuthentication.authenticate_credentials() raises
+# AuthenticationFailed (401) for an unrecognised key, BasicAuthentication
+# raises the same for a username/password that doesn't exist, and
+# SessionAuthentication's own CSRF check raises PermissionDenied (403) for a
+# force_login()'d session with no CSRF token attached -- and each of those
+# exceptions is raised during DRF's initial() step, before the view body
+# ever runs, so no amount of code inside the view could prevent it once the
+# decorator regresses. django-oauth-toolkit's own authenticator is the one
+# exception: it returns None for an unrecognised bearer token exactly like
+# no authenticator being configured at all, so no request/response shape can
+# ever reveal that mutation -- test_anonymous_views_declare_no_authenticator
+# below is what actually guards against it (and against all the others too).
+#
+# The plain 'session' client below does NOT catch a SessionAuthentication
+# regression: DRF's default test client has enforce_csrf_checks=False, so
+# CSRF is never validated through it regardless of which authenticators are
+# configured. 'csrf_session' is the one built with enforce_csrf_checks=True.
 
-CREDENTIAL_LABELS = ['valid_token', 'garbage_token', 'oauth_bearer', 'session']
+CREDENTIAL_LABELS = ['valid_token', 'garbage_token', 'garbage_basic', 'oauth_bearer',
+                     'session', 'csrf_session']
 
 
 def _credentialed_client(alice, label):
-    client = APIClient()
+    client = APIClient(enforce_csrf_checks=(label == 'csrf_session'))
     if label == 'valid_token':
         client.credentials(HTTP_AUTHORIZATION='Token ' + alice.auth_token.key)
     elif label == 'garbage_token':
         client.credentials(HTTP_AUTHORIZATION='Token not-a-real-token')
+    elif label == 'garbage_basic':
+        # base64("nope:nope") -- a well-formed but nonexistent credential.
+        client.credentials(HTTP_AUTHORIZATION='Basic bm9wZTpub3Bl')
     elif label == 'oauth_bearer':
         client.credentials(HTTP_AUTHORIZATION='Bearer ' + make_oauth_token(alice).token)
-    elif label == 'session':
+    elif label in ('session', 'csrf_session'):
         client.force_login(alice)
     return client
 
@@ -274,6 +292,19 @@ def test_signup_finish_error_body_unchanged_by_caller_credentials(alice, authent
     resp = _bad_registration(client, 'cred_probe3', 'cred_probe3@example.com')
     assert resp.status_code == baseline.status_code == 400
     assert resp.json() == baseline.json()
+
+
+@pytest.mark.parametrize('name', ['login_begin', 'login_finish',
+                                  'signup_begin', 'signup_finish'])
+def test_anonymous_views_declare_no_authenticator(name):
+    """The direct guard: whatever a probe request can or can't reveal (an
+    unrecognised OAuth2 bearer token reveals nothing at all -- DOT's
+    authenticator returns None for it exactly like no authenticator being
+    configured), the view's own declared classes are always inspectable.
+    """
+    view = getattr(passkey_views, name)
+    assert view.cls.authentication_classes == []
+    assert view.cls.permission_classes == []
 
 
 # --- throttling -------------------------------------------------------------

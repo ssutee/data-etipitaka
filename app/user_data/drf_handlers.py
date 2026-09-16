@@ -20,14 +20,37 @@ goes, it does not preserve them -- so this handler is not itself running
 anywhere near an exhausted recursion budget. It still does the least
 possible work on this path anyway: no inspecting `exc`, no formatting a
 message from request data, straight to a fixed, translatable string.
+
+The isinstance check is deliberately narrow (RecursionError only, not the
+wider RuntimeError it subclasses): only a hostile/malformed body should
+ever turn into a 400 here, and a genuine runaway recursion bug elsewhere in
+this project's own code is exactly the kind of thing that must still 500
+loudly, not get silently swallowed alongside it.
 """
+import logging
+
 from django.utils.translation import gettext as _
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as _default_exception_handler
+from rest_framework.views import set_rollback
+
+log = logging.getLogger(__name__)
 
 
 def exception_handler(exc, context):
     if isinstance(exc, RecursionError):
+        # A genuine runaway recursion in our own code would otherwise be
+        # indistinguishable from hostile input once it is mapped to the same
+        # clean 400 -- log it as a warning so an operator can tell the two
+        # apart. Guarded because logging must not itself risk turning this
+        # already-exceptional path into a second, unhandled exception.
+        try:
+            request = (context or {}).get('request')
+            log.warning('recursion limit hit while handling %s',
+                       getattr(request, 'path', '<unknown path>'))
+        except Exception:
+            pass
+        set_rollback()
         return Response({'detail': _('Malformed request.')}, status=status.HTTP_400_BAD_REQUEST)
     return _default_exception_handler(exc, context)

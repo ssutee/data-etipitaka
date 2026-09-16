@@ -11,6 +11,8 @@ endpoints -- so the fix lives in a global EXCEPTION_HANDLER, not per-view.
 import pytest
 from rest_framework.test import APIClient
 
+from user_data.drf_handlers import exception_handler
+
 pytestmark = pytest.mark.django_db
 
 
@@ -39,4 +41,29 @@ def test_deeply_nested_json_body_is_400_not_500(url):
     # this suite runs in.
     client = APIClient()
     resp = client.post(url, _nested_body(20000), content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_plain_runtime_error_is_not_swallowed():
+    """The handler must catch RecursionError specifically, not RuntimeError
+    (which RecursionError subclasses) -- widening the check would silently
+    turn every other unhandled exception's 500 into a misleading 400 too.
+    Returning None here is exactly what tells DRF's dispatch() to let the
+    exception propagate, matching the default handler's own contract.
+    """
+    assert exception_handler(RuntimeError('boom'), {}) is None
+
+
+def test_recursion_log_failure_does_not_prevent_the_400(monkeypatch):
+    """The best-effort log.warning() call is wrapped in its own try/except
+    specifically so it can never turn this already-exceptional path into a
+    second, unhandled exception -- exercise that guard directly, and with
+    an empty context (no 'request' key), which real dispatch() calls never
+    produce but a direct call like this one legitimately can.
+    """
+    def _boom(*args, **kwargs):
+        raise RuntimeError('logging is down')
+
+    monkeypatch.setattr('user_data.drf_handlers.log.warning', _boom)
+    resp = exception_handler(RecursionError('deep'), {})
     assert resp.status_code == 400
