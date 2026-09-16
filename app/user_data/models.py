@@ -44,6 +44,26 @@ class Passkey(models.Model):
     last_used_at = models.DateTimeField(null=True, blank=True)
 
 
+class PasskeyEpoch(models.Model):
+    """Monotonic per-user counter, bumped on every passkey add or delete.
+
+    Exists solely so recovery.AccountRecoveryTokenGenerator can mix in a
+    value that only ever increases. The *current* passkey set (e.g. its
+    newest pk) is state that can go back down: add a passkey (correctly
+    killing an outstanding reset token), then delete that same passkey,
+    and "newest pk" reverts to whatever it was before -- quietly reviving
+    a token that adding the passkey was supposed to have killed for good.
+    A monotonic counter cannot revert that way. See
+    passkey_service.bump_passkey_epoch for the only two write paths
+    (passkey add via _store_passkey, passkey delete via
+    passkey_manage.delete_passkey), both of which bump this inside the
+    same transaction as the passkey change, while already holding the
+    user row's FOR UPDATE lock.
+    """
+    user = models.OneToOneField(User, related_name='passkey_epoch', on_delete=models.CASCADE)
+    value = models.PositiveBigIntegerField(default=0)
+
+
 class PasskeyUserHandle(models.Model):
     """Random WebAuthn user.id for an account (never the pk)."""
     user = models.OneToOneField(User, related_name='passkey_handle',

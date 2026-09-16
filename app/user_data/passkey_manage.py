@@ -5,7 +5,8 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 
 from .models import Passkey
-from .passkey_service import AAGUID_NAMES, PasskeyError, check_password, clean_name
+from .passkey_service import (AAGUID_NAMES, PasskeyError, bump_passkey_epoch,
+                              check_password, clean_name)
 
 
 class NotFound(PasskeyError):
@@ -95,7 +96,13 @@ def rename_passkey(user, passkey_id, name):
 
 
 def delete_passkey(user, passkey_id):
-    """Delete, unless it is the only passkey of an account without a password."""
+    """Delete, unless it is the only passkey of an account without a password.
+
+    Also bumps PasskeyEpoch, inside this same transaction and under this
+    same lock: a delete must move the counter forward exactly like an add
+    does, or deleting the passkey that killed a reset token could quietly
+    revive it. See passkey_service.bump_passkey_epoch.
+    """
     with transaction.atomic():
         locked = get_user_model().objects.select_for_update().get(pk=user.pk)
         passkey = _own(locked, passkey_id)
@@ -106,6 +113,7 @@ def delete_passkey(user, passkey_id):
         # pk+user here is the explicit statement of what's being deleted,
         # matching the pk+user lookup _own already did.
         Passkey.objects.filter(pk=passkey.pk, user=locked).delete()
+        bump_passkey_epoch(locked)
 
 
 def remove_password(user, password):

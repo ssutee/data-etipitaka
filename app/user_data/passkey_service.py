@@ -42,7 +42,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 from . import passkey_challenges as challenges
 from . import passkey_config as config
 from .account_tokens import check_session_engine, delete_user_sessions, revoke_all_tokens
-from .models import Passkey, PasskeyUserHandle, WebAuthnChallenge
+from .models import Passkey, PasskeyEpoch, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
 log = logging.getLogger(__name__)
@@ -275,6 +275,11 @@ def _store_passkey(user, verified, credential, name, *, enforce_cap=False):
     concurrent finish_register calls racing past begin_register's own
     early (unlocked) check still cannot together exceed the cap. Recovery
     and signup never pass it.
+
+    Also bumps PasskeyEpoch here, inside the same transaction and under
+    the same lock, so register/signup/recover -- every path that can add a
+    passkey -- all move the counter recovery.AccountRecoveryTokenGenerator
+    relies on. See bump_passkey_epoch.
     """
     aaguid = str(verified.aaguid)
     raw_transports = (credential.get('response') or {}).get('transports')
@@ -285,14 +290,39 @@ def _store_passkey(user, verified, credential, name, *, enforce_cap=False):
             locked = get_user_model().objects.select_for_update().get(pk=user.pk)
             if enforce_cap and locked.passkeys.count() >= PASSKEY_MAX_PER_USER:
                 raise TooManyPasskeys()
-            return Passkey.objects.create(
+            passkey = Passkey.objects.create(
                 user=user, credential_id=bytes_to_base64url(verified.credential_id),
                 public_key=verified.credential_public_key,
                 sign_count=verified.sign_count, transports=transports, aaguid=aaguid,
                 backed_up=verified.credential_backed_up,
                 name=clean_name(name) or AAGUID_NAMES.get(aaguid, 'Passkey'))
+            bump_passkey_epoch(locked)
+            return passkey
     except IntegrityError as exc:  # credential already registered to some account
         raise RegistrationFailed() from exc
+
+
+def bump_passkey_epoch(user):
+    """Advance user's monotonic passkey-epoch counter by one.
+
+    A counter that only ever goes up, unlike the *current* passkey set
+    (e.g. its newest pk): see PasskeyEpoch's own docstring for why that
+    distinction matters -- recovery.AccountRecoveryTokenGenerator mixes
+    this value into its reset-token hash specifically so that adding a
+    passkey (which should burn any outstanding reset token) can never be
+    undone by later deleting that same passkey.
+
+    Callers -- _store_passkey above and passkey_manage.delete_passkey, the
+    only two places that create or delete a Passkey row -- must already
+    hold the user row's FOR UPDATE lock (both do, inside their own
+    transaction.atomic() block) before calling this. That lock is what
+    serialises every writer of a single user's epoch against every other
+    one, so a plain get-or-create-then-F-increment can never race here,
+    with no extra locking of the PasskeyEpoch row itself needed. Do not
+    call this without that lock already held.
+    """
+    PasskeyEpoch.objects.get_or_create(user=user)
+    PasskeyEpoch.objects.filter(user=user).update(value=F('value') + 1)
 
 
 def _send_passkey_added_email(user, passkey):

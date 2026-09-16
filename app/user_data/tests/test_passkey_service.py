@@ -17,7 +17,7 @@ from rest_framework.authtoken.models import Token
 
 from user_data import passkey_challenges as challenges
 from user_data import passkey_service as service
-from user_data.models import Passkey, PasskeyUserHandle, WebAuthnChallenge
+from user_data.models import Passkey, PasskeyEpoch, PasskeyUserHandle, WebAuthnChallenge
 from user_data.passkey_config import android_origin
 
 from .conftest import add_passkey, login_assertion, make_oauth_token
@@ -86,6 +86,20 @@ def test_finish_register_stores_passkey_and_emails(alice, authenticator):
     assert mail.outbox[0].to == ['alice@example.com']
     assert 'My phone' in mail.outbox[0].body
     assert 'https://data.etipitaka.com/account/security/' in mail.outbox[0].body
+
+
+def test_finish_register_bumps_passkey_epoch(alice, authenticator):
+    """recovery.AccountRecoveryTokenGenerator mixes this counter into its
+    reset-token hash, so every passkey add must move it -- and only ever
+    forward, never back (see test_recovery.test_token_stays_dead_after_
+    passkey_deleted for why "current state" instead of a monotonic
+    counter is unsafe).
+    """
+    assert not PasskeyEpoch.objects.filter(user=alice).exists()
+    _register(alice, authenticator)
+    assert PasskeyEpoch.objects.get(user=alice).value == 1
+    _register(alice, SoftAuthenticator())
+    assert PasskeyEpoch.objects.get(user=alice).value == 2
 
 
 def test_default_name_comes_from_aaguid(alice):
@@ -941,6 +955,13 @@ def test_finish_signup_creates_inactive_passkey_only_user(authenticator):
     assert mail.outbox == []  # the view sends the verification email
 
 
+def test_finish_signup_bumps_passkey_epoch(authenticator):
+    """Signup's very first passkey goes through the same _store_passkey as
+    a later register/recover, so it must bump the epoch too."""
+    user = _signup(authenticator)
+    assert PasskeyEpoch.objects.get(user=user).value == 1
+
+
 def test_signup_user_can_log_in_after_activation(authenticator):
     user = _signup(authenticator)
     with pytest.raises(service.InactiveUser):
@@ -1058,6 +1079,16 @@ def test_recover_adds_passkey_and_revokes_tokens(alice, bob, authenticator):
     # bob's own tokens must survive an unrelated user's recovery
     assert Token.objects.filter(user=bob).exists()
     assert AccessToken.objects.filter(user=bob).exists()
+
+
+def test_finish_recover_bumps_passkey_epoch(alice, authenticator):
+    """Recovery's new passkey goes through the same _store_passkey as
+    register/signup, so it must bump the epoch too -- this is also what
+    the reset-token generator relies on to burn any outstanding email
+    link the moment recovery actually stores a new passkey."""
+    challenge_id, options = service.begin_recover(alice)
+    service.finish_recover(alice, challenge_id, authenticator.register(options))
+    assert PasskeyEpoch.objects.get(user=alice).value == 1
 
 
 def test_register_challenge_cannot_finish_recovery(alice, authenticator):

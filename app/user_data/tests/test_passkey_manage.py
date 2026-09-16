@@ -4,7 +4,7 @@ import pytest
 from django.db import connection
 
 from user_data import passkey_manage as manage
-from user_data.models import Passkey
+from user_data.models import Passkey, PasskeyEpoch
 
 from .conftest import add_passkey
 from .soft_authenticator import SoftAuthenticator
@@ -134,6 +134,18 @@ def test_delete_already_deleted_passkey_is_not_found(alice, authenticator):
     manage.delete_passkey(alice, passkey.pk)
     with pytest.raises(manage.NotFound):
         manage.delete_passkey(alice, passkey.pk)
+
+
+def test_delete_passkey_bumps_epoch(alice, authenticator):
+    """The monotonic passkey epoch (recovery.AccountRecoveryTokenGenerator
+    mixes it into the reset-token hash) must move on delete too, not just
+    on add -- otherwise deleting a passkey that killed an outstanding
+    reset token could quietly revive it (see
+    test_recovery.test_token_stays_dead_after_passkey_deleted)."""
+    passkey = add_passkey(alice, authenticator)
+    assert PasskeyEpoch.objects.get(user=alice).value == 1
+    manage.delete_passkey(alice, passkey.pk)
+    assert PasskeyEpoch.objects.get(user=alice).value == 2
 
 
 def test_remove_password(alice, authenticator):

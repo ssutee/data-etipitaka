@@ -84,6 +84,20 @@ urlpatterns = [
     path('i18n/setlang/', set_language, name='set_language'),
     path('admin/', admin.site.urls),
     # Override Django's reset views (same names) with the recovery versions.
+    # Dispatch (matching an incoming request path) tries urlpatterns in this
+    # list's order and uses the first match, so these two views -- listed
+    # ahead of the include below -- are what actually serve every request.
+    # reverse(), however, is built by URLResolver._populate() walking
+    # url_patterns in *reverse* order and appending to a per-name list it
+    # then searches front-to-back -- so for a name repeated across two
+    # patterns, reverse() resolves to whichever one is registered LAST in
+    # this file, which here is django.contrib.auth.urls's own
+    # 'password_reset'/'password_reset_confirm', included below, not the
+    # lines right here. That is harmless only because both pairs of
+    # patterns spell the identical path ('password_reset/' and
+    # 'reset/<uidb64>/<token>/'); reverse('password_reset_confirm', ...)
+    # therefore still produces the same URL either way. Do not let the two
+    # spellings drift apart, or reverse() and dispatch will disagree.
     path('password_reset/', recovery.password_reset_view, name='password_reset'),
     path('reset/<uidb64>/<token>/', recovery.AccountRecoveryConfirmView.as_view(),
          name='password_reset_confirm'),
