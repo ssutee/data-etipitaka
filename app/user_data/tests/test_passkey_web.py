@@ -183,6 +183,20 @@ def test_web_login_recursion_is_logged_as_a_warning(client, caplog):
               for record in caplog.records)
 
 
+def test_web_login_recursion_log_failure_does_not_prevent_the_400(client, monkeypatch):
+    """The best-effort log.warning() call is wrapped in its own try/except
+    specifically so it can never turn this already-exceptional path into a
+    second, unhandled exception -- mirrors test_drf_handlers.py's own test
+    for the identically-reasoned guard there.
+    """
+    def _boom(*args, **kwargs):
+        raise RuntimeError('logging is down')
+
+    monkeypatch.setattr('user_data.passkey_web_views.log.warning', _boom)
+    resp = client.post('/login/passkey/', _nested_body(20000), content_type='application/json')
+    assert resp.status_code == 400
+
+
 def test_web_login_success_sets_cache_control_no_store(client, alice, authenticator):
     # The 200 response sets a session cookie -- it must never be cached.
     add_passkey(alice, authenticator)

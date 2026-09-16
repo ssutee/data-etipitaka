@@ -235,9 +235,12 @@ _URL_STRIPPED = {0x09: None, 0x0A: None, 0x0D: None}
 def _safe_redirect_target(request, next_url):
     """Validate `next` against the current host; unsafe or absent falls back to '/'.
 
-    This is the only thing standing between this view and an open redirect,
-    so it is deliberately strict: relative paths and same-host absolute URLs
-    only, matching the request's own scheme requirement.
+    This is the only thing standing between its callers -- the password
+    login and /login/passkey/, which hands the result straight to
+    window.location -- and an open redirect, so it is deliberately strict:
+    relative paths and same-host absolute URLs only, matching the request's
+    own scheme requirement. See the _URL_STRIPPED comment above for why the
+    tab/CR/LF stripping has to happen before any of that.
     """
     if isinstance(next_url, str):
         next_url = next_url.translate(_URL_STRIPPED)
