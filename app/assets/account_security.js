@@ -6,8 +6,8 @@
  * PasskeyRateThrottle in user_data/passkey_views.py). Re-fetching the list
  * after every mutation would burn 2-4 requests per change, so instead each
  * mutation's own response updates local `state` directly and load() runs
- * only once, on page open (see updateFromRename/removeLocally/
- * insertPasskey/setHasPassword below).
+ * only once, on page open (see replacePasskey/removeLocally/insertPasskey
+ * below).
  */
 (function (window, document) {
   'use strict';
@@ -17,11 +17,18 @@
   var t = root.dataset;  // translated strings rendered by Django
   var rows = document.getElementById('passkey-rows');
   var errorEl = document.getElementById('security-error');
+  // Rename/delete errors go here instead of #security-error: with up to
+  // 20 rows, a message written far below the table (past the Passkeys
+  // section, the Password section, and #security-error at the very
+  // bottom) reads as a silent no-op. #security-error stays for
+  // add-passkey and remove-password, whose own controls sit right above it.
+  var listErrorEl = document.getElementById('passkey-list-error');
   var state = {has_password: false, passkeys: []};
 
   function $(id) { return document.getElementById(id); }
 
   function fail(err) { errorEl.textContent = P.errorMessage(err); }
+  function failList(err) { listErrorEl.textContent = P.errorMessage(err); }
 
   function formatDate(value) { return value ? new Date(value).toLocaleString() : t.never; }
 
@@ -68,10 +75,16 @@
   // --- local state updates (no re-fetch after a mutation) -----------------
 
   function passkeySortKey(passkey) {
-    // created_at then id, matching passkey_manage.list_passkeys's own
-    // `.order_by('created_at', 'pk')` -- Date parses the isoformat()
-    // string the server sends, so this survives sub-second ties the same
-    // way the DB's own tiebreak (id) does.
+    // created_at then id, approximating passkey_manage.list_passkeys's own
+    // `.order_by('created_at', 'pk')`. Date.getTime() truncates to
+    // millisecond precision, while Postgres's created_at (and the DB's
+    // own tiebreak) resolves to the microsecond -- so two passkeys
+    // created within the same millisecond but different microseconds
+    // sort here by id rather than by their true created_at order, unlike
+    // a fresh GET /api/passkeys/. Passkeys are added by distinct user
+    // actions seconds apart in practice, so this is a narrow,
+    // self-correcting (next load()) discrepancy, not exact parity with
+    // the DB's own ordering.
     return [new Date(passkey.created_at).getTime(), passkey.id];
   }
 
@@ -141,18 +154,41 @@
   // a superseded continuation (shouldn't happen while busy blocks new
   // attempts, but mirrors the defensive check in passkey_login.js/
   // passkey_signup.js) must not clobber a newer attempt's button state.
-  function failAction(gen, err) {
+  // `show` picks which error element gets the message (default
+  // #security-error); rename/delete pass failList to use #passkey-list-error.
+  function failAction(gen, err, show) {
     if (gen !== generation) { return; }
     busy = false;
     setActionsDisabled(false);
-    fail(err);
+    (show || fail)(err);
+  }
+
+  // Rename/delete only: a 404 means another tab or device already
+  // renamed or deleted this passkey out from under us -- reconcile local
+  // state (drop the now-nonexistent row) and re-render *before* showing
+  // the message, instead of leaving a stale row on screen that the
+  // server has already forgotten.
+  function handleListFailure(gen, passkeyId, err) {
+    if (gen === generation && err && err.status === 404) {
+      removeLocally(passkeyId);
+      render();
+    }
+    failAction(gen, err, failList);
   }
 
   function load() {
     return P.request('GET', '/api/passkeys/').then(function (data) {
       state = data;
       render();
-    }).catch(fail);
+    }).catch(function (err) {
+      // A failed load (e.g. a 429 off the shared throttle bucket) must
+      // not leave the page inert: render() still lays out the table
+      // structure, the empty-state text, the Password section and
+      // (for an unsupported browser) the warning banner from the
+      // default `state`, alongside the error message.
+      fail(err);
+      render();
+    });
   }
 
   function rename(passkey) {
@@ -160,33 +196,53 @@
     if (name === null) { return; }
     var gen = beginAction();
     if (gen === null) { return; }
-    errorEl.textContent = '';
+    listErrorEl.textContent = '';
     P.request('PATCH', '/api/passkeys/' + passkey.id + '/', {name: name}).then(function (updated) {
       if (!endAction(gen)) { return; }
       replacePasskey(updated);
       render();
-    }).catch(function (err) { failAction(gen, err); });
+    }).catch(function (err) { handleListFailure(gen, passkey.id, err); });
   }
 
   function remove(passkey) {
     if (!window.confirm(window.i18n.confirmDelete)) { return; }
     var gen = beginAction();
     if (gen === null) { return; }
-    errorEl.textContent = '';
+    listErrorEl.textContent = '';
     P.request('DELETE', '/api/passkeys/' + passkey.id + '/').then(function () {
       if (!endAction(gen)) { return; }
       removeLocally(passkey.id);
       render();
-    }).catch(function (err) { failAction(gen, err); });
+    }).catch(function (err) { handleListFailure(gen, passkey.id, err); });
   }
 
   function stepUp() {
     if (state.has_password) {
-      return Promise.resolve({password: $('step-up-password-input').value});
+      var password = $('step-up-password-input').value;
+      if (!password) {
+        // A blank password is a guaranteed 400 from register_begin --
+        // catch it locally instead of spending a request (and a slice
+        // of the shared throttle bucket) on it.
+        return Promise.reject({data: {detail: t.passwordRequired}});
+      }
+      return Promise.resolve({password: password});
     }
     return P.assertion(null, null).then(function (proof) { return {step_up: proof}; });
   }
 
+  // Deviation, flagged in the Task 20 review and kept intentionally (Task
+  // 25's e2e test asserts a reload reconciles it): for a passwordless
+  // account, stepUp() above authenticates with an EXISTING passkey via
+  // P.assertion(). The server (passkey_service._verify_assertion) bumps
+  // that passkey's own last_used_at as part of verifying the assertion,
+  // in the very same request -- but the success handler below only
+  // patches local `state` from the NEW passkey the register/finish
+  // response returns (insertPasskey). The row that was actually used to
+  // step up keeps showing its old, now-stale last_used_at until the next
+  // page load. Not fixed here: re-fetching the whole list after every add
+  // just to correct one cosmetic field is exactly the cost the
+  // no-re-fetch adaptation (top of file) exists to avoid, against a
+  // throttle bucket shared with four other endpoints.
   $('add-passkey-button').addEventListener('click', function () {
     var gen = beginAction();
     if (gen === null) { return; }
@@ -212,6 +268,11 @@
     P.postJSON('/api/passkeys/password/remove/', {password: input.value}).then(function (data) {
       if (!endAction(gen)) { return; }
       input.value = '';
+      // The (now hidden, per render()'s step-up-password toggle) password
+      // step-up field too: state.has_password is about to flip to false,
+      // switching add-passkey's step-up to the assertion path, so any
+      // password sitting in that other field should not linger in the DOM.
+      $('step-up-password-input').value = '';
       state.has_password = data.has_password;
       render();
     }).catch(function (err) {
@@ -220,5 +281,16 @@
     });
   });
 
+  if (!P.supported) {
+    // Without navigator.credentials this page's whole job is to show
+    // #passkey-unsupported -- and passkey.js's request() calls
+    // window.fetch() synchronously (not deferred into a promise chain),
+    // so on a browser missing fetch entirely, ever calling load() would
+    // throw a fatal, uncaught TypeError before that warning could render.
+    // Render once, from the default empty `state`, and stop.
+    render();
+    return;
+  }
+  render();  // lay out the page immediately, before load() resolves or fails
   load();
 })(window, document);

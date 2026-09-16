@@ -14,7 +14,8 @@
      data-remove="{% trans 'Delete' %}"
      data-rename-prompt="{% trans 'New name for this passkey' %}"
      data-has-password="{% trans 'Your account has a password.' %}"
-     data-no-password="{% trans 'Your account has no password. You sign in with a passkey.' %}">
+     data-no-password="{% trans 'Your account has no password. You sign in with a passkey.' %}"
+     data-password-required="{% trans 'Enter your current password.' %}">
   {% csrf_token %}
   <h1>{% trans "Sign-in and security" %}</h1>
   <p class="label label-warning" id="passkey-unsupported" hidden>{% trans "This browser does not support passkeys." %}</p>
@@ -32,6 +33,7 @@
     </thead>
     <tbody id="passkey-rows"></tbody>
   </table>
+  <span class="error-msg" id="passkey-list-error" role="alert"></span>
   <p id="passkey-empty" hidden>{% trans "You have no passkeys yet." %}</p>
   <div id="add-passkey" class="form-inline" hidden>
     <span id="step-up-password" hidden>
@@ -49,7 +51,7 @@
     <button type="button" class="btn btn-danger" id="remove-password-button">{% trans "Remove password" %}</button>
   </div>
 
-  <p class="error-msg" id="security-error"></p>
+  <p class="error-msg" id="security-error" role="alert"></p>
 </div>
 {% endblock %}
 

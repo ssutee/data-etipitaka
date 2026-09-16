@@ -98,5 +98,10 @@ def login_passkey(request):
 
 @login_required
 @ensure_csrf_cookie
+# Order matters: login_required wraps ensure_csrf_cookie, not the other way
+# round, so an anonymous visitor is redirected to LOGIN_URL before
+# ensure_csrf_cookie ever runs -- this view never mints a CSRF cookie for
+# someone who isn't about to see the form that needs one. /login/ sets its
+# own cookie for that visitor instead.
 def account_security(request):
     return render(request, 'account_security.html', {})
