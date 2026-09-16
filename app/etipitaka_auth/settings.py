@@ -189,11 +189,14 @@ OAUTH2_PROVIDER = {
 # values are set the same way in production. See
 # docs/superpowers/specs/2026-09-14-passkey-login-design.md.
 def _env_list(name, default=''):
-    return [v.strip() for v in os.environ.get(name, default).split(',') if v.strip()]
+    # `or default` (not the dict-style get(name, default)) so an env var
+    # explicitly set to '' -- e.g. a compose file overriding a value with an
+    # empty string -- falls back to default instead of wiping it out.
+    return [v.strip() for v in (os.environ.get(name) or default).split(',') if v.strip()]
 
 
-PASSKEY_RP_ID = os.environ.get('PASSKEY_RP_ID', '')
-PASSKEY_WEB_ORIGIN = os.environ.get('PASSKEY_WEB_ORIGIN', '')
+PASSKEY_RP_ID = os.environ.get('PASSKEY_RP_ID', '').strip()
+PASSKEY_WEB_ORIGIN = os.environ.get('PASSKEY_WEB_ORIGIN', '').strip()
 PASSKEY_RP_NAME = 'E-Tipitaka'
 PASSKEY_IOS_APP_IDS = _env_list('PASSKEY_IOS_APP_IDS', 'A6DJDJ7527.com.watnapp.E-Tipitaka-Plus')
 PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')

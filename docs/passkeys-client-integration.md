@@ -97,6 +97,20 @@ working after the account owner drops their password fallback
 (`/api/passkeys/password/remove/`) — that is by design. Only account
 recovery (below) revokes tokens.
 
+**Security notification emails.** Three actions each send a best-effort
+email to the account's address, so an owner is never surprised by a change
+they didn't make: adding a passkey (`register/finish`, `signup/finish` and
+passkey recovery), deleting a passkey (`DELETE /api/passkeys/<id>/`), and
+removing the password (`/api/passkeys/password/remove/`). All three share
+one render/send/swallow-and-log helper
+(`passkey_service._send_security_email`); a mail outage is logged, never
+surfaced to the caller as a failed request, and never rolls back the
+change it's reporting — each email is
+sent strictly after its own transaction has committed. This closes the gap
+where only "passkey added" used to notify the owner: a stolen session that
+added its own passkey, dropped the password, and deleted the real owner's
+passkeys used to do all of that silently after the first email.
+
 ## Flows
 
 **Sign in:** `login/begin` → system passkey sheet → `login/finish` → store the
@@ -106,15 +120,19 @@ token exactly as after password login.
 `register/begin {"password"}` → system sheet → `register/finish`. A user with
 no password proves themselves with a passkey first: `login/begin` → sheet →
 send `{"step_up": {challenge_id, credential}}` to `register/begin`. The account
-owner receives a "new passkey added" email. A 21st passkey is rejected with
-409 before the sheet ever opens.
+owner receives a "new passkey added" email (see "Security notification
+emails" above). A 21st passkey is rejected with 409 before the sheet ever
+opens.
 
 **Sign up:** `signup/begin {"username", "email"}` → sheet → `signup/finish` →
 tell the user to open the verification email. Until then `login/finish`
 returns 400 "This account is not active…". Username and email rules
 (`AccountIdentitySerializer`, shared with password signup) apply: username
-≤150 characters, email ≤254 characters, and both are matched **case- and
-normalization-sensitively** — see "Known gaps" below.
+≤150 characters, email ≤254 characters, and both are matched
+**case-insensitively** (username is also NFKC-normalised before the check
+and before it's stored, so visually-identical fullwidth spellings collide
+with the plain one) — see "Known gaps" below for the production-rollout
+caveat.
 
 **Lost passkey / forgot password:** open `https://data.etipitaka.com/password_reset/`
 in `ASWebAuthenticationSession` (iOS) or a Custom Tab (Android). The emailed
@@ -224,6 +242,16 @@ Set in each environment's **gitignored** `docker-compose.override.yml`
 Passkeys are bound to the RP ID: passkeys created against `localhost` never
 work on production. Remove the dev override before running the golden harness.
 
+`PASSKEY_RP_ID` and `PASSKEY_WEB_ORIGIN` are stripped of surrounding
+whitespace, so a stray space in a compose file's value cannot silently
+produce a broken relying party. `PASSKEY_ANDROID_PACKAGE` and
+`PASSKEY_ANDROID_CERT_SHA256` are validated at boot by a Django system
+check (`user_data/checks.py`): each fingerprint must decode to a 32-byte
+SHA-256 hash, and the two settings must be either both set or both left
+empty. `docker compose exec web python manage.py check` (part of the
+deploy check gate) fails with a clear message on a bad value instead of it
+surfacing later as a 500 at login or a silently 404'd `assetlinks.json`.
+
 `TRUST_PROXY_PROTO=1`, set the same way, is not a passkey-specific setting,
 but changes passkey behaviour directly: once it is on, it also marks the
 session and CSRF cookies `Secure` (HTTPS-only), on top of trusting
@@ -242,11 +270,19 @@ Left open deliberately by design review, so the next reader isn't surprised:
 - **Signup can squat email/username variants**, and a never-activated
   account is never purged automatically; there is no resend-verification
   endpoint (same as the existing password signup).
-- **Case- and normalization-sensitive matching:** email is matched exactly
-  (not case-insensitively) and usernames are not normalized, so
-  `N@x.com`/`n@x.com` or two visually-identical-but-distinct Unicode
-  usernames can be different accounts — this is the same behaviour the
-  existing password signup already has, not new to passkeys.
+- **Case-insensitive identity matching has no DB-level backstop.** Username
+  and email are now matched case-insensitively at signup (username via
+  `__iexact` on the NFKC-normalised value; email via `__iexact` plus
+  `_unicode_ci_compare` — the same helper `AccountRecoveryForm.get_users`
+  already relies on for recovery), and a per-email Postgres advisory lock
+  (`account_tokens.lock_signup_email`) closes the race where two concurrent
+  signups for the same email — passkey or password, either combination —
+  could otherwise both commit, since `User.email` carries no DB uniqueness
+  constraint. But both checks are enforced in application code only, not by
+  a database constraint, so they only stop *new* duplicates: a production
+  deploy must first audit existing rows for case-insensitive username/email
+  duplicates, the same way the dev-DB audit for this change did before it
+  shipped — see commit `f4909c3`.
 - **`/o/register/`** (OAuth dynamic client registration) still 500s on a
   deeply nested JSON body — pre-existing, and outside DRF, so
   `user_data/drf_handlers.py`'s `RecursionError` guard does not cover it.

@@ -183,6 +183,17 @@ Android values and the dev localhost overrides go in each environment's
 **gitignored** `docker-compose.override.yml`, never the tracked `.env` (same
 rule as canon and SMTP): the deploy's `git pull --ff-only` must never see them.
 
+`PASSKEY_RP_ID` and `PASSKEY_WEB_ORIGIN` are stripped of surrounding
+whitespace when read from the environment, so a stray space in a compose
+file cannot silently produce a broken relying party. A Django system check
+(`user_data/checks.py`, registered from `UserDataConfig.ready`) validates
+`PASSKEY_ANDROID_PACKAGE`/`PASSKEY_ANDROID_CERT_SHA256` at boot: each
+fingerprint must decode to 32 bytes (the same rule
+`passkey_config.android_origin` enforces at request time), and the two
+settings must be either both set or both empty. A misconfiguration fails
+`manage.py check` with a clear message instead of surfacing later as a 500
+at login or a silently 404'd `assetlinks.json`.
+
 ## Component 3: Service layer (`passkey_service.py`)
 
 Plain functions; they take users, dicts and settings, never `request`. Views
@@ -216,29 +227,43 @@ translate their exceptions into HTTP codes.
   `UnicodeUsernameValidator` + uniqueness; email ≤254 chars + uniqueness) —
   the same serializer `RegisterSerializer` (password signup) now extends, so
   the two signup paths can't drift apart; generate the handle; keep
-  `{username, email, handle}` in `payload`. **No `User` row yet.** Both
-  fields are matched by an exact, case-sensitive `filter(...=value).exists()`
-  and neither is Unicode-normalized, same as password signup today — see
-  "Out of scope" / the client guide's "Known gaps" for what that allows.
+  `{username, email, handle}` in `payload`. **No `User` row yet.** The
+  username is NFKC-normalized (`User.normalize_username`) before the
+  uniqueness check and before it is stored, and both username and email are
+  matched case-insensitively (`__iexact` on the normalized username;
+  `__iexact` plus `_unicode_ci_compare` for email — the same helper
+  `AccountRecoveryForm.get_users` already relies on). This closes the gap
+  the client guide's "Known gaps" used to describe; see that guide for the
+  production-rollout caveat (no DB-level unique index backs either check).
 - `finish_signup(challenge_id, credential, name=None) -> User` — consumes and
-  verifies the challenge, then re-checks username and email uniqueness
-  *just before* opening the transaction (not inside it), and only then
-  creates `User(is_active=False)` with an unusable password, the handle and
-  the passkey, all in that one transaction. The view then sends the existing
-  verification email. A name or email taken since `begin` → `SignupInvalid`
-  (400, field errors); a duplicate that instead slips through the gap
-  between that re-check and the insert (a race, not the common case) is
-  caught as `IntegrityError` and reported the same way, not as a bare 500.
+  verifies the challenge, then opens a transaction and takes a per-email
+  Postgres advisory lock (`account_tokens.lock_signup_email`) as its very
+  first statement, *before* re-checking username and email uniqueness, and
+  only then creates `User(is_active=False)` with an unusable password, the
+  handle and the passkey, all inside that same transaction. The view then
+  sends the existing verification email. A name or email taken since
+  `begin` → `SignupInvalid` (400, field errors). `RegisterSerializer.create`
+  (password signup) takes the same lock, under the same namespace, before
+  its own re-check, so a passkey signup and a password signup racing for
+  the same email are serialised against each other too, not just against
+  their own kind — closing the concurrent-same-email-signup race the client
+  guide's "Known gaps" used to describe. (Username needs no equivalent
+  lock: the database's own unique index on username still catches an
+  exact-duplicate race as an `IntegrityError`.)
 - `list_passkeys(user)`, `rename_passkey(user, id, name)`,
   `delete_passkey(user, id)` — lookups scoped to `user` (else `NotFound`).
   Delete takes `select_for_update()` on the `User` row and refuses to remove
-  the last passkey of a user with no usable password (`LockoutGuard`).
+  the last passkey of a user with no usable password (`LockoutGuard`); on
+  success it sends the "passkey deleted" email, best-effort, strictly after
+  the deleting transaction has committed (`passkey_manage.delete_passkey`).
 - `remove_password(user, password)` — `check_password` required; under
   `select_for_update()` on the user, requires at least one passkey
   (`LockoutGuard`) and a usable password (`LockoutGuard`); then
   `set_unusable_password()`. Deliberately does **not** call
   `revoke_all_tokens`: an existing DRF token keeps working after the
-  password fallback is dropped; only recovery (below) revokes tokens.
+  password fallback is dropped; only recovery (below) revokes tokens. Sends
+  the "password removed" email, best-effort, strictly after the transaction
+  commits.
 - `begin_recover(user)` / `finish_recover(user, challenge_id, credential)` —
   as register, purpose `recover`, followed by `revoke_all_tokens(user)` *and*
   `delete_user_sessions(user, keep_session_key=...)` (the recovering
@@ -449,6 +474,7 @@ logged in on this browser → `/account/security/` → delete old passkey.
 | Credential registered to two accounts | `credential_id` unique; registration of an existing id → 400 |
 | Login CSRF | `/login/passkey/` and recovery endpoints are CSRF-protected; the token endpoint returns the key in the body and sets no cookie |
 | Stolen DRF token turned into a permanent passkey | step-up (password or same-user assertion) plus "new passkey added" email |
+| Stolen session adds a passkey, drops the password, then deletes the owner's passkeys without the owner noticing | "passkey deleted" and "password removed" emails, best-effort, alongside "passkey added" — all three notify the account's email, not just the addition |
 | MCP connector token misuse | OAuth bearer tokens are not an accepted authenticator on any passkey endpoint |
 | Password guessing through step-up or password removal | covered by the `passkey` throttles; wrong password → 400 with no detail |
 | Lockout races | last-credential checks run under `select_for_update()` on the user row |
@@ -573,7 +599,7 @@ no dev override is required)
 - Templates: `account_security.html`, `login.html`, `forms/login_form.html`,
   `signup.html`, `registration/password_reset_confirm.html`,
   `registration/password_reset_email.txt`, `email/passkey_added.txt`,
-  `base.html`.
+  `email/passkey_deleted.txt`, `email/password_removed.txt`, `base.html`.
 - `app/assets/passkey.js`, `passkey_login.js`, `passkey_signup.js`,
   `account_security.js`, `passkey_recover.js`.
 - `app/locale/th/LC_MESSAGES/django.po` (+ compiled `.mo`).
