@@ -39,6 +39,26 @@ def test_assetlinks_json_404_when_android_unset(client, settings):
     assert resp['Content-Type'] == 'application/json'
 
 
+def test_assetlinks_404_when_package_set_but_fingerprints_empty(client, settings):
+    # A partial rollout (package configured, fingerprints not yet set, or
+    # vice versa below) is a realistic state, not just "both unset" -- the
+    # guard is an `or`, and either half being empty must still 404 rather
+    # than publish a config with an empty sha256_cert_fingerprints list.
+    settings.PASSKEY_ANDROID_PACKAGE = 'com.watnapp.etipitaka'
+    settings.PASSKEY_ANDROID_CERT_SHA256 = []
+    resp = client.get(ASSETLINKS)
+    assert resp.status_code == 404
+    assert resp['Content-Type'] == 'application/json'
+
+
+def test_assetlinks_404_when_package_empty_but_fingerprints_set(client, settings):
+    settings.PASSKEY_ANDROID_PACKAGE = ''
+    settings.PASSKEY_ANDROID_CERT_SHA256 = ['AB:CD']
+    resp = client.get(ASSETLINKS)
+    assert resp.status_code == 404
+    assert resp['Content-Type'] == 'application/json'
+
+
 def test_assetlinks_when_configured(client, settings):
     settings.PASSKEY_ANDROID_PACKAGE = 'com.watnapp.etipitaka'
     settings.PASSKEY_ANDROID_CERT_SHA256 = ['AB:CD']
