@@ -16,6 +16,7 @@ from user_data import content_views
 from user_data import canon_views
 from user_data import oauth_views
 from user_data import passkey_views
+from user_data import passkey_web_views
 from user_data.auth_urls import rest_auth_patterns
 
 # Explicit allow-list, not oauth2_provider.urls.base_urlpatterns: that also
@@ -46,6 +47,7 @@ urlpatterns = [
     path('follower/<int:pk>/', views.follower),
     path('upload/', views.upload_view),
     path('login/', views.login_view),
+    path('login/passkey/', passkey_web_views.login_passkey),
     path('signup/', TemplateView.as_view(template_name="signup.html")),
     path('signup/validate/', TemplateView.as_view(template_name="validate.html")),
     re_path(r'^account/confirm-email/(?P<key>[^/]+)/$',
