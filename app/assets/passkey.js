@@ -151,10 +151,25 @@
    * either {} (no/unparseable body), {'detail': '...'} or a DRF field-error
    * map like {'name': ['...']} / {'non_field_errors': ['...']} -- never
    * assume either shape without checking, since a caller passing a non-JSON
-   * or empty body reaches this with err.data == {}. */
+   * or empty body reaches this with err.data == {}.
+   *
+   * status 429 is special-cased ahead of that generic handling so both
+   * sources of a passkey 429 read the same friendly way: nginx's own rate
+   * limit (nginx.conf's @ratelimited_passkey/@ratelimited_passkey_manage,
+   * body {'error':..., 'retry_after':..., 'detail':...}) and DRF's
+   * PasskeyRateThrottle (body {'detail': 'Request was throttled. ...'}, no
+   * retry_after key) -- using retry_after when nginx supplied it, and a
+   * generic wait-a-moment message when it didn't, rather than falling
+   * through to whatever 'detail' string happens to be on the response. */
   function errorMessage(err) {
     if (err && err.name === 'NotAllowedError') { return window.i18n.passkeyCancelled; }
     var data = err && err.data;
+    if (err && err.status === 429) {
+      var retryAfter = data && data.retry_after;
+      return retryAfter
+        ? window.i18n.passkeyRateLimitedWait.replace('{seconds}', retryAfter)
+        : window.i18n.passkeyRateLimited;
+    }
     if (data && typeof data === 'object') {
       if (data.detail) { return String(data.detail); }
       var keys = Object.keys(data);

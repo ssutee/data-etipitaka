@@ -81,7 +81,9 @@
         passwordTooShort: "{% filter escapejs %}{% trans 'password is too short' %}{% endfilter %}",
         passwordsNotMatch: "{% filter escapejs %}{% trans 'passwords not match' %}{% endfilter %}",
         signupGenericError: "{% filter escapejs %}{% trans 'Something went wrong. Please try again.' %}{% endfilter %}",
-        passkeyCancelled: "{% filter escapejs %}{% trans 'The passkey request was cancelled.' %}{% endfilter %}"
+        passkeyCancelled: "{% filter escapejs %}{% trans 'The passkey request was cancelled.' %}{% endfilter %}",
+        passkeyRateLimited: "{% filter escapejs %}{% trans 'Too many attempts. Please wait a moment and try again.' %}{% endfilter %}",
+        passkeyRateLimitedWait: "{% filter escapejs %}{% trans 'Too many attempts. Please wait {seconds} seconds and try again.' %}{% endfilter %}"
       };
     </script>
     <script src="{% static "jquery/dist/jquery.min.js" %}"></script>
