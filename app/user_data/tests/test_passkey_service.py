@@ -1,5 +1,6 @@
 import json
 import secrets
+import threading
 from datetime import timedelta
 
 import cbor2
@@ -1074,6 +1075,90 @@ def test_finish_signup_rejects_reused_challenge(authenticator):
     with pytest.raises(service.RegistrationFailed):
         service.finish_signup(challenge_id, SoftAuthenticator().register(options))
     assert User.objects.filter(username='newbie').count() == 1
+
+
+# --- signup: case-insensitive / normalised identity matching -----------------
+
+def test_begin_signup_rejects_username_differing_only_by_case():
+    User.objects.create_user('newbie', 'first@example.com', 'pw12345678')
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('Newbie', 'second@example.com')
+    assert 'username' in exc.value.errors
+
+
+def test_begin_signup_normalizes_fullwidth_username_and_rejects_it():
+    User.objects.create_user('newbie', 'first@example.com', 'pw12345678')
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('ｎｅｗｂｉｅ', 'second@example.com')
+    assert 'username' in exc.value.errors
+
+
+def test_begin_signup_rejects_email_differing_only_by_case():
+    User.objects.create_user('someone', 'N@x.com', 'pw12345678')
+    with pytest.raises(service.SignupInvalid) as exc:
+        service.begin_signup('newbie', 'n@x.com')
+    assert 'email' in exc.value.errors
+
+
+def test_finish_signup_stores_the_normalized_username(authenticator):
+    """begin_signup already normalises (AccountIdentitySerializer.
+    validate_username) before writing the challenge payload, so the
+    fullwidth spelling never reaches finish_signup at all -- this pins
+    down that the *stored* row carries the normalised 'newbie', not the
+    caller's raw fullwidth 'ｎｅｗｂｉｅ'."""
+    user = _signup(authenticator, username='ｎｅｗｂｉｅ')
+    assert user.username == 'newbie'
+    assert User.objects.get(pk=user.pk).username == 'newbie'
+
+
+# --- signup: the same-email race ---------------------------------------------
+
+@pytest.mark.django_db(transaction=True)
+def test_finish_signup_two_concurrent_signups_same_email_yield_one_account():
+    """Two real threads each complete an independent signup ceremony (their
+    own username, own passkey authenticator, so nothing but the shared
+    email could make either one fail) for the same email, and both call
+    finish_signup at the same moment via a barrier. Without
+    lock_signup_email serialising them, both could pass their own re-check
+    (User.email carries no DB uniqueness constraint) and both commit --
+    exactly the race a reviewer reproduced with a thread barrier. With the
+    lock, exactly one must succeed and the other must see SignupInvalid
+    with an 'email' error, and the account count for that email must be
+    exactly one."""
+    challenge_a = service.begin_signup('racer-a', 'dup@example.com')
+    challenge_b = service.begin_signup('racer-b', 'dup@example.com')
+    credential_a = SoftAuthenticator().register(challenge_a[1])
+    credential_b = SoftAuthenticator().register(challenge_b[1])
+
+    start = threading.Barrier(2)
+    results = {}
+
+    def _finish(name, challenge_id, credential):
+        try:
+            start.wait(timeout=5)
+            user = service.finish_signup(challenge_id, credential)
+            results[name] = ('ok', user.pk)
+        except service.SignupInvalid as exc:
+            results[name] = ('rejected', exc.errors)
+        except Exception as exc:  # pragma: no cover - surfaced via the assertion below
+            results[name] = repr(exc)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=_finish, args=('a', challenge_a[0], credential_a)),
+              threading.Thread(target=_finish, args=('b', challenge_b[0], credential_b))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    outcomes = [v[0] if isinstance(v, tuple) else v for v in results.values()]
+    assert outcomes.count('ok') == 1, results
+    assert outcomes.count('rejected') == 1, results
+    rejected = next(v for v in results.values() if isinstance(v, tuple) and v[0] == 'rejected')
+    assert 'email' in rejected[1]
+    assert User.objects.filter(email='dup@example.com').count() == 1
+    assert Passkey.objects.count() == 1
 
 
 # --- recovery ---------------------------------------------------------------

@@ -113,6 +113,20 @@ def test_signup_finish_bad_response(api, authenticator):
     assert 'detail' in resp.json()
 
 
+def test_signup_begin_rejects_username_differing_only_by_case(api):
+    User.objects.create_user('newbie', 'first@example.com', 'pw12345678')
+    resp = _signup_begin(api, username='Newbie', email='second@example.com')
+    assert resp.status_code == 400
+    assert 'username' in resp.json()
+
+
+def test_signup_begin_rejects_email_differing_only_by_case(api):
+    User.objects.create_user('someone', 'N@x.com', 'pw12345678')
+    resp = _signup_begin(api, username='newbie', email='n@x.com')
+    assert resp.status_code == 400
+    assert 'email' in resp.json()
+
+
 def test_signup_finish_username_taken_since_begin(api, authenticator):
     body = _signup_begin(api).json()
     User.objects.create_user('newbie', 'x@example.com', 'pw12345678')

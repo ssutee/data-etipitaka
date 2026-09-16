@@ -17,7 +17,8 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
 from rest_framework.authtoken.models import Token
 
 from user_data import account_tokens
-from user_data.account_tokens import delete_user_sessions, lock_user_tokens, revoke_all_tokens
+from user_data.account_tokens import (delete_user_sessions, lock_signup_email,
+                                      lock_user_tokens, revoke_all_tokens)
 
 from .conftest import make_oauth_token
 
@@ -209,6 +210,95 @@ def test_lock_user_tokens_serialises_per_user_locks(alice, bob):
         holder.join(timeout=5)
         alice_prober.join(timeout=5)
         bob_prober.join(timeout=5)
+
+
+# --- lock_signup_email -------------------------------------------------------
+
+@pytest.mark.django_db(transaction=True)
+def test_lock_signup_email_requires_an_atomic_block():
+    """Same guard as lock_user_tokens, and for the same reason -- see that
+    test's own docstring for why transaction=True is needed to observe it."""
+    with pytest.raises(RuntimeError):
+        lock_signup_email('n@example.com')
+
+
+def test_lock_signup_email_issues_the_advisory_lock():
+    with CaptureQueriesContext(connection) as ctx:
+        with transaction.atomic():
+            lock_signup_email('n@example.com')
+    assert any('pg_advisory_xact_lock' in q['sql'] for q in ctx.captured_queries)
+
+
+def test_lock_signup_email_key_is_stable_across_calls():
+    """The lock key must be deterministic across separate Python processes
+    (different web workers), so it cannot come from Python's salted
+    builtin hash() -- pin down that two independent calls (which, in a
+    real deployment, could run in different processes) agree."""
+    assert account_tokens._email_lock_key('n@example.com') == \
+        account_tokens._email_lock_key('n@example.com')
+
+
+def test_lock_signup_email_key_matches_after_case_and_nfkc_normalisation():
+    """Two spellings AccountIdentitySerializer.validate_email's own
+    _unicode_ci_compare treats as the same email -- differing only by case,
+    or by NFKC-equivalent fullwidth characters -- must take the same lock,
+    or the lock could fail to serialise the very race it exists to close."""
+    assert account_tokens._email_lock_key('N@X.com') == \
+        account_tokens._email_lock_key('n@x.com')
+    assert account_tokens._email_lock_key('ｎ@x.com') == \
+        account_tokens._email_lock_key('n@x.com')
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lock_signup_email_serialises_matching_emails_not_different_ones():
+    """Mirrors test_lock_user_tokens_serialises_per_user_locks: a second
+    connection locking the *same* email must block for as long as a first
+    connection holds it, while a *different* email is unaffected."""
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    outcome = {}
+
+    def _hold_lock():
+        try:
+            with transaction.atomic():
+                lock_signup_email('dup@example.com')
+                holder_ready.set()
+                release_holder.wait(timeout=5)
+        finally:
+            connection.close()
+
+    def _probe(name, email):
+        try:
+            holder_ready.wait(timeout=5)
+            start = time.monotonic()
+            with transaction.atomic():
+                lock_signup_email(email)
+            outcome[name] = time.monotonic() - start
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=_hold_lock)
+    same_prober = threading.Thread(target=_probe, args=('same', 'DUP@example.com'))
+    other_prober = threading.Thread(target=_probe, args=('other', 'other@example.com'))
+    holder.start()
+    same_prober.start()
+    other_prober.start()
+    try:
+        other_prober.join(timeout=5)
+        assert 'other' in outcome  # a different email never blocks on dup@example.com
+        assert outcome['other'] < 1.0
+
+        time.sleep(0.3)
+        assert 'same' not in outcome  # still waiting on the held lock for the same email
+
+        release_holder.set()
+        same_prober.join(timeout=5)
+        assert 'same' in outcome
+    finally:
+        release_holder.set()  # in case an assertion above failed first
+        holder.join(timeout=5)
+        same_prober.join(timeout=5)
+        other_prober.join(timeout=5)
 
 
 # --- delete_user_sessions ----------------------------------------------------

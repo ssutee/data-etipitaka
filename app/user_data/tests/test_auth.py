@@ -45,6 +45,20 @@ def test_register_rejects_duplicate_username(api):
     assert 'username' in resp.json()
 
 
+def test_register_rejects_username_differing_only_by_case(api):
+    User.objects.create_user('newbie', 'first@example.com', 'pw12345678')
+    resp = _register(api, username='Newbie', email='second@example.com')
+    assert resp.status_code == 400
+    assert 'username' in resp.json()
+
+
+def test_register_rejects_email_differing_only_by_case(api):
+    User.objects.create_user('someone', 'N@x.com', 'pw12345678')
+    resp = _register(api, username='newbie', email='n@x.com')
+    assert resp.status_code == 400
+    assert 'email' in resp.json()
+
+
 def test_register_rejects_email_too_long(api):
     """User.email is a varchar(254); an over-length address must be a
     clean 400 from serializer validation, not a raw DataError 500 from

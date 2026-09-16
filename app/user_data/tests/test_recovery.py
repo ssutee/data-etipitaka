@@ -60,6 +60,32 @@ def test_reset_email_not_sent_to_inactive_user(client, alice):
     assert mail.outbox == []
 
 
+def test_reset_email_found_for_existing_mixed_case_email(client, alice):
+    """No regression from AccountIdentitySerializer's new case-insensitive
+    email matching: AccountRecoveryForm.get_users already matched
+    case-insensitively (email__iexact + _unicode_ci_compare) before this
+    change and must keep doing so unchanged -- a user whose stored email is
+    mixed-case is still found by a request using a different case."""
+    alice.email = 'Alice@Example.com'
+    alice.save()
+    mail.outbox.clear()
+    _request_reset(client, email='alice@example.com')
+    assert len(mail.outbox) == 1
+    assert LINK_RE.search(mail.outbox[0].body)
+
+
+def test_login_unaffected_by_mixed_case_stored_email(alice):
+    """LoginSerializer authenticates by username + password only, never by
+    email -- so a mixed-case stored email (unaffected by our change either
+    way) must not stop the user logging in."""
+    from user_data.serializers import LoginSerializer
+    alice.email = 'Alice@Example.com'
+    alice.save()
+    s = LoginSerializer(data={'username': 'alice', 'password': 'alicepass123'})
+    assert s.is_valid(), s.errors
+    assert s.validated_data['user'] == alice
+
+
 def test_token_invalidated_by_new_passkey(alice, authenticator):
     token = recovery_token_generator.make_token(alice)
     assert recovery_token_generator.check_token(alice, token)

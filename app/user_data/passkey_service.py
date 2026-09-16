@@ -41,7 +41,8 @@ from webauthn.helpers.structs import (AttestationConveyancePreference,
 
 from . import passkey_challenges as challenges
 from . import passkey_config as config
-from .account_tokens import check_session_engine, delete_user_sessions, revoke_all_tokens
+from .account_tokens import (check_session_engine, delete_user_sessions,
+                             lock_signup_email, revoke_all_tokens)
 from .models import Passkey, PasskeyEpoch, PasskeyUserHandle, WebAuthnChallenge
 from .serializers import AccountIdentitySerializer
 
@@ -619,16 +620,39 @@ def finish_signup(challenge_id, credential, name=None):
     crafted or replayed request never reaches user creation. The identity
     is re-validated here (not just in begin_signup) because the username or
     email may have been taken by someone else in between.
+
+    That re-validation now runs under account_tokens.lock_signup_email,
+    taken as the very first statement of the atomic block -- before the
+    identity re-check, not after -- because the re-check alone is not
+    enough to close the same-email race: User.email carries no DB
+    uniqueness constraint (unlike username, which the database itself
+    refuses to duplicate), so without a lock, two concurrent finish_signup
+    calls for the same email can both run their own re-check, both see
+    "not taken yet" (neither has committed its own row yet), and both
+    proceed to create an account. The lock serialises entry instead:
+    whichever call takes it first runs its whole re-check-then-insert
+    sequence and commits (releasing the lock) before the next call's own
+    re-check can even start, so that second call's re-check now correctly
+    sees the first call's row and raises SignupInvalid on 'email' below,
+    exactly like test_finish_signup_rechecks_email_taken_since_begin
+    already covers for the non-concurrent case.
+
+    finish_signup never holds the user row's own FOR UPDATE lock before
+    calling lock_signup_email -- there is no user row to lock yet at that
+    point, since this is exactly where one gets created -- so the ordering
+    warning in lock_signup_email's (and lock_user_tokens') own docstring
+    does not apply here.
     """
     row = _consume(challenge_id, WebAuthnChallenge.SIGNUP, None, RegistrationFailed)
     verified = _verify_registration(row.challenge, credential)
     payload = row.payload
-    serializer = AccountIdentitySerializer(data={'username': payload['username'],
-                                                 'email': payload['email']})
-    if not serializer.is_valid():  # taken since begin_signup
-        raise SignupInvalid(_plain_errors(serializer.errors))
     try:
         with transaction.atomic():
+            lock_signup_email(payload['email'])
+            serializer = AccountIdentitySerializer(data={'username': payload['username'],
+                                                         'email': payload['email']})
+            if not serializer.is_valid():  # taken since begin_signup, or by a racing signup
+                raise SignupInvalid(_plain_errors(serializer.errors))
             user = get_user_model()(username=payload['username'], email=payload['email'],
                                     is_active=False)
             user.set_unusable_password()

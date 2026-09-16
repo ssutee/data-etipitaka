@@ -68,6 +68,9 @@ here can fix that, because the collector's own internal order isn't
 something this module chooses. See lock_user_tokens for what actually
 closes it.
 """
+import hashlib
+import unicodedata
+
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
 from django.contrib.sessions.backends.db import SessionStore
@@ -91,6 +94,13 @@ _SESSION_DELETE_CHUNK = 500
 # (the second argument) can never collide with some unrelated advisory
 # lock elsewhere in this codebase or a future one that reuses the pattern.
 _ADVISORY_NAMESPACE = 0x70_6B
+
+# A second, distinct namespace for lock_signup_email below -- deliberately
+# not _ADVISORY_NAMESPACE, so a signup's email-derived lock key (an
+# arbitrary hash) can never collide with lock_user_tokens' own user-pk keys
+# in that other namespace, even though both live in the same
+# pg_advisory_xact_lock keyspace.
+_EMAIL_LOCK_NAMESPACE = 0x65_6D
 
 
 def lock_user_tokens(user_id):
@@ -170,6 +180,81 @@ def lock_user_tokens(user_id):
             'statement runs and would serialise nothing.')
     with connection.cursor() as cursor:
         cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)', [_ADVISORY_NAMESPACE, user_id])
+
+
+def _email_lock_key(email):
+    """A stable, process-independent int4 for pg_advisory_xact_lock's second
+    argument, derived from `email`.
+
+    Not Python's builtin hash(): str hashing is salted per-process
+    (PYTHONHASHSEED) unless explicitly disabled, so two different web
+    workers -- exactly the processes this lock exists to serialise against
+    each other -- would compute two different keys for the same email and
+    the lock would serialise nothing. hashlib is deterministic across
+    processes and Python versions, which a lock key must be.
+
+    `email` is normalised (NFKC, then casefolded) before hashing, matching
+    django.contrib.auth.forms._unicode_ci_compare -- the exact equivalence
+    relation AccountIdentitySerializer.validate_email and
+    AccountRecoveryForm.get_users both already use to decide whether two
+    email strings are "the same" address. Two spellings the identity check
+    would treat as duplicates must take the same lock regardless of which
+    one runs first, or the lock could fail to serialise the very race it
+    exists to close. A hash collision between two genuinely *different*
+    emails is harmless the other way: it only costs two unrelated signups a
+    moment's needless serialisation against each other, never a correctness
+    problem -- the actual uniqueness guarantee comes from the identity
+    re-check every caller of lock_signup_email runs after taking this lock,
+    not from this hash being collision-free.
+    """
+    normalized = unicodedata.normalize('NFKC', email).casefold()
+    digest = hashlib.sha256(normalized.encode('utf-8')).digest()
+    return int.from_bytes(digest[:4], 'big', signed=True)
+
+
+def lock_signup_email(email):
+    """Take a per-email Postgres advisory lock: pg_advisory_xact_lock(namespace, hash(email)).
+
+    User.email carries no DB uniqueness constraint (unlike username, which
+    the database itself refuses to duplicate) -- see
+    AccountIdentitySerializer.validate_email -- so nothing at the database
+    level stops two concurrent account-creation transactions from both
+    reading "email not taken yet" and both committing a row with it. This
+    lock is what actually serialises those two writers, the same way
+    lock_user_tokens serialises every writer of a single user's OAuth
+    tokens: taking it first, before the identity re-check that decides
+    whether the email is free, means whichever caller gets there first runs
+    its whole check-then-insert sequence and commits (releasing the lock)
+    before the next caller's own re-check can even run -- so that second
+    check always sees the first caller's row and correctly refuses.
+
+    Every writer that can create an account with a caller-supplied email
+    must call this, inside its own transaction, before re-checking whether
+    that email is taken: passkey_service.finish_signup and
+    RegisterSerializer.create (the two account-creation paths) both do.
+    Both share this one function/namespace, which is a deliberate bonus:
+    a passkey signup and a password signup racing for the same email are
+    serialised against each other too, not just against their own kind.
+
+    Same warning as lock_user_tokens: never call this while already holding
+    a user row's own FOR UPDATE lock in the same transaction -- that is the
+    deadlock shape lock_user_tokens' own docstring describes, just with
+    this lock substituted in. Neither caller today does: both take this
+    lock as the first statement of their atomic block, before the row it
+    guards even exists yet, so there is no user-row lock to have taken
+    first.
+
+    Same RuntimeError-outside-atomic guard as lock_user_tokens, and for the
+    same reason -- see that function's docstring.
+    """
+    if not connection.in_atomic_block:
+        raise RuntimeError(
+            'lock_signup_email() must run inside transaction.atomic(): taken in '
+            'autocommit, pg_advisory_xact_lock is released before the next '
+            'statement runs and would serialise nothing.')
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)',
+                       [_EMAIL_LOCK_NAMESPACE, _email_lock_key(email)])
 
 
 def revoke_all_tokens(user):
