@@ -44,6 +44,19 @@ ALLOWED_HOSTS = ['data.etipitaka.com', '128.199.181.198', 'localhost', '127.0.0.
 TRUST_PROXY_PROTO = os.environ.get('TRUST_PROXY_PROTO', '').strip().lower() in ('1', 'true', 'yes')
 if TRUST_PROXY_PROTO:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    # Once the proxy is confirmed to always set (never pass through a
+    # client-supplied) X-Forwarded-Proto -- the precondition TRUST_PROXY_PROTO
+    # itself gates on -- request.is_secure() is trustworthy, so it is also
+    # safe to mark the session and CSRF cookies HTTPS-only and stop sending
+    # them in the clear. It also makes the password-reset email link go out
+    # as https://: PasswordResetView.form_valid passes
+    # use_https=self.request.is_secure() to the form, so recovery.py's reset
+    # link inherits this the same way. Off by default (bundled into this
+    # same switch, not a separate env var) so the local http-only compose
+    # stack keeps working: turned on over plain http, the browser would
+    # never send these cookies back and login/CSRF would silently break.
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 
 # Application definition
@@ -78,7 +91,45 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_THROTTLE_RATES': {
         'login': '10/min',
+        'passkey': '20/min',
+        # register_begin (its step-up password check) and password_remove
+        # both accept a password guess whose payoff is persistent account
+        # takeover -- an attacker passkey added there survives a password
+        # change and isn't revoked by remove_password. Legitimate use is
+        # one or two requests ever, so this sits well below 'passkey' and
+        # applies alongside it, not instead of it. See PasskeyPasswordThrottle.
+        'passkey_password': '5/min',
     },
+    # nginx (nginx.conf) always appends the real client address as the LAST
+    # entry of X-Forwarded-For via $proxy_add_x_forwarded_for -- it never
+    # merely passes a client-supplied value through -- so DRF's throttle
+    # should key on that last entry, not the whole header. Without this,
+    # SimpleRateThrottle.get_ident falls back to using the entire raw
+    # X-Forwarded-For string as the cache-key ident (api_settings.NUM_PROXIES
+    # is None by default), and since a client can set that header to
+    # anything on its *own* request, it can pick a fresh, never-seen ident on
+    # every request and dodge the bucket entirely -- making every IP-keyed
+    # DRF throttle in this project (LoginRateThrottle, PasskeyRateThrottle)
+    # useless. NUM_PROXIES: 1 makes get_ident() take addrs[-1] instead: see
+    # test_num_proxies_pins_ident_to_real_client_despite_spoofed_forwarded_for
+    # in user_data/tests/test_passkey_views.py. This is 1 regardless of how
+    # many real network hops sit in front of this container (in production a
+    # host-level TLS terminator also sits ahead of nginx/ -- see
+    # docs/remote-mcp-oauth-deploy.md): that host proxy is required to
+    # *overwrite* X-Forwarded-For with just the client's address rather than
+    # append to it, and this container's own nginx then resolves the real
+    # peer through set_real_ip_from/real_ip_recursive before appending it via
+    # $proxy_add_x_forwarded_for -- so the entry this container's nginx adds
+    # is always the last one and always correct, no matter what a client (or
+    # an untrusted earlier hop) put in front of it. NUM_PROXIES only needs to
+    # change if this container's nginx stops being the sole thing appending
+    # the header value Django ultimately trusts.
+    'NUM_PROXIES': 1,
+    # Maps a RecursionError from parsing a pathologically deep JSON body
+    # (json.loads has no nesting-depth limit of its own) to a clean 400
+    # instead of an unhandled 500; delegates every other exception to DRF's
+    # own default handler. See user_data/drf_handlers.py.
+    'EXCEPTION_HANDLER': 'user_data.drf_handlers.exception_handler',
 }
 
 # OAuth 2.1 Authorization Server (django-oauth-toolkit) backing the remote MCP
@@ -110,6 +161,13 @@ OAUTH2_PROVIDER = {
     'REFRESH_TOKEN_EXPIRE_SECONDS': 30 * 24 * 3600,
     'ROTATE_REFRESH_TOKEN': True,
     'RESOURCE_SERVER_TOKEN_RESOURCE_VALIDATOR': 'user_data.oauth_resource.validate_mcp_audience',
+    # Every OAuth token write (issuance, refresh-token rotation, a
+    # reuse-triggered family revoke, RFC 7009 revocation) takes a per-user
+    # Postgres advisory lock before touching a row -- see
+    # user_data.account_tokens.lock_user_tokens -- so it can never deadlock
+    # against passkey recovery's own token revocation, which takes the same
+    # lock.
+    'OAUTH2_VALIDATOR_CLASS': 'user_data.oauth_validators.EtipitakaOAuth2Validator',
     # Enforce the OAuth 2.1 / RFC 9700 posture the server metadata advertises:
     # S256-only PKCE, no implicit/password grants, tokens only in headers,
     # RFC 9207 `iss` in the authorization response, and refresh-token reuse
@@ -131,6 +189,35 @@ OAUTH2_PROVIDER = {
     'OAUTH2_RESPONSE_TYPES_SUPPORTED': ['code'],
     'OAUTH2_GRANT_TYPES_SUPPORTED': ['authorization_code', 'refresh_token'],
 }
+
+# Passkeys (WebAuthn). The relying-party ID and web origin default to the
+# public issuer; local browser testing overrides both (localhost) through the
+# gitignored docker-compose.override.yml, never the tracked .env. Android
+# values are set the same way in production. See
+# docs/superpowers/specs/2026-09-14-passkey-login-design.md.
+def _env_list(name, default=''):
+    # `or default` (not the dict-style get(name, default)) so an env var
+    # explicitly set to '' -- e.g. a compose file overriding a value with an
+    # empty string -- falls back to default instead of wiping it out.
+    return [v.strip() for v in (os.environ.get(name) or default).split(',') if v.strip()]
+
+
+PASSKEY_RP_ID = os.environ.get('PASSKEY_RP_ID', '').strip()
+PASSKEY_WEB_ORIGIN = os.environ.get('PASSKEY_WEB_ORIGIN', '').strip()
+PASSKEY_RP_NAME = 'E-Tipitaka'
+PASSKEY_IOS_APP_IDS = _env_list('PASSKEY_IOS_APP_IDS', 'A6DJDJ7527.com.watnapp.E-Tipitaka-Plus')
+PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')
+PASSKEY_ANDROID_CERT_SHA256 = _env_list('PASSKEY_ANDROID_CERT_SHA256')
+PASSKEY_CHALLENGE_TTL = 300  # seconds
+
+# Declared explicitly, even though it matches Django's own default, because
+# account_tokens.delete_user_sessions (passkey/password recovery signing out
+# every other session) requires a plain, uncached 'db' session store it can
+# read and delete rows from directly -- see check_session_engine and
+# user_data.checks.check_passkey_session_engine, which fails `manage.py
+# check` loudly if this ever drifts, instead of a silent 500 at recovery
+# time. Pin here rather than relying on the default staying what it is.
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
@@ -250,3 +337,5 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
     # Disable login throttling under tests — the in-process throttle cache
     # would otherwise accumulate across test cases and trip false 429s.
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'] = None
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey'] = None
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey_password'] = None

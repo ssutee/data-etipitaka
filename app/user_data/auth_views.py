@@ -21,8 +21,16 @@ from .serializers import RegisterSerializer, LoginSerializer
 
 
 class LoginRateThrottle(AnonRateThrottle):
-    """Throttles the token-login endpoint by client IP (rate: settings 'login')."""
+    """Throttles the token-login endpoint by client IP (rate: settings 'login').
+
+    `rate` is declared explicitly (DRF's own SimpleRateThrottle does not
+    define it as a class attribute, only ever as an instance attribute set
+    inside __init__) so a test can monkeypatch the class attribute to
+    exercise throttling without touching settings -- see
+    PasskeyRateThrottle in passkey_views.py, which does the same.
+    """
     scope = 'login'
+    rate = None
 
 
 def _signer():
@@ -98,11 +106,29 @@ def rest_register(request):
                     status=status.HTTP_201_CREATED)
 
 
+def _key_from_body(request):
+    """The 'key' field as a str, tolerating a hostile JSON body.
+
+    Unlike passkey_views' endpoints, this one has no fields but 'key' to
+    read, so there's no need for a shared _body() gate -- but request.data
+    itself can be any JSON value (list/string/number/null), not only a
+    dict (`[]`.get, `"x"`.get, `(7).get` all raise AttributeError), and
+    even inside a dict 'key' can be any JSON type (a non-str reaches
+    TimestampSigner.unsign, which raises unhandled exceptions for it). Both
+    collapse to '' here, which _activate_from_token already treats as an
+    invalid token -> a clean 400, never a 500.
+    """
+    data = request.data
+    key = data.get('key', '') if isinstance(data, dict) else ''
+    return key if isinstance(key, str) else ''
+
+
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
+@throttle_classes([LoginRateThrottle])
 def rest_verify_email(request):
-    user = _activate_from_token(request.data.get('key', ''))
+    user = _activate_from_token(_key_from_body(request))
     if user is None:
         return Response({'detail': _('Invalid or expired token.')},
                         status=status.HTTP_400_BAD_REQUEST)

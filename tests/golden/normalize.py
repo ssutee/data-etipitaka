@@ -21,6 +21,9 @@ def normalize_json_value(value):
         for key, val in value.items():
             if key in ("created_at", "created"):
                 out[key] = "<TIMESTAMP>"
+            elif key in ("challenge", "challenge_id"):
+                # WebAuthn challenges are random per request
+                out[key] = "<CHALLENGE>"
             elif key == "pk":
                 # top-level auto-increment ids are not deterministic across runs
                 out[key] = "<PK>"

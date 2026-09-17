@@ -1,0 +1,15 @@
+{
+  "body": {
+    "json": {
+      "webcredentials": {
+        "apps": [
+          "A6DJDJ7527.com.watnapp.E-Tipitaka-Plus"
+        ]
+      }
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}

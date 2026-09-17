@@ -1,0 +1,19 @@
+{
+  "body": {
+    "json": {
+      "challenge_id": "<CHALLENGE>",
+      "options": {
+        "allowCredentials": [],
+        "challenge": "<CHALLENGE>",
+        "rpId": "data.etipitaka.com",
+        "timeout": 300000,
+        "userVerification": "required"
+      }
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, POST",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

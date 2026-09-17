@@ -1,0 +1,12 @@
+{% load i18n %}{% autoescape off %}{% blocktrans %}Hello {{ username }},{% endblocktrans %}
+
+{% blocktrans %}The passkey named "{{ passkey_name }}" was deleted from your E-Tipitaka account.{% endblocktrans %}
+
+{% trans "You can review your passkeys here:" %}
+{{ security_url }}
+
+{% trans "If this was not you, recover your account now:" %}
+{{ reset_url }}
+
+-- E-Tipitaka
+{% endautoescape %}

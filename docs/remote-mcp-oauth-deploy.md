@@ -60,17 +60,35 @@ TRUST_PROXY_PROTO=1
 via `docker-compose.override.yml` (gitignored, prod-side override file — the
 same mechanism used for `CANON_RESOURCES_DIR` in
 [`docs/canon-remote-deploy.md`](canon-remote-deploy.md)). This turns on
-Django's `SECURE_PROXY_SSL_HEADER`. The parser accepts `1`, `true`, `yes`
-case-insensitively (see `TRUST_PROXY_PROTO` in
-`app/etipitaka_auth/settings.py`). `TRUST_PROXY_PROTO` is intentionally not
-read from `.env`, since `.env` is tracked and shared with production.
+**three** things together (see `TRUST_PROXY_PROTO` in
+`app/etipitaka_auth/settings.py`): Django's `SECURE_PROXY_SSL_HEADER`, and
+`SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` — the session and CSRF
+cookies become HTTPS-only. The parser accepts `1`, `true`, `yes`
+case-insensitively. `TRUST_PROXY_PROTO` is intentionally not read from
+`.env`, since `.env` is tracked and shared with production.
 
 Until it's enabled, dynamic client registration hands back an `http://`
-`registration_client_uri` regardless of the actual scheme — see above.
+`registration_client_uri` regardless of the actual scheme, and
+password-reset emails link to `http://` instead of `https://`
+(`PasswordResetView.form_valid` passes `use_https=request.is_secure()`,
+which without this flag is always `False`) — see above.
+
+**Once it's enabled, plain HTTP access to the published `1338:80` port
+stops working for anything that needs a cookie.** A browser will not send
+a `Secure` cookie back over plain HTTP, so hitting the container directly
+at `http://<host>:1338` — bypassing the TLS-terminating host proxy this
+flag assumes is always in front — silently breaks login, CSRF, and any
+session-backed page for that visitor: the request still succeeds at the
+HTTP level, the cookie is simply never sent back. Only turn this on once
+the host proxy is confirmed to be the sole public path to port 1338 (see
+"Recommended follow-up" below).
 
 ## Rate limiting and throttled responses
 
-`nginx/nginx.conf` rate-limits four public write/read paths:
+`nginx/nginx.conf` rate-limits two families of paths: the original OAuth/MCP
+surface, and the passkey/account-recovery surface added since.
+
+OAuth / MCP:
 
 - `/mcp` — 10 req/s, burst 20.
 - `/o/register/` (dynamic client registration, both spellings — the
@@ -85,10 +103,44 @@ Until it's enabled, dynamic client registration hands back an `http://`
   entirely — so this limit exists only to stop the `/mcp` rate limit from
   being routed around by hitting the resource-server check directly.
 
-A throttled request gets `429` with a `Retry-After` header and a small JSON
-body (`{"error":"rate_limited",...}`) instead of nginx's stock HTML error
-page, so a JSON-RPC client mid-session gets something it can parse and act
-on.
+Passkeys and account recovery (anonymous, or reached before any session
+exists, so the client IP is the only key available):
+
+- `/login/passkey/` (both spellings), `/account/recover/passkey/*`, and
+  `/api/passkeys/(login|signup)/*` — 60 req/min, burst 30. Loose enough to
+  absorb carrier-grade NAT / a large office sharing one public IP, and the
+  login page's own conditional-mediation autofill (a `login/begin` on
+  every page view, plus a refresh every 270s for every open tab).
+  Credential guessing itself is stopped by single-use challenges, required
+  user verification and a DRF-level throttle, not by this zone.
+- The rest of `/api/passkeys/*` — signed-in management: list/rename/delete
+  an existing passkey, register a new one, remove the password fallback —
+  60 req/min, burst 20.
+- `/password_reset/` and the `/reset/<uidb64>/...` confirm flow — split by
+  HTTP method, because a normal recovery is already a GET (the email
+  link) → GET (the `.../set-password/` redirect Django sends a valid
+  token to) → POST sequence, and a single shared budget left almost
+  nothing for a second attempt. GETs get 20 req/min, burst 10; POSTs — the
+  two actions that actually do something, mailing an address and setting
+  a password — get 5 req/min, burst 3.
+
+Every passkey/recovery location above also caps the request body at 64 KiB
+(`client_max_body_size 64k`; the server-wide default, set at the top of the
+file, is unlimited). `/.well-known/*` matches none of these locations and
+is never rate-limited — confirmed with a 30-request burst against each
+`.well-known` path returning zero `429`s — because a `429` to Apple's or
+Google's crawler there risks the domain being marked unreachable.
+
+A throttled request gets `429` with a `Retry-After` header. Every location
+above except the password-reset/reset-confirm one returns a small JSON
+body instead of nginx's stock HTML error page, so a JSON-RPC or `fetch()`
+caller mid-session gets something it can parse and act on; the passkey
+bodies also carry a `"detail"` key (`{"error":"rate_limited",
+"retry_after":1,"detail":"..."}` — additive, so a client that only reads
+`error`/`retry_after` still works). `/password_reset/` and the
+reset-confirm flow are the one exception: that surface is reached by a
+browser following an emailed link, not a script, so its `429` renders a
+small HTML page instead of a JSON blob a person would otherwise see raw.
 
 ## Token table growth — schedule `cleartokens`
 
@@ -99,6 +151,11 @@ bound under normal use, not just abuse. Schedule
 periodically (e.g. daily via cron/systemd timer on the host) to prune
 expired tokens and grants. There is no cron process inside this compose
 stack today — the operator must add one.
+
+Schedule `docker compose exec -T web python manage.py purge_unactivated`
+on the same cron/timer to delete accounts permanently stranded by passkey
+signup (inactive, unusable password, no login, expired verification link
+— see that command's own module docstring for the exact criteria).
 
 ## Recommended follow-up (not applied here — operator to confirm and apply)
 

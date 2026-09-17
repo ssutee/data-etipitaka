@@ -2,10 +2,12 @@ import json
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import RequestFactory
 
 from user_data.models import UserData, SyncData, Sharing
 from user_data.tests.conftest import make_syncdata, make_userdata
 from user_data.tests.test_oauth import DCR_BODY, _authz_params, _pkce
+from user_data.views import _safe_redirect_target
 
 pytestmark = pytest.mark.django_db
 
@@ -310,6 +312,21 @@ def test_login_view_post_invalid(api, alice):
     assert resp.status_code == 200
 
 
+@pytest.mark.parametrize('body', [
+    {'username': 'alice'},        # missing password
+    {'password': 'alicepass123'},  # missing username
+    {},                            # missing both
+], ids=['missing-password', 'missing-username', 'missing-both'])
+def test_login_view_post_missing_field_is_invalid_not_500(api, alice, body):
+    # A hand-crafted POST missing a field used to raise an uncaught
+    # MultiValueDictKeyError (request.POST['...']) -- this is an
+    # anonymous, unthrottled endpoint, so it must fail like any other bad
+    # credential instead.
+    resp = api.post('/login/', body)
+    assert resp.status_code == 200
+    assert resp.context['invalid_login'] is True
+
+
 def test_user_data_view_authenticated_renders(api, alice):
     api.force_login(alice)
     resp = api.get('/user_data/')
@@ -361,6 +378,41 @@ def test_login_view_post_without_next_redirects_root(api, alice):
     resp = api.post('/login/', {'username': 'alice', 'password': 'alicepass123'})
     assert resp.status_code == 302
     assert resp['Location'] == '/'
+
+
+@pytest.mark.parametrize('next_url', [
+    # A leading '/' hides the embedded tab/CR/LF from
+    # url_has_allowed_host_and_scheme's own startswith('///') guard, which
+    # runs before that function's urlsplit() strips these characters (at any
+    # position) the same way a real browser does -- see
+    # _safe_redirect_target's docstring. The password-login path shares that
+    # helper with /login/passkey/, so it inherits the same fix.
+    '/\r\n//evil.example', '/\t//evil.example', '//\t/evil.example',
+])
+def test_login_view_post_with_browser_parsed_offhost_next_falls_back_to_root(api, alice, next_url):
+    resp = api.post('/login/', {
+        'username': 'alice', 'password': 'alicepass123', 'next': next_url,
+    })
+    assert resp.status_code == 302
+    assert resp['Location'] == '/'
+
+
+# --- _safe_redirect_target: direct unit tests --------------------------------
+
+@pytest.mark.parametrize('next_url', [
+    '/\r\n//evil.example', '/\t//evil.example', '//\t/evil.example',
+])
+def test_safe_redirect_target_rejects_tab_cr_lf_bypass(next_url):
+    request = RequestFactory().post('/login/passkey/')
+    assert _safe_redirect_target(request, next_url) == '/'
+
+
+@pytest.mark.parametrize('next_url', [
+    '/o/authorize/?client_id=x', '/a/b?c=d#e', 'http://testserver/x',
+])
+def test_safe_redirect_target_still_allows_safe_targets(next_url):
+    request = RequestFactory().post('/login/passkey/')
+    assert _safe_redirect_target(request, next_url) == next_url
 
 
 def test_login_view_invalid_credentials_preserves_next(api, alice):
@@ -415,6 +467,23 @@ def test_login_form_omits_hidden_next_field_when_absent(api):
     resp = api.get('/login/')
     assert resp.status_code == 200
     assert 'name="next"' not in _login_form_html(resp)
+
+
+def test_login_page_has_two_next_inputs_navbar_and_login_form(api):
+    # base.html's language-switcher form always renders its own hidden
+    # `next` field (holding request.path); the login form (`#signup`) has a
+    # second, conditional one holding the real redirect target and comes
+    # later in the DOM. passkey_login.js (Task 18) must scope its lookup to
+    # `#signup input[name=next]` rather than the first `input[name=next]` on
+    # the page, or it would post the wrong value. This guards the invariant
+    # that assumption relies on.
+    resp = api.get('/login/?next=%2Fo%2Fauthorize%2F%3Fclient_id%3Dabc')
+    content = resp.content.decode()
+    assert content.count('name="next"') == 2
+    navbar_html = content[:content.index('id="signup"')]
+    assert 'value="/login/"' in navbar_html
+    form_html = _login_form_html(resp)
+    assert 'value="/o/authorize/?client_id=abc"' in form_html
 
 
 def test_login_form_never_interpolates_next_value(api):

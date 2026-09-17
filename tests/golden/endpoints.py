@@ -15,7 +15,7 @@ UPLOAD_BODY = json.dumps({"seed": "upload_payload", "version": 1})
 
 class GoldenCase(object):
     def __init__(self, case_id, method, path, token=None, data=None,
-                 files=None, allow_redirects=False):
+                 files=None, allow_redirects=False, json_body=None):
         self.id = case_id
         self.method = method
         self.path = path
@@ -23,6 +23,7 @@ class GoldenCase(object):
         self.data = data
         self.files = files
         self.allow_redirects = allow_redirects
+        self.json_body = json_body
 
     def execute(self, http, base_url):
         headers = {}
@@ -34,7 +35,7 @@ class GoldenCase(object):
                      for k, (fn, content, ct) in self.files.items()}
         return http.request(
             self.method, base_url + self.path,
-            headers=headers, data=self.data, files=files,
+            headers=headers, data=self.data, files=files, json=self.json_body,
             allow_redirects=self.allow_redirects, timeout=30,
         )
 
@@ -76,6 +77,15 @@ GOLDEN_CASES = [
     GoldenCase("oauth_as_metadata", "GET", "/.well-known/oauth-authorization-server"),
     GoldenCase("mcp_resource_metadata", "GET", "/.well-known/oauth-protected-resource/mcp"),
     GoldenCase("mcp_unauthenticated", "POST", "/mcp"),
+
+    # --- passkeys (same-stack; old stack lacks these routes) ---
+    GoldenCase("apple_app_site_association", "GET", "/.well-known/apple-app-site-association"),
+    GoldenCase("assetlinks_unset", "GET", "/.well-known/assetlinks.json"),
+    GoldenCase("passkey_login_begin", "POST", "/api/passkeys/login/begin/", json_body={}),
+    GoldenCase("passkey_login_finish_bad_challenge", "POST", "/api/passkeys/login/finish/",
+               json_body={"challenge_id": "nope", "credential": {}}),
+    GoldenCase("passkeys_list_anon", "GET", "/api/passkeys/"),
+    GoldenCase("passkeys_list_alice", "GET", "/api/passkeys/", token=ALICE_TOKEN),
 
     # --- file downloads (body stored as md5 by normalizer) ---
     GoldenCase("download_sync_data_alice", "GET", "/sync_data/sync_alice.json/", token=ALICE_TOKEN),

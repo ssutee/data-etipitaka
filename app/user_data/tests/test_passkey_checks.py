@@ -1,0 +1,181 @@
+import pytest
+
+from user_data.checks import (check_passkey_android_config, check_passkey_session_engine,
+                              check_passkey_web_origin)
+
+
+def _valid_fingerprint():
+    return ':'.join(['AB'] * 32)
+
+
+def test_valid_config_passes(settings):
+    settings.PASSKEY_ANDROID_PACKAGE = 'com.watnapp.E-Tipitaka-Plus'
+    settings.PASSKEY_ANDROID_CERT_SHA256 = [_valid_fingerprint()]
+    assert check_passkey_android_config(None) == []
+
+
+def test_empty_pair_passes(settings):
+    settings.PASSKEY_ANDROID_PACKAGE = ''
+    settings.PASSKEY_ANDROID_CERT_SHA256 = []
+    assert check_passkey_android_config(None) == []
+
+
+@pytest.mark.parametrize('fingerprint', [
+    'AB:CD',        # too short -- decodes to 2 bytes, not 32
+    'A' * 63,       # odd-length hex string
+    'zz' * 32,      # right length but not hex digits
+], ids=['short', 'odd-length', 'non-hex'])
+def test_bad_fingerprint_fails_with_expected_id(settings, fingerprint):
+    settings.PASSKEY_ANDROID_PACKAGE = 'com.watnapp.E-Tipitaka-Plus'
+    settings.PASSKEY_ANDROID_CERT_SHA256 = [fingerprint]
+
+    errors = check_passkey_android_config(None)
+
+    assert [e.id for e in errors] == ['user_data.E002']
+
+
+def test_package_without_fingerprint_fails(settings):
+    settings.PASSKEY_ANDROID_PACKAGE = 'com.watnapp.E-Tipitaka-Plus'
+    settings.PASSKEY_ANDROID_CERT_SHA256 = []
+
+    errors = check_passkey_android_config(None)
+
+    assert [e.id for e in errors] == ['user_data.E001']
+
+
+def test_fingerprint_without_package_fails(settings):
+    settings.PASSKEY_ANDROID_PACKAGE = ''
+    settings.PASSKEY_ANDROID_CERT_SHA256 = [_valid_fingerprint()]
+
+    errors = check_passkey_android_config(None)
+
+    assert [e.id for e in errors] == ['user_data.E001']
+
+
+# --- check_passkey_web_origin ------------------------------------------------
+
+def test_web_origin_passes_with_defaults(settings):
+    # No override: PASSKEY_WEB_ORIGIN/PASSKEY_RP_ID fall back to
+    # OAUTH_ISSUER_URL and its hostname, which necessarily agree.
+    settings.PASSKEY_WEB_ORIGIN = ''
+    settings.PASSKEY_RP_ID = ''
+    assert check_passkey_web_origin(None) == []
+
+
+@pytest.mark.parametrize('origin', [
+    'not-a-url',      # no scheme -- urlparse gives it none
+    'https://',        # scheme but no host
+    'ftp://example.com',  # wrong scheme
+], ids=['no-scheme', 'no-host', 'wrong-scheme'])
+def test_web_origin_rejects_unparseable_origin(settings, origin):
+    settings.PASSKEY_WEB_ORIGIN = origin
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E003']
+
+
+def test_web_origin_accepts_matching_rp_id(settings):
+    settings.PASSKEY_WEB_ORIGIN = 'https://example.com'
+    settings.PASSKEY_RP_ID = 'example.com'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_accepts_rp_id_as_registrable_suffix(settings):
+    settings.PASSKEY_WEB_ORIGIN = 'https://login.example.com'
+    settings.PASSKEY_RP_ID = 'example.com'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_rejects_mismatched_rp_id(settings):
+    settings.PASSKEY_WEB_ORIGIN = 'https://example.com'
+    settings.PASSKEY_RP_ID = 'other.com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E004']
+
+
+def test_web_origin_rejects_rp_id_that_is_only_a_substring(settings):
+    # 'ample.com' is a substring of 'example.com' but not a registrable
+    # suffix of it (no '.' boundary) -- must not be accepted as one.
+    settings.PASSKEY_WEB_ORIGIN = 'https://example.com'
+    settings.PASSKEY_RP_ID = 'ample.com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E004']
+
+
+@pytest.mark.parametrize('origin', [
+    'https://data.etipitaka.com/login',   # non-root path
+    'https://data.etipitaka.com?x=1',     # query string
+    'https://data.etipitaka.com#section', # fragment
+], ids=['path', 'query', 'fragment'])
+def test_web_origin_rejects_path_query_or_fragment(settings, origin):
+    # A WebAuthn origin is scheme+host[+port] only -- these all parse
+    # "successfully" but are not an origin any browser will ever report,
+    # so every ceremony would fail expected_origin if this were accepted.
+    settings.PASSKEY_WEB_ORIGIN = origin
+    settings.PASSKEY_RP_ID = 'data.etipitaka.com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E003']
+
+
+def test_web_origin_accepts_bare_root_path(settings):
+    # A single trailing '/' is harmless (and is what web_origin() itself
+    # would produce before its own rstrip('/') -- kept permissive here).
+    settings.PASSKEY_WEB_ORIGIN = 'https://example.com/'
+    settings.PASSKEY_RP_ID = 'example.com'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_rejects_dotless_rp_id_even_though_naive_suffix_check_would_accept_it(settings):
+    # 'com' is not a registrable domain, but 'data.etipitaka.com'.endswith
+    # ('.com') is True -- the naive suffix check alone would wrongly accept
+    # it. This is exactly the case user_data.E007 exists to catch.
+    settings.PASSKEY_WEB_ORIGIN = 'https://data.etipitaka.com'
+    settings.PASSKEY_RP_ID = 'com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E007']
+
+
+def test_web_origin_allows_localhost_rp_id_despite_no_dot(settings):
+    settings.PASSKEY_WEB_ORIGIN = 'http://localhost:8000'
+    settings.PASSKEY_RP_ID = 'localhost'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_reports_clean_error_instead_of_crashing_when_rp_id_is_undeterminable(settings):
+    # PASSKEY_RP_ID empty + a scheme-less OAUTH_ISSUER_URL means
+    # urlparse(OAUTH_ISSUER_URL).hostname is also None -- passkey_config.
+    # rp_id() returns None, which used to blow up downstream as
+    # `hostname.endswith('.' + None)` -> TypeError. PASSKEY_WEB_ORIGIN is
+    # set independently and validly, so the function gets past the origin
+    # check before ever computing rp_id.
+    settings.PASSKEY_WEB_ORIGIN = 'https://data.etipitaka.com'
+    settings.PASSKEY_RP_ID = ''
+    settings.OAUTH_ISSUER_URL = 'data.etipitaka.com'  # no scheme
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E006']
+
+
+# --- check_passkey_session_engine --------------------------------------------
+
+def test_session_engine_passes_for_db_backend(settings):
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+    assert check_passkey_session_engine(None) == []
+
+
+def test_session_engine_fails_for_other_backends(settings):
+    settings.SESSION_ENGINE = 'django.contrib.sessions.backends.cached_db'
+
+    errors = check_passkey_session_engine(None)
+
+    assert [e.id for e in errors] == ['user_data.E005']

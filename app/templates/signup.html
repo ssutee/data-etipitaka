@@ -18,6 +18,39 @@
             </div>
         </div>
     </script>
+    {# Shown by passkey_signup.js when the browser supports passkeys. ng-non-bindable: its text is set by that script. #}
+    <div id="passkey-signup" hidden ng-non-bindable>
+      <form class="form-horizontal" id="passkey-signup-form" role="form">
+        <div class="form-group row">
+          <label for="passkey-email" class="col-sm-2 control-label">{% trans "Email" %}</label>
+          <div class="col-sm-6">
+            <input required name="email" type="email" class="form-control" id="passkey-email" placeholder="{% trans 'Email' %}" autocomplete="email">
+          </div>
+          <span class="col-sm-4 error-msg" id="passkey-email-error"></span>
+        </div>
+        <div class="form-group row">
+          <label for="passkey-username" class="col-sm-2 control-label">{% trans "Username" %}</label>
+          <div class="col-sm-6">
+            <input required name="username" type="text" class="form-control" id="passkey-username" placeholder="{% trans 'Username' %}" autocomplete="username">
+          </div>
+          <span class="col-sm-4 error-msg" id="passkey-username-error"></span>
+        </div>
+        <div class="form-group row">
+          <div class="col-sm-offset-2 col-sm-10">
+            <button type="submit" class="btn btn-primary">{% trans "Create account with a passkey" %}</button>
+            <br/><span class="error-msg" id="passkey-signup-error"></span>
+            <p><a href="#" id="show-password-signup">{% trans "Sign up with a password instead" %}</a></p>
+          </div>
+        </div>
+      </form>
+    </div>
+    <div id="password-signup">
     {% include "forms/signup_form.html" %}
+    </div>
 </div>
+{% endblock %}
+
+{% block script %}
+<script src="{% static 'passkey.js' %}"></script>
+<script src="{% static 'passkey_signup.js' %}"></script>
 {% endblock %}
