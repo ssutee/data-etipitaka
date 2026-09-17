@@ -1,10 +1,12 @@
 import pytest
 from django.contrib.auth.models import User
 from django.core import mail
+from django.core.cache import cache
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-from user_data.auth_views import _signer
+from user_data import auth_views
+from user_data.auth_views import LoginRateThrottle, _signer
 
 pytestmark = pytest.mark.django_db
 
@@ -130,6 +132,40 @@ def test_verify_email_rejects_token_for_deleted_user(api):
     user.delete()
     resp = api.post('/rest-auth/registration/verify-email/', {'key': token})
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('body', [
+    [],
+    'x',
+    7,
+    None,
+    {'key': 7},
+    {'key': []},
+], ids=['list', 'string', 'number', 'null', 'key-is-int', 'key-is-list'])
+def test_verify_email_rejects_hostile_body_without_500(api, body):
+    # request.data can be any JSON top-level value (a bare list/string/
+    # number/null), and even inside a dict 'key' can be any JSON type --
+    # none of these may ever reach a 5xx (see _key_from_body's docstring).
+    resp = api.post('/rest-auth/registration/verify-email/', body, format='json')
+    assert resp.status_code == 400
+
+
+def test_verify_email_uses_same_throttle_scope_as_login():
+    # rest_verify_email was the one anonymous JSON endpoint the branch's
+    # throttling hardening didn't reach; it now shares rest_login's scope.
+    assert auth_views.rest_verify_email.cls.throttle_classes == [LoginRateThrottle]
+    assert LoginRateThrottle.scope == 'login'
+
+
+def test_verify_email_is_throttled(api, monkeypatch):
+    cache.clear()
+    monkeypatch.setattr(LoginRateThrottle, 'rate', '2/min')
+    try:
+        codes = [api.post('/rest-auth/registration/verify-email/', {'key': 'garbage'}).status_code
+                 for _i in range(3)]
+    finally:
+        cache.clear()
+    assert codes == [400, 400, 429]
 
 
 def test_confirm_email_link_activates_and_redirects(api):

@@ -258,8 +258,13 @@ def login_view(request):
     # from a logged-out client doesn't dead-end at '/'.
     next_url = request.POST.get('next') or request.GET.get('next') or ''
     if request.method == 'POST':
-        username = request.POST['username']
-        password = request.POST['password']
+        # .get(..., '') -- not request.POST['...'] -- because this is an
+        # anonymous, unthrottled endpoint: a POST missing either field (a
+        # hand-crafted request, not anything the login form itself can
+        # produce) must fail authentication like any other bad credential,
+        # not raise an uncaught MultiValueDictKeyError.
+        username = request.POST.get('username', '')
+        password = request.POST.get('password', '')
         user = authenticate(username=username, password=password)
         if user is not None:
             if user.is_active:

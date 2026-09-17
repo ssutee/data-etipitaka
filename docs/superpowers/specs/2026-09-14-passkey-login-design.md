@@ -204,7 +204,7 @@ translate their exceptions into HTTP codes.
 - `finish_login(challenge_id, credential) -> User` — find `Passkey` by
   `credential.id`; require `response.userHandle` present and equal to the
   owner's handle; `verify_authentication_response(...,
-  expected_rp_id, expected_origin=PASSKEY_EXPECTED_ORIGINS,
+  expected_rp_id, expected_origin=passkey_config.expected_origins(),
   credential_public_key, credential_current_sign_count,
   require_user_verification=True)`. The library rejects a non-increasing
   counter whenever either value is non-zero. Then update `sign_count`,
@@ -468,7 +468,7 @@ logged in on this browser → `/account/security/` → delete old passkey.
 | Threat | Control |
 |---|---|
 | Stolen device used without the owner's biometric or PIN | `userVerification: required` on every ceremony; library rejects a response without the UV flag |
-| Phishing, wrong site | library verifies RP ID hash and origin against `PASSKEY_EXPECTED_ORIGINS` |
+| Phishing, wrong site | library verifies RP ID hash and origin against `passkey_config.expected_origins()` |
 | Replay | challenge single-use (deleted before verify), 5-minute expiry, bound to `purpose` and `user` |
 | Cloned authenticator | library rejects a non-increasing sign counter when either value is non-zero; logged as a warning without credential or challenge values |
 | Credential registered to two accounts | `credential_id` unique; registration of an existing id → 400 |
@@ -552,8 +552,8 @@ attestation, and it avoids collecting device identifiers.
   `account_security.js`. See `tests/README.md`.
 
 **Golden harness (HTTP, same-stack)**
-- `normalize.py` masks `challenge`, `challenge_id` and `user.id` values as
-  `<CHALLENGE>`, with a `test_normalize.py` case.
+- `normalize.py` masks `challenge` and `challenge_id` values as
+  `<CHALLENGE>` (it does not mask `user.id`), with a `test_normalize.py` case.
 - New cases: `apple_app_site_association`, `assetlinks_unset`,
   `passkey_login_begin`, `passkey_login_finish_bad_challenge`,
   `passkeys_list_anon`, `passkeys_list_alice` (empty list, `has_password: true`).

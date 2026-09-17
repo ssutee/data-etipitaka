@@ -152,6 +152,11 @@ periodically (e.g. daily via cron/systemd timer on the host) to prune
 expired tokens and grants. There is no cron process inside this compose
 stack today — the operator must add one.
 
+Schedule `docker compose exec -T web python manage.py purge_unactivated`
+on the same cron/timer to delete accounts permanently stranded by passkey
+signup (inactive, unusable password, no login, expired verification link
+— see that command's own module docstring for the exact criteria).
+
 ## Recommended follow-up (not applied here — operator to confirm and apply)
 
 - **Bind the published port to loopback.** `docker-compose.yml` currently

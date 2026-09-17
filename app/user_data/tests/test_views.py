@@ -312,6 +312,21 @@ def test_login_view_post_invalid(api, alice):
     assert resp.status_code == 200
 
 
+@pytest.mark.parametrize('body', [
+    {'username': 'alice'},        # missing password
+    {'password': 'alicepass123'},  # missing username
+    {},                            # missing both
+], ids=['missing-password', 'missing-username', 'missing-both'])
+def test_login_view_post_missing_field_is_invalid_not_500(api, alice, body):
+    # A hand-crafted POST missing a field used to raise an uncaught
+    # MultiValueDictKeyError (request.POST['...']) -- this is an
+    # anonymous, unthrottled endpoint, so it must fail like any other bad
+    # credential instead.
+    resp = api.post('/login/', body)
+    assert resp.status_code == 200
+    assert resp.context['invalid_login'] is True
+
+
 def test_user_data_view_authenticated_renders(api, alice):
     api.force_login(alice)
     resp = api.get('/user_data/')

@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 from user_data import passkey_views
 from user_data.models import Passkey
 from user_data.passkey_service import PASSKEY_MAX_PER_USER
-from user_data.passkey_views import PasskeyRateThrottle
+from user_data.passkey_views import PasskeyPasswordThrottle, PasskeyRateThrottle
 
 from .conftest import add_passkey, make_oauth_token
 from .soft_authenticator import SoftAuthenticator
@@ -577,11 +577,65 @@ def test_register_finish_rejects_when_cap_reached_between_begin_and_finish(
 
 # --- account endpoints: throttled, like every other passkey endpoint -------
 
-@pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_begin',
-                                  'register_finish', 'password_remove'])
+@pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_finish'])
 def test_account_endpoints_are_throttled(name):
     view = getattr(passkey_views, name)
     assert view.cls.throttle_classes == [PasskeyRateThrottle]
+
+
+@pytest.mark.parametrize('name', ['register_begin', 'password_remove'])
+def test_password_bearing_endpoints_have_both_throttles(name):
+    # register_begin's step-up and password_remove both accept a password
+    # guess -- see PasskeyPasswordThrottle's docstring -- so they carry the
+    # tighter passkey_password throttle ALONGSIDE the general one, not
+    # instead of it.
+    view = getattr(passkey_views, name)
+    assert view.cls.throttle_classes == [PasskeyRateThrottle, PasskeyPasswordThrottle]
+
+
+@pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_finish',
+                                  'login_begin', 'login_finish', 'signup_begin', 'signup_finish'])
+def test_only_password_bearing_endpoints_have_the_password_throttle(name):
+    view = getattr(passkey_views, name)
+    assert PasskeyPasswordThrottle not in view.cls.throttle_classes
+
+
+def test_passkey_password_throttle_scope_resolves_from_settings():
+    assert PasskeyPasswordThrottle.scope == 'passkey_password'
+    assert 'passkey_password' in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
+
+
+def test_register_begin_is_throttled_by_the_password_scope(auth_alice, monkeypatch):
+    """The tighter passkey_password bucket must trip well before the
+    general passkey one would -- set PasskeyRateThrottle generously loose
+    so only PasskeyPasswordThrottle can be what trips here.
+    """
+    cache.clear()
+    monkeypatch.setattr(PasskeyRateThrottle, 'rate', '1000/min')
+    monkeypatch.setattr(PasskeyPasswordThrottle, 'rate', '2/min')
+    try:
+        codes = [_post(auth_alice, '/api/passkeys/register/begin/').status_code
+                 for _i in range(3)]
+    finally:
+        cache.clear()
+    # Every request here is missing password/step_up (a 400, not throttled)
+    # until the bucket trips.
+    assert codes == [400, 400, 429]
+
+
+def test_password_remove_is_throttled_by_the_password_scope(auth_alice, monkeypatch):
+    cache.clear()
+    monkeypatch.setattr(PasskeyRateThrottle, 'rate', '1000/min')
+    monkeypatch.setattr(PasskeyPasswordThrottle, 'rate', '2/min')
+    try:
+        codes = [_post(auth_alice, '/api/passkeys/password/remove/').status_code
+                 for _i in range(3)]
+    finally:
+        cache.clear()
+    # alice (no passkey added) hits the lockout guard (409) on every
+    # request until the bucket trips -- not throttled either way, so this
+    # still isolates the throttle's own behaviour.
+    assert codes == [409, 409, 429]
 
 
 @pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_begin',

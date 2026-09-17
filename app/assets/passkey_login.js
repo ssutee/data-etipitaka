@@ -50,7 +50,18 @@
       if (gen !== generation || !available) { return; }
       var mine = controller = new AbortController();
       // Challenges expire server-side after 5 minutes; refresh just before.
-      timer = window.setTimeout(startAutofill, 270000);
+      // Must stop the outstanding conditional request before starting a
+      // new one -- calling startAutofill() directly here (as a bare
+      // setTimeout callback) left the previous navigator.credentials.get()
+      // still pending; the browser rejects the second, still-conditional
+      // call that follows, and that rejection lands in errorEl even though
+      // nothing the user did caused it (an idle login page would
+      // spontaneously show "The passkey request was cancelled." and lose
+      // autofill after 4.5 minutes).
+      timer = window.setTimeout(function () {
+        stopAutofill();
+        startAutofill();
+      }, 270000);
       P.assertion('conditional', mine.signal).then(finish).catch(function (err) {
         if (gen !== generation || mine.signal.aborted) { return; }
         errorEl.textContent = P.errorMessage(err);

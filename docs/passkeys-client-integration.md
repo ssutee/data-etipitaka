@@ -95,7 +95,13 @@ credentials." instead — same string in the code, different reachability.
 **Removing a password does not revoke tokens.** A device's DRF token keeps
 working after the account owner drops their password fallback
 (`/api/passkeys/password/remove/`) — that is by design. Only account
-recovery (below) revokes tokens.
+recovery (below) revokes tokens. Removing a password *does*, however, sign
+out every **other** browser session: `set_unusable_password()` still
+rewrites the stored password hash (to an unusable value), which
+invalidates Django's session-auth-hash check for any session already
+holding the old one; `update_session_auth_hash(request, user)` rescues
+only the browser session that made this exact request, not any other one
+signed in as the same user.
 
 **Security notification emails.** Three actions each send a best-effort
 email to the account's address, so an owner is never surprised by a change
@@ -169,8 +175,8 @@ signed out too, on either recovery path (new passkey or new password).
 
 - The operator sets `PASSKEY_ANDROID_PACKAGE` and `PASSKEY_ANDROID_CERT_SHA256`
   (see below); until then `/.well-known/assetlinks.json` is 404 and Android
-  assertions are rejected (no Android origin is ever accepted into
-  `PASSKEY_EXPECTED_ORIGINS`, derived by `passkey_config.expected_origins()`).
+  assertions are rejected (no Android origin is ever accepted into the list
+  `passkey_config.expected_origins()` returns).
 - Use Credential Manager: `CreatePublicKeyCredentialRequest(requestJson)` and
   `GetPublicKeyCredentialOption(requestJson)`, passing `options` as JSON. The
   returned `registrationResponseJson` / `authenticationResponseJson` is sent as

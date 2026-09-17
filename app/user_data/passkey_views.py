@@ -45,6 +45,27 @@ class PasskeyRateThrottle(UserRateThrottle):
     rate = None
 
 
+class PasskeyPasswordThrottle(UserRateThrottle):
+    """Extra, tighter throttle (rate: settings 'passkey_password') for the
+    two endpoints that accept a password guess: register_begin's step-up
+    and password_remove.
+
+    Applied ALONGSIDE PasskeyRateThrottle, not instead of it -- DRF checks
+    every throttle in the list and 429s if any one of them trips, and this
+    one is meant to trip first. Both endpoints require authentication, so
+    the password oracle this closes is against a signed-in caller's own
+    account (e.g. a stolen/handed-off token): a wrong guess costs nothing
+    to the attacker except a slower retry, but success is persistent
+    takeover -- an attacker passkey added via register_begin survives a
+    password change and isn't revoked by remove_password. Legitimate use
+    is one or two requests ever, so 5/min is generous, not tight.
+
+    `rate` is declared explicitly for the same reason as PasskeyRateThrottle.rate.
+    """
+    scope = 'passkey_password'
+    rate = None
+
+
 # Account endpoints accept DRF Token and Session authentication only -- never
 # OAuth bearer tokens, so a read-scoped MCP connector cannot manage a user's
 # credentials (see the module docstring).
@@ -159,7 +180,7 @@ def _too_many_passkeys():
 @api_view(['POST'])
 @authentication_classes(ACCOUNT_AUTHENTICATION)
 @permission_classes([IsAuthenticated])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyRateThrottle, PasskeyPasswordThrottle])
 def register_begin(request):
     data = _body(request)
     if data is None:
@@ -231,7 +252,7 @@ def passkey_detail(request, passkey_id):
 @api_view(['POST'])
 @authentication_classes(ACCOUNT_AUTHENTICATION)
 @permission_classes([IsAuthenticated])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyRateThrottle, PasskeyPasswordThrottle])
 def password_remove(request):
     data = _body(request)
     if data is None:

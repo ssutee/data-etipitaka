@@ -92,6 +92,13 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'login': '10/min',
         'passkey': '20/min',
+        # register_begin (its step-up password check) and password_remove
+        # both accept a password guess whose payoff is persistent account
+        # takeover -- an attacker passkey added there survives a password
+        # change and isn't revoked by remove_password. Legitimate use is
+        # one or two requests ever, so this sits well below 'passkey' and
+        # applies alongside it, not instead of it. See PasskeyPasswordThrottle.
+        'passkey_password': '5/min',
     },
     # nginx (nginx.conf) always appends the real client address as the LAST
     # entry of X-Forwarded-For via $proxy_add_x_forwarded_for -- it never
@@ -202,6 +209,15 @@ PASSKEY_IOS_APP_IDS = _env_list('PASSKEY_IOS_APP_IDS', 'A6DJDJ7527.com.watnapp.E
 PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')
 PASSKEY_ANDROID_CERT_SHA256 = _env_list('PASSKEY_ANDROID_CERT_SHA256')
 PASSKEY_CHALLENGE_TTL = 300  # seconds
+
+# Declared explicitly, even though it matches Django's own default, because
+# account_tokens.delete_user_sessions (passkey/password recovery signing out
+# every other session) requires a plain, uncached 'db' session store it can
+# read and delete rows from directly -- see check_session_engine and
+# user_data.checks.check_passkey_session_engine, which fails `manage.py
+# check` loudly if this ever drifts, instead of a silent 500 at recovery
+# time. Pin here rather than relying on the default staying what it is.
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
@@ -322,3 +338,4 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
     # would otherwise accumulate across test cases and trip false 429s.
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'] = None
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey'] = None
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey_password'] = None
