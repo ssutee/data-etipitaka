@@ -1,3 +1,5 @@
+import ast
+import gettext
 from pathlib import Path
 
 import pytest
@@ -114,12 +116,54 @@ def test_rate_limited_wait_translation_keeps_seconds_token():
     assert '{seconds}' in translated
 
 
-def test_compiled_mo_is_not_older_than_po_source():
-    """The container has no gettext tools to recompile django.mo, so pytest
-    can only catch a forgotten `msgfmt` by comparing file times -- it cannot
-    verify the .mo's *content* matches the .po beyond what the translation
-    tests above already exercise at runtime."""
-    assert MO_PATH.stat().st_mtime >= PO_PATH.stat().st_mtime
+def _po_catalog(path):
+    """Parse django.po into the {key: msgstr} shape gettext.GNUTranslations
+    builds from a compiled .mo: plain msgid -> str, msgctxt as
+    'ctxt\\x04msgid', plural forms as (msgid, n). Mirrors what msgfmt keeps:
+    the header, fuzzy entries, obsolete '#~' entries and untranslated
+    entries never reach the .mo."""
+    entries, entry, field, fuzzy = [], {}, None, False
+    for raw in path.read_text(encoding='utf-8').splitlines() + ['']:
+        line = raw.strip()
+        if not line:
+            if 'msgid' in entry and not fuzzy:
+                entries.append(entry)
+            entry, field, fuzzy = {}, None, False
+        elif line.startswith('#'):
+            fuzzy = fuzzy or (line.startswith('#,') and 'fuzzy' in line)
+        elif line.startswith('"'):
+            entry[field] += ast.literal_eval(line)
+        else:
+            field, _, value = line.partition(' ')
+            entry[field] = ast.literal_eval(value)
+
+    catalog = {}
+    for entry in entries:
+        if entry['msgid'] == '':
+            continue
+        key = entry['msgctxt'] + '\x04' + entry['msgid'] if 'msgctxt' in entry else entry['msgid']
+        if 'msgid_plural' in entry:
+            forms = {int(f[len('msgstr['):-1]): v for f, v in entry.items() if f.startswith('msgstr[')}
+            if forms and all(forms.values()):
+                catalog.update({(key, n): v for n, v in forms.items()})
+        elif entry.get('msgstr'):
+            catalog[key] = entry['msgstr']
+    return catalog
+
+
+def test_compiled_mo_matches_po_source():
+    """Catches a forgotten `msgfmt` after editing django.po. Compares content,
+    not file times: git does not preserve mtimes, so on a fresh checkout (CI)
+    the .mo can land a fraction of a millisecond "older" than the .po and an
+    mtime check fails at random. This needs no gettext tools either -- the
+    container has none -- only the stdlib reader Django itself uses."""
+    with MO_PATH.open('rb') as fp:
+        compiled = {k: v for k, v in gettext.GNUTranslations(fp)._catalog.items() if k != ''}
+    source = _po_catalog(PO_PATH)
+    stale = sorted(str(k) for k in source if compiled.get(k) != source[k])
+    orphaned = sorted(str(k) for k in compiled.keys() - source.keys())
+    assert not stale, 'django.mo is out of date for: %s' % stale
+    assert not orphaned, 'django.mo has entries no longer in django.po: %s' % orphaned
 
 
 def test_passkey_added_email_renders_in_thai():
