@@ -107,6 +107,65 @@ def test_web_origin_rejects_rp_id_that_is_only_a_substring(settings):
     assert [e.id for e in errors] == ['user_data.E004']
 
 
+@pytest.mark.parametrize('origin', [
+    'https://data.etipitaka.com/login',   # non-root path
+    'https://data.etipitaka.com?x=1',     # query string
+    'https://data.etipitaka.com#section', # fragment
+], ids=['path', 'query', 'fragment'])
+def test_web_origin_rejects_path_query_or_fragment(settings, origin):
+    # A WebAuthn origin is scheme+host[+port] only -- these all parse
+    # "successfully" but are not an origin any browser will ever report,
+    # so every ceremony would fail expected_origin if this were accepted.
+    settings.PASSKEY_WEB_ORIGIN = origin
+    settings.PASSKEY_RP_ID = 'data.etipitaka.com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E003']
+
+
+def test_web_origin_accepts_bare_root_path(settings):
+    # A single trailing '/' is harmless (and is what web_origin() itself
+    # would produce before its own rstrip('/') -- kept permissive here).
+    settings.PASSKEY_WEB_ORIGIN = 'https://example.com/'
+    settings.PASSKEY_RP_ID = 'example.com'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_rejects_dotless_rp_id_even_though_naive_suffix_check_would_accept_it(settings):
+    # 'com' is not a registrable domain, but 'data.etipitaka.com'.endswith
+    # ('.com') is True -- the naive suffix check alone would wrongly accept
+    # it. This is exactly the case user_data.E007 exists to catch.
+    settings.PASSKEY_WEB_ORIGIN = 'https://data.etipitaka.com'
+    settings.PASSKEY_RP_ID = 'com'
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E007']
+
+
+def test_web_origin_allows_localhost_rp_id_despite_no_dot(settings):
+    settings.PASSKEY_WEB_ORIGIN = 'http://localhost:8000'
+    settings.PASSKEY_RP_ID = 'localhost'
+    assert check_passkey_web_origin(None) == []
+
+
+def test_web_origin_reports_clean_error_instead_of_crashing_when_rp_id_is_undeterminable(settings):
+    # PASSKEY_RP_ID empty + a scheme-less OAUTH_ISSUER_URL means
+    # urlparse(OAUTH_ISSUER_URL).hostname is also None -- passkey_config.
+    # rp_id() returns None, which used to blow up downstream as
+    # `hostname.endswith('.' + None)` -> TypeError. PASSKEY_WEB_ORIGIN is
+    # set independently and validly, so the function gets past the origin
+    # check before ever computing rp_id.
+    settings.PASSKEY_WEB_ORIGIN = 'https://data.etipitaka.com'
+    settings.PASSKEY_RP_ID = ''
+    settings.OAUTH_ISSUER_URL = 'data.etipitaka.com'  # no scheme
+
+    errors = check_passkey_web_origin(None)
+
+    assert [e.id for e in errors] == ['user_data.E006']
+
+
 # --- check_passkey_session_engine --------------------------------------------
 
 def test_session_engine_passes_for_db_backend(settings):

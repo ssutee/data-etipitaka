@@ -79,11 +79,18 @@ def check_passkey_web_origin(app_configs, **kwargs):
 
     origin = passkey_config.web_origin()
     parsed = urlparse(origin)
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+    # A WebAuthn/RFC 6454 origin is scheme + host [+ port] ONLY -- a
+    # path, query or fragment isn't part of it and isn't meaningful here
+    # (e.g. PASSKEY_WEB_ORIGIN=https://data.etipitaka.com/login parses
+    # "successfully" but is not the origin any browser will ever report,
+    # so it would fail expected_origin on every single ceremony).
+    if (parsed.scheme not in ('http', 'https') or not parsed.hostname
+            or parsed.path not in ('', '/') or parsed.query or parsed.fragment):
         errors.append(Error(
             'PASSKEY_WEB_ORIGIN (or its OAUTH_ISSUER_URL fallback), %r, '
-            'must be an absolute http:// or https:// URL with a hostname.'
-            % (origin,),
+            'must be an absolute http:// or https:// URL with a hostname '
+            'and nothing else -- no path (other than a bare "/"), query '
+            'or fragment.' % (origin,),
             hint=(
                 'Set PASSKEY_WEB_ORIGIN to the exact origin the login/'
                 'signup/recovery pages are served from (scheme + host '
@@ -96,6 +103,35 @@ def check_passkey_web_origin(app_configs, **kwargs):
 
     hostname = parsed.hostname
     rp_id = passkey_config.rp_id()
+    if not rp_id:
+        errors.append(Error(
+            'PASSKEY_RP_ID could not be determined: it is unset, and '
+            'OAUTH_ISSUER_URL (%r) has no scheme, so urlparse(...).hostname '
+            'is empty too.' % (settings.OAUTH_ISSUER_URL,),
+            hint=(
+                'Set PASSKEY_RP_ID explicitly, or fix OAUTH_ISSUER_URL to '
+                'be an absolute http:// or https:// URL.'
+            ),
+            id='user_data.E006',
+        ))
+        # Nothing left that can be safely compared against hostname.
+        return errors
+
+    if rp_id != 'localhost' and '.' not in rp_id:
+        errors.append(Error(
+            'PASSKEY_RP_ID %r has no dot and is not "localhost".' % (rp_id,),
+            hint=(
+                'A bare, single-label relying-party ID (e.g. a bare TLD '
+                'like "com") is never a legitimate registrable domain -- '
+                'the naive suffix check below can even be fooled into '
+                'accepting one (e.g. "com" looks like a "suffix" of any '
+                '*.com hostname). Set PASSKEY_RP_ID to a real registrable '
+                'domain, or "localhost" for local development.'
+            ),
+            id='user_data.E007',
+        ))
+        return errors
+
     if rp_id != hostname and not hostname.endswith('.' + rp_id):
         errors.append(Error(
             'PASSKEY_RP_ID %r is not the web origin\'s hostname (%r) or a '
@@ -126,11 +162,11 @@ def check_passkey_session_engine(app_configs, **kwargs):
     agree, the same way check_passkey_android_config does for the Android
     pair.
 
-    settings.SESSION_ENGINE isn't declared in settings.py at all -- the
-    project relies on Django's own default, which happens to already be
-    'django.contrib.sessions.backends.db'. Declaring it explicitly there
-    is worth considering so this isn't silently one Django-version-default
-    change (or one careless local_settings.py override) away from breaking.
+    settings.SESSION_ENGINE is declared explicitly in settings.py (as
+    'django.contrib.sessions.backends.db', matching Django's own default)
+    specifically so this can't silently drift -- this check exists for the
+    remaining way it still could: a local_settings.py override (imported
+    at the bottom of settings.py) replacing it with something else.
     """
     try:
         check_session_engine()

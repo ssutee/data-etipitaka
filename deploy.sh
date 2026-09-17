@@ -36,8 +36,20 @@ echo "[deploy] using: $DC"
 # running only `$DC run --rm nginx nginx -t` recreated the live web-1
 # container with that bad env. So the only way to guarantee a bad config
 # never goes live is to fail before the nginx block runs at all.
+#
+# --no-deps: `manage.py check` touches no database (see user_data/checks.py
+# -- every registered check reads settings only), so there is nothing to
+# gain from starting `db` here and a real cost to it: without --no-deps,
+# `run` would ensure `db` first, recreating it from a changed config before
+# this check's result is even known -- the exact problem this whole gate
+# exists to avoid, just moved one service over. --entrypoint python:
+# entrypoint.sh's own job is waiting for Postgres before exec'ing its
+# argument (see app/entrypoint.sh) -- with --no-deps `db` may not even be
+# running, so that wait would hang forever on a fresh host; overriding the
+# entrypoint runs `python manage.py check` directly instead. -T: this
+# script runs non-interactively (CI over SSH), so no pseudo-TTY is wanted.
 $DC build web
-if $DC run --rm web python manage.py check; then
+if $DC run --rm --no-deps -T --entrypoint python web manage.py check; then
     echo "[deploy] django config check passed"
 else
     echo "[deploy] django config check FAILED" >&2
