@@ -78,6 +78,13 @@ fi
 
 $DC up -d --build
 $DC run --rm web python manage.py migrate --noinput
+# static_volume is a named volume: Docker sets its ownership only when it is
+# first created, from whatever image mounted it then. The web image's `app`
+# user has since changed uid (alpine 100:101 -> bookworm 999), so a volume
+# older than that switch is unwritable and collectstatic fails -- after the
+# new containers are already live. Re-own it every deploy (a no-op once
+# correct) so new static assets always land.
+$DC run --rm --no-deps -T -u root --entrypoint chown web -R app:app /home/app/web/static
 $DC run --rm web python manage.py collectstatic --noinput
 
 sleep 5
