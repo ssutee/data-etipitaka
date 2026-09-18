@@ -61,3 +61,29 @@ def normalise_user_code(raw):
 
 def _hash(device_code):
     return hashlib.sha256(device_code.encode()).hexdigest()
+
+
+_MAX_CODE_ATTEMPTS = 5
+
+
+def begin():
+    """Issue a pairing. Returns (device_code, row); only the hash is stored.
+
+    Expired rows are purged here, the same way passkey_challenges.create()
+    purges its own -- there is no separate sweeper process.
+    """
+    now = timezone.now()
+    DesktopPairing.objects.filter(expires_at__lte=now).delete()
+    device_code = secrets.token_urlsafe(32)
+    expires_at = now + timedelta(seconds=settings.PASSKEY_DESKTOP_TTL)
+    for _attempt in range(_MAX_CODE_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                row = DesktopPairing.objects.create(
+                    device_code_hash=_hash(device_code),
+                    user_code=new_user_code(),
+                    expires_at=expires_at)
+        except IntegrityError:
+            continue  # user_code collided with a live row; draw another
+        return device_code, row
+    raise PairingError()

@@ -1,3 +1,6 @@
+from datetime import timedelta
+from unittest.mock import patch
+
 import pytest
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
@@ -77,3 +80,43 @@ def test_normalise_strips_exotic_separators():
     assert desktop_pairing.normalise_user_code('K7QP　4M2X') == 'K7QP4M2X'   # full-width
     assert desktop_pairing.normalise_user_code('K7QP\t4M2X\n') == 'K7QP4M2X'
     assert desktop_pairing.normalise_user_code('K7QP–4M2X') == 'K7QP4M2X'   # en dash
+
+
+@pytest.mark.django_db
+def test_begin_returns_a_device_code_and_stores_only_its_hash():
+    device_code, row = desktop_pairing.begin()
+    assert len(device_code) >= 40
+    assert row.device_code_hash == desktop_pairing._hash(device_code)
+    assert DesktopPairing.objects.filter(device_code_hash=row.device_code_hash).exists()
+    # The plaintext code must appear nowhere in the table.
+    assert not DesktopPairing.objects.filter(user_code=device_code).exists()
+
+
+@pytest.mark.django_db
+def test_begin_sets_expiry_from_settings(settings):
+    settings.PASSKEY_DESKTOP_TTL = 600
+    before = timezone.now()
+    _code, row = desktop_pairing.begin()
+    assert row.expires_at >= before + timedelta(seconds=599)
+    assert row.expires_at <= timezone.now() + timedelta(seconds=601)
+
+
+@pytest.mark.django_db
+def test_begin_purges_expired_rows():
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code='AAAAAAAA',
+        expires_at=timezone.now() - timedelta(seconds=1))
+    desktop_pairing.begin()
+    assert not DesktopPairing.objects.filter(device_code_hash='a' * 64).exists()
+
+
+@pytest.mark.django_db
+def test_begin_retries_on_user_code_collision():
+    taken = 'K7QP4M2X'
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code=taken,
+        expires_at=timezone.now() + timedelta(seconds=600))
+    with patch.object(desktop_pairing, 'new_user_code',
+                      side_effect=[taken, 'ZZZZ2222']):
+        _code, row = desktop_pairing.begin()
+    assert row.user_code == 'ZZZZ2222'
