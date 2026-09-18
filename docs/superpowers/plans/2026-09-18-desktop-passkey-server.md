@@ -69,6 +69,7 @@ Create `app/user_data/tests/test_desktop_pairing.py`:
 ```python
 import pytest
 from django.contrib.auth.models import User
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from user_data.models import DesktopPairing
@@ -85,10 +86,14 @@ def test_pairing_defaults_to_pending():
 
 @pytest.mark.django_db
 def test_user_code_is_unique():
+    # IntegrityError, not a bare Exception, and inside a savepoint: these run
+    # against real Postgres in CI, where an IntegrityError outside
+    # transaction.atomic() aborts the enclosing transaction. Matches
+    # test_passkey_models.py's own unique-constraint tests.
     DesktopPairing.objects.create(
         device_code_hash='a' * 64, user_code='K7QP4M2X',
         expires_at=timezone.now())
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError), transaction.atomic():
         DesktopPairing.objects.create(
             device_code_hash='b' * 64, user_code='K7QP4M2X',
             expires_at=timezone.now())
@@ -191,6 +196,26 @@ def test_normalise_rejects_rubbish():
     assert desktop_pairing.normalise_user_code('K7QP4M2XY') is None    # too long
     assert desktop_pairing.normalise_user_code(None) is None
     assert desktop_pairing.normalise_user_code(123) is None
+    # Correct length, disallowed character -- without these the alphabet
+    # branch never executes, because every case above trips the length check
+    # first and `or` short-circuits.
+    assert desktop_pairing.normalise_user_code('K7QP4M2O') is None     # O not in alphabet
+    assert desktop_pairing.normalise_user_code('K7QP4M2L') is None     # L not in alphabet
+
+
+def test_new_user_code_varies():
+    # Guards against a regression that draws one character and repeats it:
+    # that keeps the length and alphabet correct but destroys the entropy.
+    codes = {desktop_pairing.new_user_code() for _ in range(20)}
+    assert len(codes) > 1
+    assert any(len(set(code)) > 1 for code in codes)
+
+
+def test_normalise_strips_exotic_separators():
+    assert desktop_pairing.normalise_user_code('K7QP 4M2X') == 'K7QP4M2X'   # NBSP
+    assert desktop_pairing.normalise_user_code('K7QP　4M2X') == 'K7QP4M2X'   # full-width
+    assert desktop_pairing.normalise_user_code('K7QP\t4M2X\n') == 'K7QP4M2X'
+    assert desktop_pairing.normalise_user_code('K7QP–4M2X') == 'K7QP4M2X'   # en dash
 ```
 
 - [ ] **Step 2: Run it to confirm it fails**
@@ -217,6 +242,7 @@ The device code is the app's secret and is never displayed or stored in the
 clear; only its SHA-256 goes in the database.
 """
 import hashlib
+import logging
 import secrets
 from datetime import timedelta
 
@@ -226,8 +252,10 @@ from django.utils import timezone
 
 from .models import DesktopPairing
 
-# Crockford-style: no 0/O/1/I, so a code read off a screen and typed (or read
-# aloud) cannot be ambiguous.
+log = logging.getLogger(__name__)
+
+# Crockford-style: no 0/1/I/L/O/U, so a code read off a screen and typed (or
+# read aloud) cannot be ambiguous.
 CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ'
 CODE_LENGTH = 8
 
@@ -242,15 +270,23 @@ def new_user_code():
 
 def format_user_code(code):
     """Canonical code -> the form shown to a human: K7QP4M2X -> K7QP-4M2X."""
+    if len(code) != CODE_LENGTH:
+        raise ValueError('expected a %d-character code' % CODE_LENGTH)
     half = CODE_LENGTH // 2
     return code[:half] + '-' + code[half:]
 
 
 def normalise_user_code(raw):
-    """Anything a user or URL supplied -> canonical code, or None if invalid."""
+    """Anything a user or URL supplied -> canonical code, or None if invalid.
+
+    Keeps only alphanumerics, so every separator a code can pick up on its way
+    through a browser, a chat app or a PDF -- ASCII and non-breaking spaces,
+    tabs, newlines, and hyphens autocorrected into en/em dashes -- is dropped
+    rather than rejected.
+    """
     if not isinstance(raw, str):
         return None
-    code = raw.replace('-', '').replace(' ', '').upper()
+    code = ''.join(ch for ch in raw if ch.isalnum()).upper()
     if len(code) != CODE_LENGTH or not set(code) <= set(CODE_ALPHABET):
         return None
     return code
@@ -301,11 +337,13 @@ def test_begin_returns_a_device_code_and_stores_only_its_hash():
 
 @pytest.mark.django_db
 def test_begin_sets_expiry_from_settings(settings):
-    settings.PASSKEY_DESKTOP_TTL = 600
+    # A non-default TTL on purpose: with the production value (600) this test
+    # would pass even if begin() ignored the setting and hardcoded it.
+    settings.PASSKEY_DESKTOP_TTL = 123
     before = timezone.now()
     _code, row = desktop_pairing.begin()
-    assert row.expires_at >= before + timedelta(seconds=599)
-    assert row.expires_at <= timezone.now() + timedelta(seconds=601)
+    assert row.expires_at >= before + timedelta(seconds=122)
+    assert row.expires_at <= timezone.now() + timedelta(seconds=124)
 
 
 @pytest.mark.django_db
@@ -327,6 +365,19 @@ def test_begin_retries_on_user_code_collision():
                       side_effect=[taken, 'ZZZZ2222']):
         _code, row = desktop_pairing.begin()
     assert row.user_code == 'ZZZZ2222'
+
+
+@pytest.mark.django_db
+def test_begin_raises_when_every_code_collides():
+    # return_value, not a fixed-length side_effect list, so this stays correct
+    # if _MAX_CODE_ATTEMPTS is ever retuned.
+    taken = 'K7QP4M2X'
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code=taken,
+        expires_at=timezone.now() + timedelta(seconds=600))
+    with patch.object(desktop_pairing, 'new_user_code', return_value=taken):
+        with pytest.raises(desktop_pairing.PairingError):
+            desktop_pairing.begin()
 ```
 
 - [ ] **Step 2: Run it to confirm it fails**
@@ -362,7 +413,12 @@ def begin():
         except IntegrityError:
             continue  # user_code collided with a live row; draw another
         return device_code, row
-    raise PairingError()
+    # Five straight collisions in a ~39-bit space is not bad luck. Either the
+    # live-row count has grown far beyond anything this table should hold, or
+    # the device code itself collided on the primary key -- which would mean a
+    # broken entropy source. Both need a human, so say so loudly.
+    log.error('desktop pairing: exhausted %d user code attempts', _MAX_CODE_ATTEMPTS)
+    raise PairingError('exhausted %d user code attempts' % _MAX_CODE_ATTEMPTS)
 ```
 
 - [ ] **Step 4: Run the tests to confirm they pass**
@@ -430,6 +486,47 @@ def test_deny_marks_denied_without_a_user():
     row.refresh_from_db()
     assert row.status == DesktopPairing.DENIED
     assert row.user is None
+
+
+@pytest.mark.django_db
+def test_find_pending_excludes_a_denied_pairing():
+    # The approved case is covered above; this is the other half of the
+    # status=PENDING filter, and "user pressed No, is the code live again?"
+    # is exactly the question worth pinning down.
+    _code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    assert desktop_pairing.find_pending(row.user_code) is None
+
+
+@pytest.mark.django_db
+def test_find_pending_accepts_the_code_as_a_url_would_carry_it():
+    _code, row = desktop_pairing.begin()
+    lowered = desktop_pairing.format_user_code(row.user_code).lower()
+    found = desktop_pairing.find_pending(lowered)
+    assert found is not None
+    assert found.device_code_hash == row.device_code_hash
+
+
+@pytest.mark.django_db
+def test_deciding_twice_does_not_flip_the_status():
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    assert desktop_pairing.deny(row) is True
+    assert desktop_pairing.approve(row, user) is False
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.DENIED
+    assert row.user is None
+
+
+@pytest.mark.django_db
+def test_deciding_a_vanished_pairing_reports_false():
+    # What a concurrent redeem() deleting the row looks like from here: no
+    # DatabaseError, just False.
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    DesktopPairing.objects.filter(pk=row.pk).delete()
+    assert desktop_pairing.approve(row, user) is False
+    assert desktop_pairing.deny(row) is False
 ```
 
 - [ ] **Step 2: Run it to confirm it fails**
@@ -454,16 +551,32 @@ def find_pending(raw_user_code):
 
 
 def approve(row, user):
-    """Bind the pairing to the signed-in user. The token is minted on redeem."""
-    row.status = DesktopPairing.APPROVED
-    row.user = user
-    row.save(update_fields=['status', 'user'])
+    """Bind the pairing to the signed-in user, if it is still pending.
+
+    A conditional update rather than save(update_fields=...): between
+    find_pending() and here the row can be decided by another tab or deleted
+    outright by a concurrent redeem(). save() would raise DatabaseError on a
+    vanished row (a 500 on the confirmation page) and would happily flip an
+    already-decided row's status back. Mirrors passkey_manage.rename_passkey().
+
+    Returns True if this call is the one that decided the pairing.
+    """
+    return DesktopPairing.objects.filter(
+        pk=row.pk, status=DesktopPairing.PENDING,
+    ).update(status=DesktopPairing.APPROVED, user=user) == 1
 
 
 def deny(row):
-    row.status = DesktopPairing.DENIED
-    row.save(update_fields=['status'])
+    """Refuse the pairing, if it is still pending. See approve() on why this is
+    a conditional update. Returns True if this call is the one that decided it.
+    """
+    return DesktopPairing.objects.filter(
+        pk=row.pk, status=DesktopPairing.PENDING,
+    ).update(status=DesktopPairing.DENIED) == 1
 ```
+
+`.update()` does not touch the in-memory instance, so callers that want the new
+state must `refresh_from_db()`.
 
 - [ ] **Step 4: Run the tests to confirm they pass**
 
@@ -559,7 +672,54 @@ def test_redeem_rejects_unknown_and_expired():
 def test_redeem_rejects_a_non_string_device_code():
     with pytest.raises(desktop_pairing.PairingError):
         desktop_pairing.redeem(None)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_redeems_yield_exactly_one_token():
+    """Two polls racing: exactly one gets a token, the other gets PairingError.
+
+    transaction=True on purpose: the default django_db runs the whole test in
+    one transaction that is rolled back, on a single connection, which cannot
+    exercise cross-connection row locking at all. It also means this is the
+    only test here where redeem()'s durable atomic block is a real commit --
+    Django whitelists nesting durable blocks inside a TestCase's own
+    transaction, so everywhere else the durability is a savepoint that never
+    lands.
+    """
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def poll():
+        barrier.wait()  # make both threads arrive together
+        try:
+            results.append(desktop_pairing.redeem(device_code))
+        except desktop_pairing.PairingError:
+            errors.append(True)
+        finally:
+            connection.close()  # each thread owns its own connection
+
+    threads = [threading.Thread(target=poll) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive(), 'redeem deadlocked'
+
+    assert len(results) == 1, results
+    assert results[0]['status'] == 'approved'
+    assert len(errors) == 1
+    assert DesktopPairing.objects.count() == 0
 ```
+
+This needs `import threading` and `connection` added to the `django.db` import.
+It is the one test here with teeth against the actual guarantee: verified by
+deleting `select_for_update()` from `redeem()`, at which point both threads
+receive the same token and the test fails with `assert 2 == 1`.
 
 - [ ] **Step 2: Run it to confirm it fails**
 
@@ -588,8 +748,9 @@ def redeem(device_code):
     the caller cannot distinguish "never existed" from "already used" -- both
     are a 400.
 
-    The row is selected FOR UPDATE and deleted inside the same transaction as
-    the token lookup, so two concurrent polls cannot both be served.
+    The row is selected FOR UPDATE and deleted in the same transaction that
+    mints the token, so two concurrent polls cannot both be served, and a
+    crash mid-request leaves the pairing intact for the client to retry.
     """
     if not isinstance(device_code, str):
         raise PairingError()
@@ -605,11 +766,27 @@ def redeem(device_code):
         if row.status == DesktopPairing.DENIED:
             row.delete()
             return {'status': 'denied'}
+        if row.status != DesktopPairing.APPROVED:
+            # Unreachable with today's three statuses. Fail loudly rather than
+            # mint a token for a state this function was never taught about.
+            raise PairingError('unexpected pairing status %r' % row.status)
         user = row.user
         row.delete()
-    token, _created = Token.objects.get_or_create(user=user)
-    return {'status': 'approved', 'key': token.key, 'username': user.username}
+        token, _created = Token.objects.get_or_create(user=user)
+        return {'status': 'approved', 'key': token.key,
+                'username': user.username}
 ```
+
+The token mint is **inside** the block deliberately. It costs one small write
+while the row lock is held — and devices never contend, since each holds its
+own row (the PK is its own device code hash) — in exchange for making the
+delete and the mint one atomic unit, so a crash before commit leaves the
+pairing retryable instead of stranding the user.
+
+Do **not** add `select_related('user')` to save the FK query: combined with
+`select_for_update()` it makes Postgres lock the joined `auth_user` row on
+every 5-second poll unless `of=('self',)` is also passed. One small SELECT is
+the better trade.
 
 - [ ] **Step 4: Run the tests to confirm they pass**
 
@@ -711,7 +888,40 @@ def test_poll_reports_denied(api):
     desktop_pairing.deny(desktop_pairing.find_pending(body['user_code']))
     response = api.post(POLL, {'device_code': body['device_code']}, format='json')
     assert response.json() == {'status': 'denied'}
+
+
+@pytest.mark.django_db
+def test_verification_url_follows_the_passkey_web_origin(api, settings):
+    # conftest's autouse _passkey_settings fixture pins PASSKEY_WEB_ORIGIN
+    # equal to OAUTH_ISSUER_URL, which is exactly why the two being confused
+    # is invisible by default. Pull them apart.
+    settings.PASSKEY_WEB_ORIGIN = 'https://tunnel.example.org'
+    settings.OAUTH_ISSUER_URL = 'https://data.etipitaka.com'
+
+    url = api.post(BEGIN, {}, format='json').json()['verification_url']
+
+    assert url.startswith('https://tunnel.example.org/desktop/?code=')
+    assert 'data.etipitaka.com' not in url
+
+
+@pytest.mark.django_db
+def test_poll_rejects_a_code_that_was_already_redeemed(api):
+    # The test above named "...unknown_and_reused_codes" never actually reuses
+    # one; single-use is only proven a layer down in the service tests.
+    body = api.post(BEGIN, {}, format='json').json()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(desktop_pairing.find_pending(body['user_code']), user)
+
+    first = api.post(POLL, {'device_code': body['device_code']}, format='json')
+    second = api.post(POLL, {'device_code': body['device_code']}, format='json')
+
+    assert first.status_code == 200
+    assert first.json()['status'] == 'approved'
+    assert second.status_code == 400
 ```
+
+The origin test is only meaningful because it overrides the autouse fixture —
+verified by reverting the view to `OAUTH_ISSUER_URL`, at which point it fails.
 
 - [ ] **Step 2: Run it to confirm it fails**
 
@@ -726,7 +936,58 @@ Add to the imports at the top of `app/user_data/passkey_views.py`:
 from django.conf import settings
 
 from . import desktop_pairing
+from . import passkey_config
 ```
+
+First, give the desktop endpoints their own throttle scope. The shared
+`'passkey'` scope is `20/min` keyed on client IP for anonymous callers, but a
+desktop client polls at 12 req/min for the life of a pairing — so two machines
+behind one NAT (24/min) take continuous 429s. Tests cannot catch this because
+the test settings disable throttling.
+
+In `app/etipitaka_auth/settings.py`, add to `DEFAULT_THROTTLE_RATES`:
+
+```python
+        # Desktop pairing polls every DESKTOP_POLL_INTERVAL seconds for up to
+        # PASSKEY_DESKTOP_TTL, i.e. ~12 req/min for as long as one pairing is
+        # open -- sustained traffic the one-shot 'passkey' ceremony budget was
+        # never sized for. Anonymous requests key on client IP, so this has to
+        # fit several machines sharing one public address (a temple or office
+        # behind one NAT): 90/min carries about seven concurrently-pairing
+        # clients. Pairing is a brief one-off act, not a steady state, so this
+        # is generous in practice.
+        'passkey_desktop': '90/min',
+```
+
+and — easy to miss, and it makes the suite throttle-dependent if skipped — null
+it in the pytest block alongside the existing `login`/`passkey` lines:
+
+```python
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey_desktop'] = None
+```
+
+Then add the throttle class beside the existing two in `passkey_views.py`:
+
+```python
+class PasskeyDesktopThrottle(UserRateThrottle):
+    """Per client IP for the desktop pairing endpoints (rate: settings
+    'passkey_desktop').
+
+    Separate from PasskeyRateThrottle because the traffic shape is different:
+    a desktop client polls every few seconds for the life of a pairing, where
+    the login/signup ceremonies are two requests and done. Sharing one bucket
+    means a second machine behind the same NAT starves the first.
+
+    `rate` is declared explicitly for the same reason as PasskeyRateThrottle.rate.
+    """
+    scope = 'passkey_desktop'
+    rate = None
+```
+
+Keying the poll throttle on `device_code` instead of IP was considered and
+rejected: any well-formed random code would mint its own fresh bucket, so an
+attacker rotating garbage codes would face no limit unless an IP throttle were
+kept alongside it anyway.
 
 Append to `app/user_data/passkey_views.py`:
 
@@ -737,7 +998,7 @@ DESKTOP_POLL_INTERVAL = 5  # seconds; the client polls no faster than this
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyDesktopThrottle])
 def desktop_begin(request):
     """Start a desktop sign-in handshake.
 
@@ -752,8 +1013,13 @@ def desktop_begin(request):
     return Response({
         'device_code': device_code,
         'user_code': user_code,
+        # web_origin(), not OAUTH_ISSUER_URL: it returns PASSKEY_WEB_ORIGIN
+        # when set, which is the override the docs tell operators to use for
+        # an HTTPS tunnel or staging host. Building the URL from the OAuth
+        # issuer instead would send the desktop user to a different host than
+        # the ceremony is anchored to.
         'verification_url': '%s/desktop/?code=%s' % (
-            settings.OAUTH_ISSUER_URL, user_code),
+            passkey_config.web_origin(), user_code),
         'interval': DESKTOP_POLL_INTERVAL,
         'expires_in': settings.PASSKEY_DESKTOP_TTL,
     })
@@ -762,7 +1028,7 @@ def desktop_begin(request):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyDesktopThrottle])
 def desktop_poll(request):
     data = _body(request)
     if data is None:
@@ -888,10 +1154,56 @@ def test_approve_requires_a_signed_in_user(web, api):
 def test_approve_ignores_an_unknown_code(web):
     User.objects.create_user('alice', password='secret')
     web.login(username='alice', password='secret')
-    response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'})
+    response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'},
+                        follow=True)
     assert response.status_code == 200
     assert response.context['pairing'] is None
+
+
+@pytest.mark.django_db
+def test_approve_requires_a_csrf_token(api):
+    # The `web` fixture's plain Client() disables CSRF checks entirely, so
+    # without this test the protection could be lost and the suite stay green.
+    # A forged cross-site POST here would bind a token-granting pairing to the
+    # victim's account.
+    strict = Client(enforce_csrf_checks=True)
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    strict.login(username='alice', password='secret')
+
+    response = strict.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+
+    assert response.status_code == 403
+    assert DesktopPairing.objects.get().status == DesktopPairing.PENDING
+
+
+@pytest.mark.django_db
+def test_approve_accepts_a_valid_csrf_token(api):
+    strict = Client(enforce_csrf_checks=True)
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    strict.login(username='alice', password='secret')
+    strict.get(CONFIRM + '?code=' + body['user_code'])  # mints the CSRF cookie
+    token = strict.cookies['csrftoken'].value
+
+    response = strict.post(
+        APPROVE, {'code': body['user_code'], 'action': 'approve'},
+        HTTP_X_CSRFTOKEN=token, follow=True)
+
+    assert response.status_code == 200
+    assert DesktopPairing.objects.get().status == DesktopPairing.APPROVED
 ```
+
+`test_approve_binds_the_pairing_to_the_signed_in_user` also needs `follow=True`
+now that the view redirects.
+
+**On what the CSRF tests actually pin:** verified by mutation. Removing only
+`@csrf_protect` leaves them passing, because the global `CsrfViewMiddleware`
+(`settings.py`) still enforces it — the decorator is redundant defence in
+depth, kept for consistency with `login_passkey`. Removing the middleware too
+makes `test_approve_requires_a_csrf_token` fail, with the tokenless POST
+approving the pairing. So the test pins the behaviour that matters (this
+endpoint refuses a tokenless POST), not one particular layer providing it.
 
 - [ ] **Step 2: Run it to confirm it fails**
 
@@ -908,7 +1220,19 @@ from . import desktop_pairing
 
 Append to `app/user_data/passkey_web_views.py`:
 
+Add `require_GET` to the `django.views.decorators.http` import and `redirect`
+to the `django.shortcuts` import.
+
 ```python
+def _no_store(response):
+    """These pages show a username and a live pairing code; a shared browser
+    must not replay them to the next visitor. Same reasoning as login_passkey.
+    """
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
 @login_required
 @ensure_csrf_cookie
 # login_required wraps ensure_csrf_cookie for the same reason as
@@ -916,12 +1240,23 @@ Append to `app/user_data/passkey_web_views.py`:
 # a CSRF cookie is ever minted for them. /login/ offers passkey sign-in, so
 # that bounce is where the passkey ceremony actually happens.
 def desktop_confirm(request):
+    # After a decision we redirect back here with ?result=..., so a refresh
+    # re-runs a harmless GET instead of re-POSTing a decision that has already
+    # been made (and would then read as "expired").
+    result = request.GET.get('result')
+    if result in ('approved', 'denied', 'stale'):
+        return _no_store(render(request, 'desktop_confirm.html', {
+            'pairing': None,
+            'user_code': '',
+            'decided': result != 'stale',
+            'approved': result == 'approved',
+        }))
     pairing = desktop_pairing.find_pending(request.GET.get('code', ''))
-    return render(request, 'desktop_confirm.html', {
+    return _no_store(render(request, 'desktop_confirm.html', {
         'pairing': pairing,
         'user_code': (desktop_pairing.format_user_code(pairing.user_code)
                       if pairing else ''),
-    })
+    }))
 
 
 @require_POST
@@ -932,19 +1267,26 @@ def desktop_approve(request):
 
     Anything other than action=approve denies: a user who did not start a
     sign-in on a computer should end up denying, and so should a mangled form.
+
+    Redirects rather than rendering, so a refresh cannot re-submit the
+    decision. 'stale' means the pairing was decided by another tab or consumed
+    by a concurrent poll between lookup and write.
     """
     pairing = desktop_pairing.find_pending(request.POST.get('code', ''))
+    approving = request.POST.get('action') == 'approve'
+    # approve()/deny() return False when the pairing was decided by another tab
+    # or deleted by a concurrent redeem() since find_pending() saw it. Report
+    # the outcome of the write, not the outcome of the lookup -- otherwise the
+    # page cheerfully says "signed in" for a decision that never landed.
+    applied = False
     if pairing is not None:
-        if request.POST.get('action') == 'approve':
-            desktop_pairing.approve(pairing, request.user)
-        else:
-            desktop_pairing.deny(pairing)
-    return render(request, 'desktop_confirm.html', {
-        'pairing': None,
-        'user_code': '',
-        'decided': pairing is not None,
-        'approved': pairing is not None and request.POST.get('action') == 'approve',
-    })
+        applied = (desktop_pairing.approve(pairing, request.user) if approving
+                   else desktop_pairing.deny(pairing))
+    if not applied:
+        result = 'stale'
+    else:
+        result = 'approved' if approving else 'denied'
+    return _no_store(redirect('/desktop/?result=' + result))
 ```
 
 - [ ] **Step 4: Create the template**
@@ -1042,43 +1384,84 @@ git commit -m "test(desktop): close coverage gaps in the pairing flow"
 **Files:**
 - Modify: `nginx/nginx.conf`
 
-No new zone is needed — `passkey_rl` (60 r/m) already exists at line 44.
+**The desktop API endpoints need their own zone, not `passkey_rl`.** Task 6
+gave them a DRF throttle scope of `passkey_desktop` at **90/min**. Putting them
+in `passkey_rl` (60 r/m) would make nginx the binding limit, so the DRF scope
+would never fire and would be dead config — and the per-IP client budget the
+Task 6 fix bought would be silently halved again.
 
-**Why this matters:** the catch-all `location ~ ^/api/passkeys(/|$)` at line 212
-would otherwise swallow the desktop endpoints into `passkey_manage_rl` with
-burst 20. nginx evaluates regex locations top-down and stops at the first
-match, so the fix is to widen the more specific anonymous-ceremony location
-that already sits above it.
+The layering to aim for: **nginx is the coarse outer guard (looser), DRF is the
+precise inner limit (tighter).** So the nginx zone must sit above 90/min.
 
-- [ ] **Step 1: Widen the anonymous ceremony location**
+Two other facts that drive the placement: the catch-all
+`location ~ ^/api/passkeys(/|$)` at line 212 would otherwise swallow these into
+`passkey_manage_rl` (burst 20), and nginx evaluates regex locations top-down,
+stopping at the first match. So the new location must appear **before** line
+212. It does not need to be near the `(login|signup)` block, since that regex
+cannot match a `/desktop/` path.
 
-In `nginx/nginx.conf` at line 194, change:
+- [ ] **Step 1: Add the zone**
+
+In `nginx/nginx.conf`, beside the other passkey zones (lines 44-52):
 
 ```nginx
-    location ~ ^/api/passkeys/(login|signup)/ {
+# Desktop pairing polls every 5s for up to PASSKEY_DESKTOP_TTL, so sustained
+# traffic rather than the login ceremonies' two-shot bursts. The SUSTAINED rate
+# sits deliberately above the DRF 'passkey_desktop' scope (2 r/s here vs
+# 1.5 r/s there) so that under the traffic shape this is built for -- several
+# machines behind one NAT polling steadily -- DRF is the limit that binds and
+# this stays the coarse edge backstop.
+#
+# That ordering holds for sustained rate, NOT for a burst: the two limiters
+# have different shapes. nginx is a leaky bucket (burst 60, then 2 r/s), while
+# DRF's UserRateThrottle is a sliding window that will pass all 90 in the first
+# second. So a flood trips nginx first -- measured, a hot loop gets its first
+# 429 from nginx at request ~64, and DRF never fires. That is this zone doing
+# its job; do not "fix" it by raising the burst to chase the 90.
+limit_req_zone $binary_remote_addr zone=passkey_desktop_rl:10m rate=120r/m;
 ```
 
-to:
+- [ ] **Step 2: Add the API location, above the catch-all**
+
+Insert before the `location ~ ^/api/passkeys(/|$)` block at line 212, copying
+the shape of the `(login|signup)` block above it:
 
 ```nginx
-    location ~ ^/api/passkeys/(login|signup|desktop)/ {
+    # Anonymous desktop pairing (begin once, then poll every 5s for the life
+    # of the pairing). Listed ahead of the general /api/passkeys/ location
+    # below so this more specific regex wins.
+    location ~ ^/api/passkeys/desktop/ {
+        limit_req zone=passkey_desktop_rl burst=60 nodelay;
+        error_page 429 = @ratelimited_passkey;
+        client_max_body_size 64k;
+        proxy_pass http://app;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+    }
 ```
 
-and update the comment above it (currently "Anonymous passkey login/signup
-ceremonies (begin+finish, ~2 requests per attempt)") to mention that desktop
-pairing polls repeatedly — at the 5-second interval the client is told to use,
-that is 12 requests/min against a 60 r/m budget, and burst 30 absorbs a client
-retrying after a transient failure.
+- [ ] **Step 3: Add the browser confirmation page location**
 
-- [ ] **Step 2: Add the browser confirmation page location**
+These two routes are plain Django views, so no DRF throttle applies to them at
+all — nginx is their only limiter. Without this block they fall through to the
+unmetered `location /` catch-all, and `/desktop/approve/` performs a real
+database write.
 
 Insert directly after the `location ~ ^/login/passkey/?$ { … }` block that ends
 at line 175, copying its shape:
 
 ```nginx
-    # Desktop pairing confirmation page (signed-in browser leg of the
-    # desktop sign-in handshake -- see user_data/desktop_pairing.py).
-    location ~ ^/desktop/ {
+    # Desktop pairing confirmation page (the signed-in browser leg of the
+    # handshake -- see user_data/desktop_pairing.py). Plain Django views, so
+    # unlike the /api/passkeys/ endpoints no DRF throttle backs this up: nginx
+    # is the only limiter, and /desktop/approve/ writes to the database.
+    # 60r/m is ample for a human pressing one button. `(/|$)`, not a bare
+    # trailing slash, so the slash-less GET /desktop is caught too -- Django's
+    # APPEND_SLASH 301 would otherwise go through the unmetered location /,
+    # same care as /login/passkey/?$ and /api/passkeys(/|$).
+    location ~ ^/desktop(/|$) {
         limit_req zone=passkey_rl burst=30 nodelay;
         error_page 429 = @ratelimited_passkey;
         client_max_body_size 64k;
@@ -1090,12 +1473,77 @@ at line 175, copying its shape:
     }
 ```
 
-- [ ] **Step 3: Check the config parses**
+Note `@ratelimited_passkey` returns a JSON body, which is slightly off for an
+HTML page. Accepted deliberately: at 60r/m with burst 30 a human clicking one
+button will never see it, and adding a fourth named 429 handler for a case that
+should not occur is not worth the config surface.
 
-Run: `docker compose exec -T nginx nginx -t`
-Expected: `syntax is ok` / `test is successful`
+- [ ] **Step 4: Check the config parses**
 
-- [ ] **Step 4: Commit**
+`nginx/Dockerfile` bakes the config in with `COPY nginx.conf /etc/nginx/conf.d`
+— there is no volume mount, so a bare `nginx -t` tests the image's copy and
+will happily pass while your edit sits unread on the host. Copy it in first.
+
+Note the destination is **`/etc/nginx/conf.d/nginx.conf`**, not
+`/etc/nginx/nginx.conf`. This repo's `nginx/nginx.conf` is an http-context
+fragment (it starts with `map`/`limit_req_zone`, no `events`/`http` wrapper).
+Writing it over the image's main `/etc/nginx/nginx.conf` clobbers that file and
+fails with `"map" directive is not allowed here`.
+
+```bash
+docker compose cp nginx/nginx.conf nginx:/etc/nginx/conf.d/nginx.conf
+docker compose exec -T nginx nginx -t
+docker compose exec -T nginx nginx -s reload
+```
+
+Expected: `syntax is ok` / `test is successful`, then `signal process started`.
+
+- [ ] **Step 5: Prove each location is bound to the zone you think it is**
+
+`nginx -t` only proves the file parses. It does not prove the new locations
+match ahead of the `^/api/passkeys(/|$)` catch-all — get that wrong and the
+endpoints silently inherit `passkey_manage_rl` (burst 20) with no error
+anywhere. Measure where the first 429 appears on each path; the burst sizes
+differ enough to tell the zones apart.
+
+The app must actually be up for this to mean anything — if the endpoint is
+500ing, you are measuring nginx against an error page. Check for a 200 first:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  http://localhost:1338/api/passkeys/desktop/begin/ \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Expected `200`. A 500 here is usually a stale container: `user_data/migrations`
+is bind-mounted but gunicorn workers hold the module they imported at start, so
+after adding the model you need `docker compose exec -T web python manage.py
+migrate user_data` and `docker compose restart web`.
+
+Then, for each path, count requests until the first 429:
+
+```bash
+for p in /api/passkeys/desktop/begin/ /api/passkeys/ /desktop; do
+  for i in $(seq 1 130); do
+    R=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:1338$p")
+    [ "$R" = "429" ] && { echo "$p -> first 429 at #$i"; break; }
+  done
+done
+```
+
+Expected, and these numbers are the actual assertion:
+- `/api/passkeys/desktop/begin/` → ~**64** (burst 60 + replenish) = `passkey_desktop_rl` ✓
+- `/api/passkeys/` → ~**22** (burst 20 + replenish) = `passkey_manage_rl`, the
+  control proving the two locations really are on different zones
+- `/desktop` **slash-less** → ~**32** (burst 30 + replenish) = `passkey_rl`,
+  proving the `(/|$)` alternation works. Before that fix this ran all 130
+  without a 429, because it fell through to the unmetered `location /`.
+
+The 429 body must be nginx's `{"error":"rate_limited",...}`. If you instead see
+DRF's `{"detail":"Request was throttled..."}`, nginx is not limiting that path
+at all and something above is wrong.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add nginx/nginx.conf
