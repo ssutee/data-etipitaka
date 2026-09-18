@@ -43,6 +43,14 @@ def test_new_user_code_shape():
     assert set(code) <= set(desktop_pairing.CODE_ALPHABET)
 
 
+def test_new_user_code_varies():
+    # Guards against a regression that draws one character and repeats it:
+    # that keeps the length and alphabet correct but destroys the entropy.
+    codes = {desktop_pairing.new_user_code() for _ in range(20)}
+    assert len(codes) > 1
+    assert any(len(set(code)) > 1 for code in codes)
+
+
 def test_alphabet_excludes_ambiguous_characters():
     assert not (set('01OI') & set(desktop_pairing.CODE_ALPHABET))
 
@@ -60,3 +68,12 @@ def test_normalise_rejects_rubbish():
     assert desktop_pairing.normalise_user_code('K7QP4M2XY') is None    # too long
     assert desktop_pairing.normalise_user_code(None) is None
     assert desktop_pairing.normalise_user_code(123) is None
+    assert desktop_pairing.normalise_user_code('K7QP4M2O') is None     # O not in alphabet
+    assert desktop_pairing.normalise_user_code('K7QP4M2L') is None     # L not in alphabet
+
+
+def test_normalise_strips_exotic_separators():
+    assert desktop_pairing.normalise_user_code('K7QP\xa04M2X') == 'K7QP4M2X'   # NBSP
+    assert desktop_pairing.normalise_user_code('K7QP　4M2X') == 'K7QP4M2X'   # full-width
+    assert desktop_pairing.normalise_user_code('K7QP\t4M2X\n') == 'K7QP4M2X'
+    assert desktop_pairing.normalise_user_code('K7QP–4M2X') == 'K7QP4M2X'   # en dash

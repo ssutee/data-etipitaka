@@ -21,8 +21,8 @@ from django.utils import timezone
 
 from .models import DesktopPairing
 
-# Crockford-style: no 0/O/1/I, so a code read off a screen and typed (or read
-# aloud) cannot be ambiguous.
+# Crockford-style: no 0/1/I/L/O/U, so a code read off a screen and typed (or
+# read aloud) cannot be ambiguous.
 CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ'
 CODE_LENGTH = 8
 
@@ -37,15 +37,23 @@ def new_user_code():
 
 def format_user_code(code):
     """Canonical code -> the form shown to a human: K7QP4M2X -> K7QP-4M2X."""
+    if len(code) != CODE_LENGTH:
+        raise ValueError('expected a %d-character code' % CODE_LENGTH)
     half = CODE_LENGTH // 2
     return code[:half] + '-' + code[half:]
 
 
 def normalise_user_code(raw):
-    """Anything a user or URL supplied -> canonical code, or None if invalid."""
+    """Anything a user or URL supplied -> canonical code, or None if invalid.
+
+    Keeps only alphanumerics, so every separator a code can pick up on its way
+    through a browser, a chat app or a PDF -- ASCII and non-breaking spaces,
+    tabs, newlines, and hyphens autocorrected into en/em dashes -- is dropped
+    rather than rejected.
+    """
     if not isinstance(raw, str):
         return None
-    code = raw.replace('-', '').replace(' ', '').upper()
+    code = ''.join(ch for ch in raw if ch.isalnum()).upper()
     if len(code) != CODE_LENGTH or not set(code) <= set(CODE_ALPHABET):
         return None
     return code
