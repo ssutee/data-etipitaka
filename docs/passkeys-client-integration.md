@@ -53,7 +53,12 @@ cookie (`/login/passkey/`) or, for the two recovery endpoints, also a valid
 reset-link session already established by opening the emailed link
 (`INTERNAL_RESET_SESSION_TOKEN`) — native clients never call any of these
 three rows directly, only the web pages do; **account** = signed-in caller,
-via `Authorization: Token <key>` (apps) or the web session + `X-CSRFToken`.
+via `Authorization: Token <key>` (apps) or the web session + `X-CSRFToken`;
+**session** = signed-in caller via the web session cookie *only* — a plain
+Django view behind `@login_required`, where `Authorization: Token` is not
+honoured at all — plus CSRF on the POST. The two `/desktop/` rows are the
+only ones of that kind: a desktop client opens them in the system browser and
+never calls them itself (see "Desktop (browser-delegated)").
 OAuth bearer tokens are **rejected** on every account endpoint, so a
 read-scoped MCP connector token can never manage passkeys.
 
@@ -62,6 +67,10 @@ read-scoped MCP connector token can never manage passkeys.
 | `POST /api/passkeys/login/begin/` | none | `{}` | 200 ceremony | 400 malformed body; 429 |
 | `POST /api/passkeys/login/finish/` | none | ceremony | 200 `{"key": "<token>"}` (same shape as `/rest-auth/login/`) | 400 `{"non_field_errors": [msg]}` — bad credentials, or "account not active" (see below); 400 malformed body; 429 |
 | `POST /login/passkey/` | anon, CSRF | `{challenge_id, credential, next}` | 200 `{"redirect": <safe target>}` + session cookie (`Cache-Control: no-store`) | 400 `{"detail": msg}` — same two messages as above; 403 CSRF failure; 429 (nginx only — this is a plain Django view, so the DRF `passkey` throttle never runs here) |
+| `POST /api/passkeys/desktop/begin/` | none | `{}` | 200 `{"device_code", "user_code", "verification_url", "interval", "expires_in"}` | 400 malformed body; 429 |
+| `POST /api/passkeys/desktop/poll/` | none | `{"device_code"}` | 200 `{"status": "pending"}`, `{"status": "approved", "key", "username"}` or `{"status": "denied"}` | 400 `{"detail": "This sign-in request has expired…"}` — unknown, expired *or* already redeemed, and a missing/non-string `device_code` too; 400 malformed body; 429 |
+| `GET /desktop/?code=<user_code>` | session | — | 200 confirmation page (`Cache-Control: no-store`) | 302 → `/login/?next=…` when signed out; 429 (nginx only, and an HTML page) |
+| `POST /desktop/approve/` | session, CSRF | form-encoded `code`, `action`, `csrfmiddlewaretoken` | 302 → `/desktop/?result=approved\|denied\|stale` (`Cache-Control: no-store`) | 403 CSRF failure; 429 (nginx only, HTML) |
 | `POST /api/passkeys/signup/begin/` | none | `{"username", "email"}` | 200 ceremony | 400 field errors; 400 malformed body; 429 |
 | `POST /api/passkeys/signup/finish/` | none | ceremony + optional `"name"` | 201 `{"detail": "Verification e-mail sent."}` — account inactive until the emailed link is opened | 400 field errors (taken since begin); 400 `{"detail": "Passkey registration failed."}`; 400 malformed body; 429 |
 | `POST /api/passkeys/register/begin/` | account | `{"password"}` **or** `{"step_up": {"challenge_id", "credential"}}` | 200 ceremony | 400 `{"detail": "Re-authentication failed."}`; 409 `{"detail": "You have reached the maximum number of passkeys."}` (cap of 20, see below); 400 malformed body; 401; 429 |
@@ -76,6 +85,32 @@ read-scoped MCP connector token can never manage passkeys.
 | `GET/HEAD /.well-known/assetlinks.json` | none | — | 200 `application/json` | 404 JSON when `PASSKEY_ANDROID_PACKAGE` or `PASSKEY_ANDROID_CERT_SHA256` is empty; 405 other methods; never rate-limited |
 
 Passkey object: `{"id", "name", "authenticator", "backed_up", "created_at", "last_used_at"}`.
+
+**Every error string comes back in Thai, and `Accept-Language` will not
+change that.** `LANGUAGE_CODE = 'th'`, and the project's own
+`etipitaka_auth.i18n.LanguageMiddleware` picks the active language from the
+`django_language` cookie alone — it does no `Accept-Language` negotiation,
+deliberately (there is no `django.middleware.locale.LocaleMiddleware` in
+`MIDDLEWARE`). A native client sends no cookies, so it gets the site default
+on every request. Verified against the running stack: `Accept-Language: en`
+on `/api/passkeys/desktop/poll/` still answers
+`{"detail": "คำขอเข้าสู่ระบบนี้หมดอายุแล้ว กรุณาลองใหม่"}`, and
+`/api/passkeys/login/finish/` answers
+`{"non_field_errors": ["ไม่สามารถเข้าสู่ระบบด้วยข้อมูลที่ให้มาได้"]}` — this is
+site-wide, not something these endpoints do on their own. Two ways out, in
+order of preference:
+
+- **Branch on the status code plus the machine-readable field** (`status` on
+  desktop poll, the presence of `key`, the HTTP code elsewhere) and render
+  your own strings. `detail` is a generic fallback, not an API contract.
+- **Send `Cookie: django_language=en`** on API calls if you would rather let
+  the server phrase it. The only values `settings.LANGUAGES` recognises are
+  `th` and `en`, anything else falls back to Thai, and there is no `en`
+  catalogue — so "English" is simply the msgid, the English source string
+  (`{"detail": "This sign-in request has expired. Please try again."}`).
+
+A client that just displays `detail` verbatim shows Thai to every user
+whatever the app's own UI language is set to.
 
 **Passkey cap:** an account may hold at most 20 passkeys (`PASSKEY_MAX_PER_USER`
 in `user_data/passkey_service.py`). The cap applies to `register/begin` and
@@ -121,6 +156,12 @@ passkeys used to do all of that silently after the first email.
 
 **Sign in:** `login/begin` → system passkey sheet → `login/finish` → store the
 token exactly as after password login.
+
+**Sign in from a desktop app:** `desktop/begin {}` → show the `user_code` and
+open `verification_url` in the system browser → poll `desktop/poll
+{"device_code"}` every `interval` seconds until it answers something other
+than `pending`. No ceremony happens in the app at all. Full contract, including
+the four poll outcomes, in "Desktop (browser-delegated)" below.
 
 **Link a passkey (existing users):** ask for the current password →
 `register/begin {"password"}` → system sheet → `register/finish`. A user with
@@ -184,6 +225,196 @@ signed out too, on either recovery path (new passkey or new password).
 - Android reports origin `android:apk-key-hash:<base64url(SHA-256 of signing cert)>`;
   the server derives it from `PASSKEY_ANDROID_CERT_SHA256`.
 
+## Desktop (browser-delegated)
+
+**A desktop client never posts credential JSON at all.** A WebAuthn ceremony
+is bound to an origin; the origin is asserted by the browser or the OS, never
+by the page or the app; and `passkey_config.expected_origins()` accepts
+exactly one for the web, `https://data.etipitaka.com`. iOS and Android get
+origins of their own into that list through the two association files above.
+A wxPython process has no equivalent — there is nothing it could claim that
+the server would accept — so it cannot call `login/finish` or
+`register/finish` however it obtains a credential. Instead the ceremony
+happens where it already works, in the user's own browser on the registered
+origin, and the app collects only the *result* through a device-pairing
+hand-off: the app is issued a code, the human approves that code in their
+signed-in browser, and the app polls until it is handed the account's token.
+
+The shape is the OAuth device grant's, but the implementation is this
+project's own (`user_data/desktop_pairing.py`) — `etipitaka_auth/urls.py`
+deliberately does **not** mount django-oauth-toolkit's device-code grant, so
+`/o/device/...` does not exist and is not the thing to build against.
+
+**begin.** `POST /api/passkeys/desktop/begin/`, anonymous — nobody is signed
+in yet, and the handshake is worthless without the browser leg. The body must
+still be a JSON object (`{}`); the view touches `request.data` like every
+other, so anything else is a malformed-body 400.
+
+```
+POST /api/passkeys/desktop/begin/
+{}
+
+200 {"device_code": "xY3kQd7ZmT2vR9pL4wN8bH5cJ1sF6gK0aE-tU_nV2Qw",
+     "user_code": "6RX5-PDCK",
+     "verification_url": "https://data.etipitaka.com/desktop/?code=6RX5-PDCK",
+     "interval": 5,
+     "expires_in": 600}
+```
+
+- `device_code` — the app's **secret** (`secrets.token_urlsafe(32)`, 43
+  URL-safe characters). Only its SHA-256 reaches the database, so the server
+  can never show it to anyone; neither should the app. Never display it,
+  never log it, never put it in a window title or a crash report. It is the
+  one thing that can collect the token.
+- `user_code` — the **public** half, always `XXXX-XXXX`: eight characters
+  drawn from `CODE_ALPHABET`, `23456789ABCDEFGHJKMNPQRSTVWXYZ`, hyphenated in
+  the middle for reading. That is Crockford-style — no `0`, `1`, `I`, `L`,
+  `O` or `U` — because this code gets read off one screen and compared with
+  another, or read down a phone line, and `0`/`O` and `1`/`I`/`L` are where
+  that goes wrong. Show it exactly as returned. A client does not need to
+  accept typed codes at all (`verification_url` already carries it), but if
+  it does: the server's `normalise_user_code` strips every non-alphanumeric
+  and upper-cases, so hyphens, spaces, non-breaking spaces, tabs and
+  autocorrected en/em dashes all survive a trip through a chat app — it does
+  **not** fold `O` to `0` or `I` to `1`, so a genuinely mistyped character is
+  rejected rather than guessed at. Don't fold it client-side either.
+- `verification_url` — `<web origin>/desktop/?code=<user_code>`. Open it in
+  the **system** browser (`webbrowser.open`), not an in-app WebView the app
+  controls: the entire security of this handshake is a human comparing the
+  code on that page with the code in the app, in a browser the app cannot
+  drive. Take the URL as given rather than rebuilding it from a hardcoded
+  host — it is composed from the server's configured `PASSKEY_WEB_ORIGIN`.
+- `interval` — seconds between polls, currently 5 (`DESKTOP_POLL_INTERVAL`).
+  Read it from the response; don't hardcode 5.
+- `expires_in` — seconds the pairing stays alive, currently 600
+  (`PASSKEY_DESKTOP_TTL`). Ten minutes, not the challenge TTL's five, because
+  the window has to cover opening a browser, signing in to the website if
+  there is no session yet, and only then confirming. Past it, poll is a 400
+  and the app must begin again.
+
+**poll — four outcomes, and a client has to tell all four apart.**
+`POST /api/passkeys/desktop/poll/` with `{"device_code": "<the secret>"}`,
+anonymous, no faster than `interval`:
+
+| Response | Meaning | What the client does |
+|---|---|---|
+| 200 `{"status": "pending"}` | the human has not decided | wait `interval`, poll again |
+| 200 `{"status": "approved", "key": "<token>", "username": "<name>"}` | approved | stop polling; store `key` exactly as after `/rest-auth/login/` |
+| 200 `{"status": "denied"}` | the human pressed **No** | stop polling, say the request was refused. No `key`, no `username` — and don't silently start a new pairing on their behalf |
+| 400 `{"detail": …}` | unknown, expired, or already redeemed | throw the device code away and begin again |
+
+Note where the line falls: **refusal is a 200, not a 400.** "The human said
+no, stop" and "this pairing is dead, start over" want opposite behaviour from
+the app, and a client that only checks `response.ok` will get one of them
+wrong. Branch on the status code first, then on `status`.
+
+The 400 is deliberately one undifferentiated case: `redeem()` raises the same
+`PairingError` for a code that never existed, one that expired and one that
+was already redeemed, so a guesser learns nothing about whether a code it
+invented was ever real. A missing or non-string `device_code` lands there
+too. (A body that is not a JSON object at all is the generic
+`{"detail": "Malformed request."}` 400 instead — see "Malformed request
+bodies".)
+
+**Both resolutions are single-use.** `redeem()` deletes the row inside the
+same transaction that reports `approved` *or* `denied` — a refusal is
+consumed exactly like an approval — so the very next poll with that device
+code is a 400. A client that keeps polling past a resolution must not read
+that 400 as "still deciding", nor as a fresh failure worth retrying. The row
+is selected `FOR UPDATE` and deleted in the transaction that mints the token,
+so two concurrent polls can never both be served, and a crash mid-request
+leaves the pairing intact to retry.
+
+Approval hands over the account's **existing** DRF token
+(`Token.objects.get_or_create`) — the same `key` `/rest-auth/login/` or
+`login/finish` would return for that user, not a second one minted for this
+device. Revoking it (account recovery does) logs every holder out at once.
+
+**A 429 is not a pairing failure.** nginx rejects the request before it
+reaches Django, so the pairing is untouched: still pending, still valid until
+`expires_in`. Back off for `Retry-After` and resume polling the same
+`device_code`. Tearing the handshake down and making the user read a fresh
+code off the screen is the wrong reaction to it, and throws away a pairing
+that was fine. The `Retry-After` on this surface is **5**, chosen to match
+`interval` rather than the zone's actual refill time, precisely so that a
+client honouring it cannot end up polling *faster* under load than it does
+normally — see "Rate limits". The flip side: do not poll faster than
+`interval`. A steady poll is about 12 req/min and nowhere near either
+limiter; it is a burst that trips one — measured, a hot loop takes its first
+429 from nginx at around the 64th request.
+
+**`detail` is Thai.** See "Every error string comes back in Thai" under
+Endpoints — it is site-wide, not specific to these two endpoints, and a
+desktop app with its own translation catalogue should branch on status code
+plus `status` rather than display it.
+
+**The browser leg, for reference.** The app never calls these two, but they
+are what the human walks through and what any support conversation will be
+about. `GET /desktop/?code=<user_code>` is `@login_required`, so a user with
+no session is bounced to `/login/?next=/desktop/%3Fcode%3D…` and signs in
+there — with a passkey, if they have one — before the page appears. The page
+names the signed-in account, shows the code, and offers **Yes, allow** /
+**No**; the decision is a CSRF-protected form POST to `/desktop/approve/`,
+which redirects to `/desktop/?result=approved|denied|stale` so that
+refreshing cannot re-submit a decision already made. Anything other than
+`action=approve` denies, so a mangled form fails safe. `result=stale` means
+the pairing was no longer pending when the decision arrived (decided in
+another tab, consumed by a concurrent poll, or expired) — it says only that
+*this* button press changed nothing; the app's own poll remains the authority
+on what happened. A code that is unknown, expired or already decided renders
+the "this sign-in request has expired" page rather than an error.
+
+**Three browser URLs a desktop client should open**, all in the system
+browser — none of them has a native equivalent, and a desktop app has no
+business rendering any of them itself:
+
+| Purpose | URL |
+|---|---|
+| Create an account | `https://data.etipitaka.com/signup/` |
+| Add, rename or delete passkeys; drop the password fallback | `https://data.etipitaka.com/account/security/` |
+| Lost passkey / forgot password | `https://data.etipitaka.com/password_reset/` |
+
+The middle one is `@login_required` too, so an app sending a user there when
+their browser has no session lands them on `/login/` first. And recovery
+revokes every DRF and OAuth token the account holds (see "Flows"), so a
+desktop app holding a token will start getting 401s once the user recovers,
+and has to run the pairing handshake again.
+
+**Worked example.** Adapted from `desktop_sign_in`/`desktop_refused` in
+`tests/passkey_e2e.py`, which is a working client for exactly this flow;
+`show_code`, `refused`, `restart`, `signed_in` and `expired` are the app's
+own.
+
+```python
+import time, webbrowser, requests
+
+BASE = 'https://data.etipitaka.com'
+
+
+def sign_in():
+    p = requests.post(BASE + '/api/passkeys/desktop/begin/', json={}).json()
+    show_code(p['user_code'])               # "6RX5-PDCK", displayed exactly as given
+    webbrowser.open(p['verification_url'])  # system browser, never an in-app view
+
+    deadline = time.monotonic() + p['expires_in']
+    while time.monotonic() < deadline:
+        time.sleep(p['interval'])           # never poll faster than this
+        r = requests.post(BASE + '/api/passkeys/desktop/poll/',
+                          json={'device_code': p['device_code']})
+        if r.status_code == 429:            # pairing untouched and still alive
+            time.sleep(int(r.headers.get('Retry-After', p['interval'])))
+            continue
+        if r.status_code == 400:            # unknown, expired or already redeemed
+            return restart()
+        state = r.json()
+        if state['status'] == 'pending':
+            continue
+        if state['status'] == 'denied':     # the human said No -- do not retry
+            return refused()
+        return signed_in(state['key'], state['username'])
+    return expired()                        # expires_in elapsed, no decision
+```
+
 ## Rate limits
 
 Two independent layers; a client hitting either gets a 429. **Honour
@@ -197,8 +428,17 @@ Two independent layers; a client hitting either gets a 429. **Honour
 - Anonymous ceremonies and browser passkey login/recovery —
   `/api/passkeys/(login|signup)/*`, `/login/passkey/`,
   `/account/recover/passkey/*` — **60 req/min, burst 30**.
+- Desktop pairing — `/api/passkeys/desktop/*` — **120 req/min, burst 60**, in
+  a zone of its own (`passkey_desktop_rl`), listed ahead of the general
+  `/api/passkeys/` location so the more specific regex wins. Sized for
+  sustained polling rather than the ceremonies' two-shot bursts.
 - Signed-in passkey management — the rest of `/api/passkeys/*` (list,
-  rename, delete, register, remove password) — **60 req/min, burst 20**.
+  rename, delete, register, remove password) **and the two `/desktop/`
+  confirmation pages** — **60 req/min, burst 20**. The desktop pages share
+  this zone rather than the anonymous one because both views are
+  `@login_required`: `limit_req` state lives in the zone, so putting them on
+  the ceremony zone would let one IP's login/signup flood drain the bucket a
+  *different* person behind that NAT needs in order to press **Yes**.
 - `/password_reset/` and the `/reset/<uidb64>/...` confirm pages (reached
   when a client opens the recovery link in an in-app browser, not through
   the JSON API): **GET 20 req/min burst 10**, **POST 5 req/min burst 3** —
@@ -207,9 +447,21 @@ Two independent layers; a client hitting either gets a 429. **Honour
 A throttled nginx request on any passkey/recovery location gets
 `429 {"error":"rate_limited","retry_after":1,"detail":"Too many requests. Please wait a moment and try again."}`
 (the `detail` key is additive over `error`/`retry_after`, for a client that
-just displays that field generically). The one exception is
-`/password_reset/`/`/reset/.../` — that surface is a browser following an
-emailed link, not a script, so its 429 is a small HTML page instead of JSON.
+just displays that field generically), with the `Retry-After` header carrying
+the same number. Two departures from that:
+
+- `/api/passkeys/desktop/*` reports **`retry_after: 5`**, not the 0.5 s its
+  zone actually refills in. 5 is the `interval` the begin response already
+  handed the client: a client that honours `retry_after` — the obvious
+  reading, and what `assets/passkey.js` already does — would read a 1 there
+  as licence to come back five times *faster* than the cadence the same API
+  just asked it to keep, i.e. to speed up under load.
+- `/password_reset/`/`/reset/.../` **and `/desktop/`, `/desktop/approve/`**
+  answer with a small HTML page instead of JSON. Both surfaces are a browser
+  navigating — an emailed link, a form POST and its post-redirect GET — not a
+  script calling `fetch`, and someone one button away from finishing must not
+  be handed a raw JSON blob as the page. The desktop one says so explicitly:
+  wait, reload, and the code on your computer is still valid.
 
 **DRF**, layered underneath (`REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey']`,
 currently **20/min**): per authenticated user on account endpoints, per
@@ -220,6 +472,18 @@ looser-in-practice safety net behind nginx's zone, not the primary control;
 `X-Forwarded-For`) rather than letting a client spoof a fresh IP on every
 request.
 
+The desktop pairing endpoints use a separate DRF scope, `passkey_desktop`, at
+**90/min**, keyed on client IP (their callers are anonymous) — its own bucket,
+so a second machine behind the same NAT cannot starve the first. Between the
+two layers the ordering is deliberate for *sustained* traffic: nginx's 2 r/s
+sits above DRF's 1.5 r/s, so under a steady poll DRF is the limit that binds
+and nginx stays the coarse edge backstop. It does **not** hold for a burst,
+because the two limiters have different shapes — nginx is a leaky bucket,
+while DRF's `UserRateThrottle` is a sliding window that would pass all 90 in
+the first second. So a flood trips nginx first (measured: first 429 at about
+request 64) and DRF never fires. That is the zone doing its job, not a
+misconfiguration.
+
 ## Testing native clients
 
 Native passkeys need the association files over real HTTPS; `localhost` does
@@ -227,8 +491,9 @@ not work. Test against production, or expose a dev stack through an HTTPS
 tunnel and set `PASSKEY_RP_ID` / `PASSKEY_WEB_ORIGIN` to the tunnel host.
 
 Internal engineers: `tests/passkey_e2e.py` exercises the whole server-side
-flow (password login → step-up → register → passkey login → recovery →
-lockout guards) against a running stack, and `tests/passkey_js_test.mjs`
+flow (password login → step-up → register → passkey login → desktop pairing,
+both approved and refused → recovery → lockout guards) against a running
+stack, and `tests/passkey_js_test.mjs`
 unit-tests `app/assets/passkey*.js` and `account_security.js` on the host
 (Node, not the container — see `tests/README.md` for exact commands).
 
