@@ -1,4 +1,5 @@
-"""Revoke every API credential a user holds: the DRF token and OAuth tokens.
+"""Revoke every API credential a user holds: the DRF token, the OAuth tokens
+and any desktop pairing already approved into their account.
 
 None of django-oauth-toolkit's FKs between these models can turn this into
 an IntegrityError -- AccessToken.source_refresh_token and
@@ -80,6 +81,8 @@ from django.utils import timezone
 from oauth2_provider.models import (get_access_token_model, get_grant_model,
                                     get_id_token_model, get_refresh_token_model)
 from rest_framework.authtoken.models import Token
+
+from .models import DesktopPairing
 
 _DB_SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
@@ -258,7 +261,7 @@ def lock_signup_email(email):
 
 
 def revoke_all_tokens(user):
-    """Delete every DRF and OAuth credential belonging to `user`.
+    """Delete every DRF, OAuth and desktop-pairing credential of `user`.
 
     Takes lock_user_tokens(user.pk) first, inside the same transaction as
     every delete below -- see that function's docstring for why this,
@@ -270,6 +273,10 @@ def revoke_all_tokens(user):
     own unlocked SELECTs, unrelated to the deadlock lock_user_tokens
     closes) -- so do not reorder these without re-reading it: Token, then
     Grant, then RefreshToken, then AccessToken, then IDToken.
+    DesktopPairing is appended after all five and is not part of that
+    ordering argument: it has no DOT reader to race, and redeem() takes
+    its row FOR UPDATE, so where it sits among the OAuth deletes is
+    immaterial. Last keeps the five that do matter undisturbed.
     """
     with transaction.atomic():
         lock_user_tokens(user.pk)
@@ -278,6 +285,20 @@ def revoke_all_tokens(user):
         get_refresh_token_model().objects.filter(user=user).delete()
         get_access_token_model().objects.filter(user=user).delete()
         get_id_token_model().objects.filter(user=user).delete()
+        # An APPROVED desktop pairing is a credential already granted and
+        # merely not collected yet: desktop_pairing.redeem() mints its token
+        # with Token.objects.get_or_create, so a pairing left alive here
+        # would hand a brand-new DRF token to whoever holds the device code
+        # on their very next poll -- moments after this call deleted the old
+        # one. That would make account recovery a no-op against exactly the
+        # holder it exists to lock out, so pairings belong in this set.
+        # Only approve() ever sets `user` (begin() leaves it null and deny()
+        # never fills it), so filter(user=user) is precisely the set of rows
+        # that could still be redeemed into this account. A still-PENDING
+        # pairing carries no user, matches nothing here, and is correctly
+        # left alone: it cannot become a token for anyone without a
+        # signed-in human approving it first.
+        DesktopPairing.objects.filter(user=user).delete()
 
 
 def check_session_engine():

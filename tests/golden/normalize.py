@@ -13,6 +13,7 @@ TIMESTAMP_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?"
 )
 CSRF_RE = re.compile(r'name="csrfmiddlewaretoken"\s+value="[^"]+"')
+USER_CODE_RE = re.compile(r"code=[0-9A-Z]{4}-[0-9A-Z]{4}")
 
 
 def normalize_json_value(value):
@@ -21,9 +22,16 @@ def normalize_json_value(value):
         for key, val in value.items():
             if key in ("created_at", "created"):
                 out[key] = "<TIMESTAMP>"
-            elif key in ("challenge", "challenge_id"):
-                # WebAuthn challenges are random per request
+            elif key in ("challenge", "challenge_id",
+                         "device_code", "user_code"):
+                # WebAuthn challenges are random per request, and so are both
+                # halves of a desktop pairing.
                 out[key] = "<CHALLENGE>"
+            elif key == "verification_url":
+                # Keep the origin and path visible -- a regression there sends
+                # desktop users to the wrong host and is precisely what this
+                # snapshot is for. Only the random code is masked.
+                out[key] = USER_CODE_RE.sub("code=<USER_CODE>", val)
             elif key == "pk":
                 # top-level auto-increment ids are not deterministic across runs
                 out[key] = "<PK>"

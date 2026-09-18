@@ -1,0 +1,357 @@
+import threading
+from datetime import timedelta
+from unittest.mock import patch
+
+import pytest
+from django.contrib.auth.models import User
+from django.db import IntegrityError, connection, transaction
+from django.utils import timezone
+from rest_framework.authtoken.models import Token
+
+from user_data import desktop_pairing
+from user_data.models import DesktopPairing
+
+
+@pytest.mark.django_db
+def test_pairing_defaults_to_pending():
+    row = DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code='K7QP4M2X',
+        expires_at=timezone.now())
+    assert row.status == DesktopPairing.PENDING
+    assert row.user is None
+
+
+@pytest.mark.django_db
+def test_user_code_is_unique():
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code='K7QP4M2X',
+        expires_at=timezone.now())
+    with pytest.raises(IntegrityError), transaction.atomic():
+        DesktopPairing.objects.create(
+            device_code_hash='b' * 64, user_code='K7QP4M2X',
+            expires_at=timezone.now())
+
+
+@pytest.mark.django_db
+def test_deleting_the_user_deletes_the_pairing():
+    user = User.objects.create_user('alice', password='x')
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code='K7QP4M2X',
+        user=user, expires_at=timezone.now())
+    user.delete()
+    assert DesktopPairing.objects.count() == 0
+
+
+def test_new_user_code_shape():
+    code = desktop_pairing.new_user_code()
+    assert len(code) == 8
+    assert set(code) <= set(desktop_pairing.CODE_ALPHABET)
+
+
+def test_new_user_code_varies():
+    # Guards against a regression that draws one character and repeats it:
+    # that keeps the length and alphabet correct but destroys the entropy.
+    codes = {desktop_pairing.new_user_code() for _ in range(20)}
+    assert len(codes) > 1
+    assert any(len(set(code)) > 1 for code in codes)
+
+
+def test_alphabet_excludes_ambiguous_characters():
+    assert not (set('01OI') & set(desktop_pairing.CODE_ALPHABET))
+
+
+def test_format_and_normalise_round_trip():
+    assert desktop_pairing.format_user_code('K7QP4M2X') == 'K7QP-4M2X'
+    assert desktop_pairing.normalise_user_code('k7qp-4m2x') == 'K7QP4M2X'
+    assert desktop_pairing.normalise_user_code(' K7QP 4M2X ') == 'K7QP4M2X'
+
+
+def test_normalise_rejects_rubbish():
+    assert desktop_pairing.normalise_user_code('') is None
+    assert desktop_pairing.normalise_user_code('!!!!') is None
+    assert desktop_pairing.normalise_user_code('K7QP4M2') is None      # too short
+    assert desktop_pairing.normalise_user_code('K7QP4M2XY') is None    # too long
+    assert desktop_pairing.normalise_user_code(None) is None
+    assert desktop_pairing.normalise_user_code(123) is None
+    assert desktop_pairing.normalise_user_code('K7QP4M2O') is None     # O not in alphabet
+    assert desktop_pairing.normalise_user_code('K7QP4M2L') is None     # L not in alphabet
+
+
+def test_normalise_strips_exotic_separators():
+    assert desktop_pairing.normalise_user_code('K7QP\xa04M2X') == 'K7QP4M2X'   # NBSP
+    assert desktop_pairing.normalise_user_code('K7QP　4M2X') == 'K7QP4M2X'   # full-width
+    assert desktop_pairing.normalise_user_code('K7QP\t4M2X\n') == 'K7QP4M2X'
+    assert desktop_pairing.normalise_user_code('K7QP–4M2X') == 'K7QP4M2X'   # en dash
+
+
+@pytest.mark.django_db
+def test_begin_returns_a_device_code_and_stores_only_its_hash():
+    device_code, row = desktop_pairing.begin()
+    assert len(device_code) >= 40
+    assert row.device_code_hash == desktop_pairing._hash(device_code)
+    assert DesktopPairing.objects.filter(device_code_hash=row.device_code_hash).exists()
+    # The plaintext code must appear nowhere in the table. Checked against every
+    # stored value, not just user_code: a filter(user_code=device_code) lookup
+    # can never match (user_code is max_length=8, device_code is 43 chars), so
+    # it would pass however the row was written.
+    stored = DesktopPairing.objects.filter(pk=row.pk).values().first()
+    assert device_code not in str(stored)
+
+
+@pytest.mark.django_db
+def test_begin_sets_expiry_from_settings(settings):
+    # A non-default TTL on purpose: with the production value (600) this test
+    # would pass even if begin() ignored the setting and hardcoded it.
+    settings.PASSKEY_DESKTOP_TTL = 123
+    before = timezone.now()
+    _code, row = desktop_pairing.begin()
+    assert row.expires_at >= before + timedelta(seconds=122)
+    assert row.expires_at <= timezone.now() + timedelta(seconds=124)
+
+
+@pytest.mark.django_db
+def test_begin_purges_expired_rows():
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code='AAAAAAAA',
+        expires_at=timezone.now() - timedelta(seconds=1))
+    desktop_pairing.begin()
+    assert not DesktopPairing.objects.filter(device_code_hash='a' * 64).exists()
+
+
+@pytest.mark.django_db
+def test_begin_retries_on_user_code_collision():
+    taken = 'K7QP4M2X'
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code=taken,
+        expires_at=timezone.now() + timedelta(seconds=600))
+    with patch.object(desktop_pairing, 'new_user_code',
+                      side_effect=[taken, 'ZZZZ2222']):
+        _code, row = desktop_pairing.begin()
+    assert row.user_code == 'ZZZZ2222'
+
+
+@pytest.mark.django_db
+def test_begin_raises_when_every_code_collides():
+    taken = 'K7QP4M2X'
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code=taken,
+        expires_at=timezone.now() + timedelta(seconds=600))
+    with patch.object(desktop_pairing, 'new_user_code', return_value=taken):
+        with pytest.raises(desktop_pairing.PairingError):
+            desktop_pairing.begin()
+
+
+@pytest.mark.django_db
+def test_find_pending_by_user_code():
+    _code, row = desktop_pairing.begin()
+    found = desktop_pairing.find_pending(desktop_pairing.format_user_code(row.user_code))
+    assert found.device_code_hash == row.device_code_hash
+
+
+@pytest.mark.django_db
+def test_find_pending_rejects_unknown_expired_and_decided():
+    assert desktop_pairing.find_pending('K7QP-4M2X') is None
+    assert desktop_pairing.find_pending('not a code') is None
+
+    _code, expired = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=expired.pk).update(
+        expires_at=timezone.now() - timedelta(seconds=1))
+    assert desktop_pairing.find_pending(expired.user_code) is None
+
+    _code, decided = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(decided, user)
+    assert desktop_pairing.find_pending(decided.user_code) is None
+
+
+@pytest.mark.django_db
+def test_approve_binds_the_user():
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.APPROVED
+    assert row.user == user
+
+
+@pytest.mark.django_db
+def test_deny_marks_denied_without_a_user():
+    _code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.DENIED
+    assert row.user is None
+
+
+@pytest.mark.django_db
+def test_find_pending_excludes_a_denied_pairing():
+    # The approved case is covered above; this is the other half of the
+    # status=PENDING filter, and "user pressed No, is the code live again?"
+    # is exactly the question worth pinning down.
+    _code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    assert desktop_pairing.find_pending(row.user_code) is None
+
+
+@pytest.mark.django_db
+def test_find_pending_accepts_the_code_as_a_url_would_carry_it():
+    _code, row = desktop_pairing.begin()
+    lowered = desktop_pairing.format_user_code(row.user_code).lower()
+    found = desktop_pairing.find_pending(lowered)
+    assert found is not None
+    assert found.device_code_hash == row.device_code_hash
+
+
+@pytest.mark.django_db
+def test_deciding_twice_does_not_flip_the_status():
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    assert desktop_pairing.deny(row) is True
+    assert desktop_pairing.approve(row, user) is False
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.DENIED
+    assert row.user is None
+
+
+@pytest.mark.django_db
+def test_deciding_a_vanished_pairing_reports_false():
+    # What a concurrent redeem() deleting the row looks like from here: no
+    # DatabaseError, just False.
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    DesktopPairing.objects.filter(pk=row.pk).delete()
+    assert desktop_pairing.approve(row, user) is False
+    assert desktop_pairing.deny(row) is False
+
+
+@pytest.mark.django_db
+def test_redeem_pending_returns_pending_and_keeps_the_row():
+    device_code, _row = desktop_pairing.begin()
+    assert desktop_pairing.redeem(device_code) == {'status': 'pending'}
+    assert DesktopPairing.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_redeem_approved_returns_the_token_and_username():
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    result = desktop_pairing.redeem(device_code)
+
+    assert result['status'] == 'approved'
+    assert result['username'] == 'alice'
+    assert result['key'] == Token.objects.get(user=user).key
+
+
+@pytest.mark.django_db
+def test_redeem_approved_is_single_use():
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    desktop_pairing.redeem(device_code)
+
+    assert DesktopPairing.objects.count() == 0
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+
+
+@pytest.mark.django_db
+def test_redeem_approved_reuses_the_existing_token():
+    user = User.objects.create_user('alice', password='x')
+    existing, _ = Token.objects.get_or_create(user=user)
+    device_code, row = desktop_pairing.begin()
+    desktop_pairing.approve(row, user)
+    assert desktop_pairing.redeem(device_code)['key'] == existing.key
+
+
+@pytest.mark.django_db
+def test_redeem_denied_reports_denied_and_consumes_the_row():
+    device_code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    assert desktop_pairing.redeem(device_code) == {'status': 'denied'}
+    assert DesktopPairing.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_redeem_rejects_unknown_and_expired():
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem('nope')
+
+    device_code, row = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=row.pk).update(
+        expires_at=timezone.now() - timedelta(seconds=1))
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+
+
+@pytest.mark.django_db
+def test_redeem_rejects_a_non_string_device_code():
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(None)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_redeems_yield_exactly_one_token():
+    """Two polls racing: exactly one gets a token, the other gets PairingError.
+
+    transaction=True on purpose: the default django_db runs the whole test in
+    one transaction that is rolled back, on a single connection, which cannot
+    exercise cross-connection row locking at all. It also means this is the
+    only test here where redeem()'s durable atomic block is a real commit --
+    Django whitelists nesting durable blocks inside a TestCase's own
+    transaction, so everywhere else the durability is a savepoint that never
+    lands.
+    """
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def poll():
+        barrier.wait()  # make both threads arrive together
+        try:
+            results.append(desktop_pairing.redeem(device_code))
+        except desktop_pairing.PairingError:
+            errors.append(True)
+        finally:
+            connection.close()  # each thread owns its own connection
+
+    threads = [threading.Thread(target=poll) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive(), 'redeem deadlocked'
+
+    assert len(results) == 1, results
+    assert results[0]['status'] == 'approved'
+    assert len(errors) == 1
+    assert DesktopPairing.objects.count() == 0
+
+
+def test_format_user_code_rejects_a_wrong_length_code():
+    # The guard exists so a code sourced from somewhere unvalidated can never
+    # be rendered as silent nonsense ('AB' -> 'AB-') on a page where a human
+    # is asked to compare it against their screen.
+    with pytest.raises(ValueError):
+        desktop_pairing.format_user_code('AB')
+    with pytest.raises(ValueError):
+        desktop_pairing.format_user_code('')
+
+
+@pytest.mark.django_db
+def test_redeem_refuses_an_unrecognised_status():
+    # Unreachable through the current API, which is the point: if a fourth
+    # status is ever added and redeem() is not taught about it, this must
+    # raise rather than fall through and mint a token.
+    device_code, row = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=row.pk).update(status='weird')
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+    # The row is left alone, not consumed, so nothing is silently destroyed.
+    assert DesktopPairing.objects.filter(pk=row.pk).exists()

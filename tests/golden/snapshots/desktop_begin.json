@@ -1,0 +1,16 @@
+{
+  "body": {
+    "json": {
+      "device_code": "<CHALLENGE>",
+      "expires_in": 600,
+      "interval": 5,
+      "user_code": "<CHALLENGE>",
+      "verification_url": "https://data.etipitaka.com/desktop/?code=<USER_CODE>"
+    }
+  },
+  "headers": {
+    "allow": "OPTIONS, POST",
+    "content-type": "application/json"
+  },
+  "status": 200
+}

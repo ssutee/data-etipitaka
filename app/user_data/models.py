@@ -86,3 +86,24 @@ class WebAuthnChallenge(models.Model):
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE)
     payload = models.JSONField(default=dict, blank=True)
     expires_at = models.DateTimeField(db_index=True)
+
+
+class DesktopPairing(models.Model):
+    """One desktop sign-in handshake (see user_data/desktop_pairing.py).
+
+    The desktop app holds the device code; only its SHA-256 is stored here, so
+    reading this table never yields a code that could be polled for a token --
+    the same reasoning as DRF tokens not being reversible from a session.
+
+    user_code is stored canonically (uppercase, no separator); the dash in
+    K7QP-4M2X is presentation only.
+    """
+    PENDING, APPROVED, DENIED = 'pending', 'approved', 'denied'
+    STATUSES = [(PENDING, PENDING), (APPROVED, APPROVED), (DENIED, DENIED)]
+
+    device_code_hash = models.CharField(primary_key=True, max_length=64)
+    user_code = models.CharField(max_length=8, unique=True)
+    status = models.CharField(max_length=8, choices=STATUSES, default=PENDING)
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)

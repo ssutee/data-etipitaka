@@ -99,6 +99,15 @@ REST_FRAMEWORK = {
         # one or two requests ever, so this sits well below 'passkey' and
         # applies alongside it, not instead of it. See PasskeyPasswordThrottle.
         'passkey_password': '5/min',
+        # Desktop pairing polls every DESKTOP_POLL_INTERVAL seconds for up to
+        # PASSKEY_DESKTOP_TTL, i.e. ~12 req/min for as long as one pairing is
+        # open -- sustained traffic the one-shot 'passkey' ceremony budget was
+        # never sized for. Anonymous requests key on client IP, so this has to
+        # fit several machines sharing one public address (a temple or office
+        # behind one NAT): 90/min carries about seven concurrently-pairing
+        # clients. Pairing is a brief one-off act, not a steady state, so this
+        # is generous in practice.
+        'passkey_desktop': '90/min',
     },
     # nginx (nginx.conf) always appends the real client address as the LAST
     # entry of X-Forwarded-For via $proxy_add_x_forwarded_for -- it never
@@ -209,6 +218,11 @@ PASSKEY_IOS_APP_IDS = _env_list('PASSKEY_IOS_APP_IDS', 'A6DJDJ7527.com.watnapp.E
 PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')
 PASSKEY_ANDROID_CERT_SHA256 = _env_list('PASSKEY_ANDROID_CERT_SHA256')
 PASSKEY_CHALLENGE_TTL = 300  # seconds
+
+# Desktop pairing handshakes live longer than a WebAuthn challenge: the window
+# has to cover opening a browser, signing in to the website if there's no
+# session yet, and then confirming the code.
+PASSKEY_DESKTOP_TTL = 600  # seconds
 
 # Declared explicitly, even though it matches Django's own default, because
 # account_tokens.delete_user_sessions (passkey/password recovery signing out
@@ -339,3 +353,4 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'] = None
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey'] = None
     REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey_password'] = None
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['passkey_desktop'] = None

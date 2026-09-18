@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+
+{% load i18n %}
+
+{% block title %}{% trans "Sign in on your computer" %}{% endblock %}
+
+{% block body %}
+<div class="container">
+  {% if decided %}
+    {% if approved %}
+      <h3>{% trans "Signed in on your computer" %}</h3>
+      <p>{% trans "You can go back to the E-Tipitaka app now." %}</p>
+    {% else %}
+      <h3>{% trans "Request refused" %}</h3>
+      <p>{% trans "Nothing was shared with that computer." %}</p>
+    {% endif %}
+  {% elif pairing %}
+    <h3>{% trans "Did you just choose 'Sign in with a passkey' on your computer?" %}</h3>
+    <p>{% blocktrans %}Signed in as {{ user }}{% endblocktrans %}</p>
+    <p>{% trans "Your computer should be showing this code:" %}</p>
+    <p class="desktop-user-code"><strong>{{ user_code }}</strong></p>
+    <p>{% trans "If you did not start this, choose No." %}</p>
+    <form method="post" action="/desktop/approve/">
+      {% csrf_token %}
+      <input type="hidden" name="code" value="{{ user_code }}">
+      <button type="submit" name="action" value="approve" class="btn btn-primary">
+        {% trans "Yes, allow" %}</button>
+      <button type="submit" name="action" value="deny" class="btn btn-default">
+        {% trans "No" %}</button>
+    </form>
+  {% else %}
+    <h3>{% trans "This sign-in request has expired" %}</h3>
+    <p>{% trans "Start again from the E-Tipitaka app on your computer." %}</p>
+  {% endif %}
+</div>
+{% endblock %}
