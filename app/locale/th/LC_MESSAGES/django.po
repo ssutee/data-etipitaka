@@ -548,3 +548,66 @@ msgid ""
 "Your password was removed from your E-Tipitaka account. You now sign in "
 "with a passkey only."
 msgstr "มีการลบรหัสผ่านออกจากบัญชี E-Tipitaka ของคุณแล้ว ตอนนี้คุณเข้าสู่ระบบด้วยพาสคีย์เท่านั้น"
+
+# --- Task 10: desktop passkey pairing page --------------------------------
+# msgids below are verbatim from `django-admin makemessages -l th` (run on the
+# host: the web image ships no GNU gettext). Extracted refs kept; msgmerge's
+# fuzzy guesses for "If you did not start this..." and "This sign-in request
+# has expired. Please try again." were discarded and translated fresh.
+
+#: templates/desktop_confirm.html:5
+msgid "Sign in on your computer"
+msgstr "เข้าสู่ระบบบนคอมพิวเตอร์"
+
+#: templates/desktop_confirm.html:11
+msgid "Signed in on your computer"
+msgstr "เข้าสู่ระบบบนคอมพิวเตอร์แล้ว"
+
+#: templates/desktop_confirm.html:12
+msgid "You can go back to the E-Tipitaka app now."
+msgstr "กลับไปที่โปรแกรม E-Tipitaka ได้เลย"
+
+#: templates/desktop_confirm.html:14
+msgid "Request refused"
+msgstr "ปฏิเสธคำขอแล้ว"
+
+#: templates/desktop_confirm.html:15
+msgid "Nothing was shared with that computer."
+msgstr "ไม่มีข้อมูลใดถูกส่งไปยังคอมพิวเตอร์เครื่องนั้น"
+
+#: templates/desktop_confirm.html:18
+msgid "Did you just choose 'Sign in with a passkey' on your computer?"
+msgstr "คุณเพิ่งกด \"เข้าสู่ระบบด้วย Passkey\" บนคอมพิวเตอร์ใช่ไหม?"
+
+#: templates/desktop_confirm.html:19
+#, python-format
+msgid "Signed in as %(user)s"
+msgstr "เข้าสู่ระบบในชื่อ %(user)s"
+
+#: templates/desktop_confirm.html:20
+msgid "Your computer should be showing this code:"
+msgstr "คอมพิวเตอร์ของคุณควรแสดงรหัสนี้:"
+
+#: templates/desktop_confirm.html:22
+msgid "If you did not start this, choose No."
+msgstr "ถ้าคุณไม่ได้เริ่มการเข้าสู่ระบบนี้ ให้เลือก \"ไม่ใช่\""
+
+#: templates/desktop_confirm.html:27
+msgid "Yes, allow"
+msgstr "ใช่ อนุญาต"
+
+#: templates/desktop_confirm.html:29
+msgid "No"
+msgstr "ไม่ใช่"
+
+#: templates/desktop_confirm.html:32
+msgid "This sign-in request has expired"
+msgstr "คำขอเข้าสู่ระบบนี้หมดอายุแล้ว"
+
+#: templates/desktop_confirm.html:33
+msgid "Start again from the E-Tipitaka app on your computer."
+msgstr "เริ่มใหม่จากโปรแกรม E-Tipitaka บนคอมพิวเตอร์ของคุณ"
+
+#: user_data/passkey_views.py:334
+msgid "This sign-in request has expired. Please try again."
+msgstr "คำขอเข้าสู่ระบบนี้หมดอายุแล้ว กรุณาลองใหม่"
