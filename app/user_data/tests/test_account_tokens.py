@@ -16,9 +16,10 @@ from oauth2_provider.models import (AccessToken, Grant, IDToken, RefreshToken,
                                     get_id_token_model, get_refresh_token_model)
 from rest_framework.authtoken.models import Token
 
-from user_data import account_tokens
+from user_data import account_tokens, desktop_pairing
 from user_data.account_tokens import (delete_user_sessions, lock_signup_email,
                                       lock_user_tokens, revoke_all_tokens)
+from user_data.models import DesktopPairing
 
 from .conftest import make_oauth_token
 
@@ -77,6 +78,50 @@ def test_revoke_all_tokens_blocks_further_api_access(api, alice):
 
     resp = api.get('/rest-auth/user/')
     assert resp.status_code == 401
+
+
+# --- desktop pairings are credentials in flight, so revocation destroys them -
+
+DESKTOP_POLL = '/api/passkeys/desktop/poll/'
+
+
+def test_revoke_all_tokens_stops_an_approved_pairing_minting_a_fresh_token(api, alice):
+    """The property, not the row count: an APPROVED-but-unpolled pairing is a
+    bearer credential already granted and merely not collected yet, and
+    desktop_pairing.redeem() mints its token with Token.objects.get_or_create
+    -- so a pairing surviving revocation would hand out a *brand-new* DRF
+    token minutes after recovery deleted the old one. Poll it after revoking
+    and the answer has to be 400, with no token left behind.
+    """
+    device_code, row = desktop_pairing.begin()
+    assert desktop_pairing.approve(row, alice)
+
+    revoke_all_tokens(alice)
+
+    resp = api.post(DESKTOP_POLL, {'device_code': device_code}, format='json')
+    assert resp.status_code == 400
+    assert not Token.objects.filter(user=alice).exists()
+
+
+def test_revoke_all_tokens_leaves_undecided_and_other_users_pairings_alone(alice, bob):
+    """filter(user=user) is exactly the right predicate. Only approve() ever
+    sets a user, so a still-PENDING pairing belongs to nobody: it cannot be
+    redeemed into this (or any) account without a human approving it first,
+    and once revocation has committed, approving it would bind a pairing
+    created after the revocation anyway. Scoping to the user also leaves
+    another account's approved pairing untouched, as every other delete here
+    does.
+    """
+    _, pending = desktop_pairing.begin()
+    _, bobs = desktop_pairing.begin()
+    assert desktop_pairing.approve(bobs, bob)
+
+    revoke_all_tokens(alice)
+
+    untouched = DesktopPairing.objects.get(pk=pending.pk)
+    assert untouched.status == DesktopPairing.PENDING
+    assert untouched.user is None
+    assert DesktopPairing.objects.get(pk=bobs.pk).user == bob
 
 
 # Table names, not model classes: each captured query is raw SQL and this
