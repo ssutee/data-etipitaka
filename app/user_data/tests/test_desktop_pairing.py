@@ -1,9 +1,10 @@
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import User
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from rest_framework.authtoken.models import Token
 
@@ -285,3 +286,45 @@ def test_redeem_rejects_unknown_and_expired():
 def test_redeem_rejects_a_non_string_device_code():
     with pytest.raises(desktop_pairing.PairingError):
         desktop_pairing.redeem(None)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_redeems_yield_exactly_one_token():
+    """Two polls racing: exactly one gets a token, the other gets PairingError.
+
+    transaction=True on purpose: the default django_db runs the whole test in
+    one transaction that is rolled back, on a single connection, which cannot
+    exercise cross-connection row locking at all. It also means this is the
+    only test here where redeem()'s durable atomic block is a real commit --
+    Django whitelists nesting durable blocks inside a TestCase's own
+    transaction, so everywhere else the durability is a savepoint that never
+    lands.
+    """
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def poll():
+        barrier.wait()  # make both threads arrive together
+        try:
+            results.append(desktop_pairing.redeem(device_code))
+        except desktop_pairing.PairingError:
+            errors.append(True)
+        finally:
+            connection.close()  # each thread owns its own connection
+
+    threads = [threading.Thread(target=poll) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive(), 'redeem deadlocked'
+
+    assert len(results) == 1, results
+    assert results[0]['status'] == 'approved'
+    assert len(errors) == 1
+    assert DesktopPairing.objects.count() == 0

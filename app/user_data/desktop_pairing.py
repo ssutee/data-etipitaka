@@ -145,8 +145,9 @@ def redeem(device_code):
     the caller cannot distinguish "never existed" from "already used" -- both
     are a 400.
 
-    The row is selected FOR UPDATE and deleted inside the same transaction as
-    the token lookup, so two concurrent polls cannot both be served.
+    The row is selected FOR UPDATE and deleted in the same transaction that
+    mints the token, so two concurrent polls cannot both be served, and a
+    crash mid-request leaves the pairing intact for the client to retry.
     """
     if not isinstance(device_code, str):
         raise PairingError()
@@ -162,7 +163,12 @@ def redeem(device_code):
         if row.status == DesktopPairing.DENIED:
             row.delete()
             return {'status': 'denied'}
+        if row.status != DesktopPairing.APPROVED:
+            # Unreachable with today's three statuses. Fail loudly rather than
+            # mint a token for a state this function was never taught about.
+            raise PairingError('unexpected pairing status %r' % row.status)
         user = row.user
         row.delete()
-    token, _created = Token.objects.get_or_create(user=user)
-    return {'status': 'approved', 'key': token.key, 'username': user.username}
+        token, _created = Token.objects.get_or_create(user=user)
+        return {'status': 'approved', 'key': token.key,
+                'username': user.username}
