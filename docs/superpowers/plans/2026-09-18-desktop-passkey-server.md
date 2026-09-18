@@ -1745,9 +1745,17 @@ USER_CODE_RE = re.compile(r"code=[0-9A-Z]{4}-[0-9A-Z]{4}")
 ```
 
 The snapshot should then read
-`"verification_url": "http://localhost:1338/desktop/?code=<USER_CODE>"` — check
-that when you inspect it, and check the origin is the one `web_origin()`
-returns for this environment rather than a hardcoded production host.
+`"verification_url": "https://data.etipitaka.com/desktop/?code=<USER_CODE>"`.
+
+That origin is **not** the `localhost:1338` you are pointing the harness at,
+and that is correct. `passkey_config.web_origin()` resolves to
+`(settings.PASSKEY_WEB_ORIGIN or settings.OAUTH_ISSUER_URL).rstrip('/')`, and
+this stack sets neither env var, so it falls through to the `OAUTH_ISSUER_URL`
+default. The existing `passkey_login_begin` snapshot records `rpId:
+data.etipitaka.com` for the same reason, and `tests/golden/README.md` already
+states the rule: record passkey snapshots with no `PASSKEY_RP_ID` /
+`PASSKEY_WEB_ORIGIN` override. What matters is that the value is
+configuration-derived, not that it names this machine.
 
 `interval` and `expires_in` are deliberately left unmasked — they are part of
 the contract the desktop client depends on and should break the snapshot if
@@ -1755,13 +1763,43 @@ they ever change.
 
 - [ ] **Step 3: Seed and run**
 
+`test_golden.py` does NOT write a snapshot on first run — it calls
+`load_snapshot` and raises `FileNotFoundError` if one is missing. Record
+explicitly, scoped with `-k` so no unrelated snapshot is silently rewritten:
+
 ```bash
 docker compose exec -T web python manage.py seed_golden
+tests/golden/.venv/bin/python -m pytest tests/golden --base-url http://localhost:1338 --record -k desktop
 tests/golden/.venv/bin/python -m pytest tests/golden --base-url http://localhost:1338
 ```
-Expected: PASS, with the new snapshot written on first run — inspect it before committing.
 
-- [ ] **Step 4: Commit**
+Inspect the recorded files before committing.
+
+- [ ] **Step 4: Prove the snapshot can actually fail**
+
+A freshly recorded snapshot passing on the next run proves almost nothing. Two
+checks, both of which must be run:
+
+**Masking is complete** — run the suite a second and third time without
+re-recording. `device_code` and `user_code` are random per call, so any field
+you failed to mask fails here.
+
+**The unmasked fields are load-bearing** — mutate each and confirm a FAILURE,
+then restore:
+
+- `DESKTOP_POLL_INTERVAL` 5 → 6 in `app/user_data/passkey_views.py`, restart
+  web. Expect `behavior drift on endpoint case: desktop_begin` naming
+  `'interval': 6 != 'interval': 5`.
+- Replace `passkey_config.web_origin()` with a hardcoded host in
+  `desktop_begin`, restart web. Expect a diff on `verification_url`'s origin.
+  This is the Task 6 regression reproduced deliberately; if this mutation does
+  NOT fail, the `verification_url` masking is too broad and the guard is
+  worthless.
+
+Restore with `git checkout -- app/user_data/passkey_views.py`, restart web, and
+confirm green before committing.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add tests/golden
