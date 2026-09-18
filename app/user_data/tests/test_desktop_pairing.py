@@ -328,3 +328,26 @@ def test_concurrent_redeems_yield_exactly_one_token():
     assert results[0]['status'] == 'approved'
     assert len(errors) == 1
     assert DesktopPairing.objects.count() == 0
+
+
+def test_format_user_code_rejects_a_wrong_length_code():
+    # The guard exists so a code sourced from somewhere unvalidated can never
+    # be rendered as silent nonsense ('AB' -> 'AB-') on a page where a human
+    # is asked to compare it against their screen.
+    with pytest.raises(ValueError):
+        desktop_pairing.format_user_code('AB')
+    with pytest.raises(ValueError):
+        desktop_pairing.format_user_code('')
+
+
+@pytest.mark.django_db
+def test_redeem_refuses_an_unrecognised_status():
+    # Unreachable through the current API, which is the point: if a fourth
+    # status is ever added and redeem() is not taught about it, this must
+    # raise rather than fall through and mint a token.
+    device_code, row = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=row.pk).update(status='weird')
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+    # The row is left alone, not consumed, so nothing is silently destroyed.
+    assert DesktopPairing.objects.filter(pk=row.pk).exists()
