@@ -7,7 +7,8 @@ authenticator and create and delete its own throwaway accounts:
 
 Flow: password login -> step-up -> link passkey -> passkey token login ->
 /rest-auth/user/ -> browser passkey login carrying an OAuth authorize `next`
--> consent page -> passkey step-up -> remove password -> last-passkey guard
+-> consent page -> desktop pairing approved -> desktop pairing refused ->
+passkey step-up -> remove password -> last-passkey guard
 -> passkey signup -> login refused until activated -> login -> account
 recovery (request a reset email, follow it, create a new passkey, confirm
 every pre-recovery credential is revoked and the recovering client is
@@ -233,6 +234,15 @@ def run(base, username, app, signup_name):
     assert status == 200 and b'name="allow"' in page, status
     print('browser passkey login -> OAuth consent page: OK')
 
+    # `web` is now a signed-in browser session for `username` -- exactly what
+    # the desktop handshake's second leg needs. `api.token` is the key
+    # /rest-auth/login/ handed out for this same account at the top of run(),
+    # and nothing since has revoked it (the password removal that changes the
+    # session auth hash happens below, and recovery's revoke_all_tokens later
+    # still), so an approved pairing must hand the desktop app that very key.
+    desktop_sign_in(base, web, api.token, username)
+    desktop_refused(base, web)
+
     api.json('POST', '/api/passkeys/register/begin/', {'step_up': assertion(anon, authenticator)})
     print('passkey step-up: OK')
 
@@ -252,6 +262,160 @@ def run(base, username, app, signup_name):
     print('passkey signup -> verified -> login: OK')
 
     recover_account(base, username, app, authenticator, api.token)
+
+
+# --- Task 12 addition: desktop sign-in pairing ------------------------
+#
+# A wxPython app cannot mint a WebAuthn assertion this server will accept, so
+# it borrows the browser's. The protocol, for whoever writes that client:
+#
+#   1. the app POSTs {} to /api/passkeys/desktop/begin/ and gets back a
+#      `device_code` -- the app's SECRET, never displayed, never logged, the
+#      only thing that can later collect the token -- plus a `user_code`
+#      (XXXX-XXXX), which is the PUBLIC half and is meant to be shown on
+#      screen, a `verification_url` to send the human to, and `interval` /
+#      `expires_in` saying how often and for how long to poll.
+#   2. the human opens that URL in their own, already signed-in browser,
+#      checks the code on the page against the one the app is displaying --
+#      that comparison is the whole security of this handshake -- and presses
+#      Yes or No.
+#   3. meanwhile the app POSTs its `device_code` to
+#      /api/passkeys/desktop/poll/ every `interval` seconds.
+#
+# The four poll outcomes, all of which a real client has to tell apart:
+#
+#   200 {'status': 'pending'}                     keep polling
+#   200 {'status': 'approved', 'key', 'username'} signed in; stop polling
+#   200 {'status': 'denied'}                      the human said No; stop
+#   400 {'detail': ...}                           unknown, expired, or
+#       already redeemed -- the server deliberately does NOT distinguish
+#       those three (a 400 tells a guesser nothing about whether a code it
+#       made up ever existed), so the only sane client reaction is to throw
+#       the device code away and start a new pairing.
+#
+# Note where the line falls: refusal is a 200, not a 400. "The human said no,
+# stop" and "this pairing is dead, start over" want opposite behaviour from
+# the app, which is why the legs below assert the exact status code and not
+# merely that the call failed or succeeded.
+#
+# Both resolutions are SINGLE-USE. redeem() deletes the row in the same
+# transaction that reports approved or denied, so the *next* poll with that
+# device code is a 400 -- for a refusal just as much as for an approval. A
+# client that keeps polling past a resolution will see that 400 and must not
+# read it as "still deciding" or as a fresh, retryable failure.
+
+
+def desktop_begin(device):
+    """Start a pairing as the desktop app would, and check what it is handed.
+
+    `device` is a Client of its own: the app holds no cookies and no session,
+    only the device code it gets back here.
+    """
+    pairing = device.json('POST', '/api/passkeys/desktop/begin/', {}, expect=200)
+    user_code, device_code = pairing['user_code'], pairing['device_code']
+    # Shown to a human and typed or read aloud, so the shape matters: four
+    # characters, a hyphen, four characters.
+    assert re.fullmatch(r'[A-Z0-9]{4}-[A-Z0-9]{4}', user_code), user_code
+    # The secret must be a secret, not the user code under another name.
+    assert device_code != user_code and len(device_code) >= 32, pairing
+    assert pairing['verification_url'].endswith('/desktop/?code=' + user_code), pairing
+    assert pairing['interval'] == 5, pairing
+    assert pairing['expires_in'] == 600, pairing
+    return pairing
+
+
+def desktop_poll(device, pairing, expect=200):
+    return device.json('POST', '/api/passkeys/desktop/poll/',
+                       {'device_code': pairing['device_code']}, expect=expect)
+
+
+def desktop_confirm_page(browser, user_code):
+    """Open the confirmation page in the signed-in browser session.
+
+    The page must show the same code the app is displaying -- that is what the
+    human compares -- and, being @ensure_csrf_cookie, this GET is also what
+    mints the CSRF cookie and the hidden field the decision POST needs.
+    """
+    status, _headers, page = browser.call('GET', '/desktop/?code=' + user_code)
+    assert status == 200, (status, page[:300])
+    assert user_code.encode() in page, (
+        'the confirmation page must show the code the app is displaying: %r' % page[:300])
+    assert b'name="csrfmiddlewaretoken"' in page, page[:300]
+
+
+def desktop_decide(browser, user_code, action):
+    """Press Yes ('approve') or No ('deny') and return where it redirects.
+
+    A urlencoded form POST, not JSON: /desktop/approve/ is a plain Django view
+    reading request.POST, and it is @csrf_protect, so this carries the
+    csrfmiddlewaretoken the GET above just minted -- the same dance
+    get_oauth_access_token does for the consent page. The view answers with a
+    redirect rather than a rendered page so that refreshing cannot re-submit a
+    decision that was already made.
+    """
+    status, headers, raw = browser.form(
+        'POST', '/desktop/approve/',
+        {'code': user_code, 'action': action,
+         'csrfmiddlewaretoken': browser.cookie('csrftoken')},
+        headers={'Referer': browser.base + '/desktop/'})
+    assert status == 302, (status, raw[:300])
+    return headers['Location']
+
+
+def desktop_sign_in(base, browser, expected_key, username):
+    """The happy path: begin -> pending -> the human approves -> the app's
+    next poll collects the account's token, and the one after that is a 400.
+    """
+    device = Client(base)
+    pairing = desktop_begin(device)
+    assert desktop_poll(device, pairing) == {'status': 'pending'}, (
+        'an undecided pairing must poll as pending and reveal nothing else')
+    print('desktop pairing begun; poll before any decision is pending: OK')
+
+    desktop_confirm_page(browser, pairing['user_code'])
+    location = desktop_decide(browser, pairing['user_code'], 'approve')
+    assert location == '/desktop/?result=approved', location
+    print('confirmation page shows the code; Yes approves: OK')
+
+    # Exact dict: status, the token and the account it belongs to. `key` is
+    # the same key /rest-auth/login/ returned for this user -- the pairing
+    # hands over the existing account token, it does not invent a second one.
+    approved = desktop_poll(device, pairing)
+    assert approved == {'status': 'approved', 'key': expected_key,
+                        'username': username}, approved
+    print('poll after approval returns the account token: OK')
+
+    # Single-use: the poll above consumed the row. Indistinguishable from a
+    # device code that expired or never existed, all three being a 400.
+    desktop_poll(device, pairing, expect=400)
+    print('approval is single-use; re-polling the spent code is 400: OK')
+
+
+def desktop_refused(base, browser):
+    """The path the approve leg cannot reach: someone lands on the
+    confirmation page without having started a sign-in, and presses No.
+    """
+    device = Client(base)
+    pairing = desktop_begin(device)
+    desktop_confirm_page(browser, pairing['user_code'])
+    location = desktop_decide(browser, pairing['user_code'], 'deny')
+    assert location == '/desktop/?result=denied', location
+
+    # A 200, not the 400 an expired or unknown code gets: the app is being
+    # told "the human said no", which is a different instruction from "this
+    # code is dead". Asserting the whole dict, and then `key`/`username`
+    # again by name, because that is the assertion with teeth here: a server
+    # that wrongly minted a token for a refused pairing would still report
+    # status 'denied', and only the absence of a key catches it.
+    refusal = desktop_poll(device, pairing, expect=200)
+    assert refusal == {'status': 'denied'}, refusal
+    assert 'key' not in refusal, 'a refused pairing must not mint a token: %r' % refusal
+    assert 'username' not in refusal, 'a refused pairing must not name the user: %r' % refusal
+    print('No refuses: poll returns 200 denied, with no token: OK')
+
+    # Refusal is consumed by the poll that reports it, exactly like approval.
+    desktop_poll(device, pairing, expect=400)
+    print('refusal is single-use; re-polling the spent code is 400: OK')
 
 
 # --- Task 25 addition: account recovery -------------------------------
