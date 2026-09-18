@@ -134,6 +134,40 @@ def test_confirm_shows_the_code_and_the_account(web, api):
 
 
 @pytest.mark.django_db
+def test_confirm_is_never_cached(web, api):
+    """Both branches of /desktop/ render a page carrying the signed-in
+    username, and the first also carries a live pairing code -- a shared
+    browser or an intermediary must not replay either to the next visitor.
+    Without this, _no_store() could be dropped and the suite stay green.
+    """
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+
+    confirmation = web.get(CONFIRM + '?code=' + body['user_code'])
+    after_decision = web.get(CONFIRM + '?result=approved')
+
+    assert confirmation.status_code == after_decision.status_code == 200
+    assert confirmation.headers.get('Cache-Control') == 'no-store'
+    assert after_decision.headers.get('Cache-Control') == 'no-store'
+
+
+@pytest.mark.django_db
+def test_approve_redirect_is_never_cached(web, api):
+    """The 302 itself, not the page it lands on: a cached redirect would
+    replay one visitor's decision result to the next.
+    """
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+
+    response = web.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+
+    assert response.status_code == 302
+    assert response.headers.get('Cache-Control') == 'no-store'
+
+
+@pytest.mark.django_db
 def test_confirm_reports_an_unknown_code(web):
     User.objects.create_user('alice', password='secret')
     web.login(username='alice', password='secret')
