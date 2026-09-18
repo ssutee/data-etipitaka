@@ -210,6 +210,11 @@ PASSKEY_ANDROID_PACKAGE = os.environ.get('PASSKEY_ANDROID_PACKAGE', '')
 PASSKEY_ANDROID_CERT_SHA256 = _env_list('PASSKEY_ANDROID_CERT_SHA256')
 PASSKEY_CHALLENGE_TTL = 300  # seconds
 
+# Desktop pairing handshakes live longer than a WebAuthn challenge: the window
+# has to cover opening a browser, signing in to the website if there's no
+# session yet, and then confirming the code.
+PASSKEY_DESKTOP_TTL = 600  # seconds
+
 # Declared explicitly, even though it matches Django's own default, because
 # account_tokens.delete_user_sessions (passkey/password recovery signing out
 # every other session) requires a plain, uncached 'db' session store it can
