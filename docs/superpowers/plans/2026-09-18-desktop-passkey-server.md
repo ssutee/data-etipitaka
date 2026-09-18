@@ -1815,7 +1815,15 @@ git commit -m "test(golden): snapshot the desktop pairing begin response"
 
 - [ ] **Step 1: Read the existing script**
 
-`tests/passkey_e2e.py:180-250` is a working reference client in plain `urllib`, already covering the browser `/login/passkey/` + CSRF dance. The desktop leg reuses that session.
+`tests/passkey_e2e.py` is a working reference client in plain `urllib`, already covering the browser `/login/passkey/` + CSRF dance (that section is around lines 219-234; check rather than trusting the number). The desktop leg reuses that session.
+
+Two things about where the leg goes. Put it immediately after the browser-login
+section: by the end of `run()` the account's password has been removed, so a
+second live `/rest-auth/login/` is not available there to compare tokens
+against — compare against `api.token`, the key that endpoint returned at the
+top of `run()`. And note `/desktop/approve/` is a plain Django view reading
+`request.POST`, so it needs a urlencoded form POST (`Client.form`), not the
+JSON + `X-CSRFToken` dance the DRF passkey endpoints use.
 
 - [ ] **Step 2: Add the desktop leg**
 
@@ -1826,10 +1834,41 @@ After the existing browser-login section, add a function that:
 4. POSTs `/desktop/approve/` with `code`, `action=approve` and the CSRF token
 5. polls again and asserts `status == 'approved'`, that `key` matches the token `/rest-auth/login/` returns for the same user, and that a third poll is now a 400
 
+Then add a second, independent leg for the refusal path, which the approve leg
+cannot cover and which is the one a user reaches when they did NOT start the
+sign-in:
+
+6. begins a fresh pairing, GETs `/desktop/?code=<user_code>`, and POSTs
+   `/desktop/approve/` with `action=deny` plus the CSRF token
+7. polls once and asserts HTTP **200** with exactly `{'status': 'denied'}` —
+   specifically that the response carries **no `key` and no `username`**, i.e.
+   no token was minted for a refused pairing
+8. polls again and asserts **400**: `redeem()` deletes the row when it reports
+   `denied`, so a refusal is single-use in the same way an approval is
+
+Assert the exact status codes, not just truthiness: `denied` is a 200 while
+expired/unknown/already-used is a 400, and a client has to tell those apart to
+decide between "the user said no, stop" and "start over".
+
 - [ ] **Step 3: Run it**
 
-Run: `python tests/passkey_e2e.py` against a running stack (see the header of that file for how it takes its base URL).
-Expected: the new leg passes alongside the existing ones.
+This script cannot run from the host: it calls `django.setup()` and needs
+direct Postgres access, and the `db` service publishes no host port. Run it
+inside the container, the way the file's own header documents:
+
+```bash
+docker compose exec -T web python - http://web:8000 < tests/passkey_e2e.py
+```
+
+Expected: the new legs pass alongside the existing ones, ending `PASSKEY E2E OK`.
+
+**Know what this does not cover.** `http://web:8000` is the app directly, so
+every e2e leg bypasses nginx. The `passkey_desktop_rl` and `passkey_manage_rl`
+zones from Task 9 are therefore exercised by nothing in the automated suite —
+they were verified only by hand, by measuring where the first 429 lands on each
+path (Task 9, Steps 6-7). Re-run those measurements by hand after any nginx
+change, and treat the live check in Task 14 as the only end-to-end evidence
+that the edge limits and the app agree in production.
 
 - [ ] **Step 4: Commit**
 
