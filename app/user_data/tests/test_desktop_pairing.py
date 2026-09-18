@@ -1,5 +1,6 @@
 import pytest
 from django.contrib.auth.models import User
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from user_data.models import DesktopPairing
@@ -19,7 +20,7 @@ def test_user_code_is_unique():
     DesktopPairing.objects.create(
         device_code_hash='a' * 64, user_code='K7QP4M2X',
         expires_at=timezone.now())
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError), transaction.atomic():
         DesktopPairing.objects.create(
             device_code_hash='b' * 64, user_code='K7QP4M2X',
             expires_at=timezone.now())
