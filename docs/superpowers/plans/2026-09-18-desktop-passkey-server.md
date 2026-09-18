@@ -150,7 +150,7 @@ Expected: `Create model DesktopPairing`, a new file under `app/user_data/migrati
 Run: `docker compose exec -T web python -m pytest user_data/tests/test_desktop_pairing.py -q -o addopts=""`
 Expected: 3 passed
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add app/user_data/models.py app/user_data/migrations app/etipitaka_auth/settings.py app/user_data/tests/test_desktop_pairing.py
@@ -1348,7 +1348,7 @@ In `app/etipitaka_auth/urls.py`, directly after the `account/security/` line:
 Run: `docker compose exec -T web python -m pytest user_data/tests/test_desktop_views.py -q -o addopts=""`
 Expected: 13 passed
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add app/user_data/passkey_web_views.py app/templates/desktop_confirm.html app/etipitaka_auth/urls.py app/user_data/tests/test_desktop_views.py
@@ -1430,9 +1430,9 @@ the shape of the `(login|signup)` block above it:
     # Anonymous desktop pairing (begin once, then poll every 5s for the life
     # of the pairing). Listed ahead of the general /api/passkeys/ location
     # below so this more specific regex wins.
-    location ~ ^/api/passkeys/desktop/ {
+    location ~ ^/api/passkeys/desktop(/|$) {
         limit_req zone=passkey_desktop_rl burst=60 nodelay;
-        error_page 429 = @ratelimited_passkey;
+        error_page 429 = @ratelimited_passkey_desktop;
         client_max_body_size 64k;
         proxy_pass http://app;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1457,13 +1457,23 @@ at line 175, copying its shape:
     # handshake -- see user_data/desktop_pairing.py). Plain Django views, so
     # unlike the /api/passkeys/ endpoints no DRF throttle backs this up: nginx
     # is the only limiter, and /desktop/approve/ writes to the database.
-    # 60r/m is ample for a human pressing one button. `(/|$)`, not a bare
-    # trailing slash, so the slash-less GET /desktop is caught too -- Django's
-    # APPEND_SLASH 301 would otherwise go through the unmetered location /,
-    # same care as /login/passkey/?$ and /api/passkeys(/|$).
+    # 60r/m is ample for the ~4 requests one pairing makes through here (the
+    # anonymous 302 to /login/, the page itself, the approve POST, and the
+    # post-redirect result page). (/|$), not a bare trailing slash, so the
+    # slash-less GET /desktop is caught too -- Django's APPEND_SLASH 301 would
+    # otherwise go through the unmetered location /, same care as
+    # /login/passkey/?$ and /api/passkeys(/|$).
+    #
+    # passkey_manage_rl, not passkey_rl, for the reason that zone exists (see
+    # its comment above): both views are @login_required, so this is
+    # authenticated traffic, not the anonymous ceremony surface. limit_req
+    # state lives in the zone, so putting it on passkey_rl would have made one
+    # IP's login/signup/recovery flood drain the same bucket a *different*
+    # person behind that NAT needs to press Approve -- the starvation the
+    # split is there to prevent.
     location ~ ^/desktop(/|$) {
-        limit_req zone=passkey_rl burst=30 nodelay;
-        error_page 429 = @ratelimited_passkey;
+        limit_req zone=passkey_manage_rl burst=20 nodelay;
+        error_page 429 = @ratelimited_desktop_page;
         client_max_body_size 64k;
         proxy_pass http://app;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1473,12 +1483,58 @@ at line 175, copying its shape:
     }
 ```
 
-Note `@ratelimited_passkey` returns a JSON body, which is slightly off for an
-HTML page. Accepted deliberately: at 60r/m with burst 30 a human clicking one
-button will never see it, and adding a fourth named 429 handler for a case that
-should not occur is not worth the config surface.
+- [ ] **Step 4: Add the two 429 handlers**
 
-- [ ] **Step 4: Check the config parses**
+Insert beside the other named handlers, before `location @ratelimited_reset`.
+
+Neither of these routes can reuse `@ratelimited_passkey`, and both departures
+are things this file already states as rules in its own comments:
+
+```nginx
+    # passkey_desktop_rl refills at 120r/m (one token every 0.5s), but this is
+    # the one handler whose Retry-After is deliberately NOT the refill time.
+    # desktop_begin hands the client `"interval": DESKTOP_POLL_INTERVAL` (5s,
+    # user_data/passkey_views.py) as the poll cadence. A client that honours
+    # retry_after -- the obvious reading, and what assets/passkey.js already
+    # does -- would read a 1 here as licence to come back five times FASTER
+    # than the interval the same API just gave it, i.e. speed up under load.
+    # So this reports the poll interval, which is also safely above the
+    # refill time.
+    location @ratelimited_passkey_desktop {
+        add_header Retry-After 5 always;
+        default_type application/json;
+        return 429 '{"error":"rate_limited","retry_after":5,"detail":"Too many requests. Please wait a moment and try again."}';
+    }
+
+    # passkey_manage_rl refills at 60r/m (one token every 1s). Same zone as
+    # @ratelimited_passkey_manage above, different body: /desktop/ and
+    # /desktop/approve/ are browser navigations (a form POST and its
+    # post-redirect GET), not fetch() calls, so the same reasoning as
+    # @ratelimited_reset below applies -- a signed-in user one button away
+    # from finishing a pairing must not be handed a raw JSON blob as the page.
+    location @ratelimited_desktop_page {
+        add_header Retry-After 1 always;
+        default_type text/html;
+        return 429 '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Please wait</title></head><body><h1>Too many attempts</h1><p>Please wait a moment, then reload this page. If you were confirming a sign-in on your computer, the code is still valid.</p></body></html>';
+    }
+```
+
+An earlier draft of this plan reused `@ratelimited_passkey` for both and called
+the JSON body "slightly off for an HTML page, accepted deliberately." That was
+wrong on its own terms, and this file already contained the refutation:
+`@ratelimited_reset` renders HTML *specifically* because it "is reached by a
+browser following an emailed link, not by passkey.js's fetch() calls" and such
+a user "must not be shown a raw JSON blob as the page." `/desktop/` is that
+same case — a user following the `verification_url` their desktop app printed.
+`desktop_confirm.html` defines no script block, and the approve leg is a plain
+`<form method="post">` plus a redirect, so nothing in the flow parses JSON.
+
+The English-only body matches `@ratelimited_reset`'s precedent. nginx cannot
+reach Django's i18n catalogue, so a Thai string here would have to be
+hardcoded for every visitor regardless of language; leaving it English and
+brief is the lesser evil.
+
+- [ ] **Step 5: Check the config parses**
 
 `nginx/Dockerfile` bakes the config in with `COPY nginx.conf /etc/nginx/conf.d`
 — there is no volume mount, so a bare `nginx -t` tests the image's copy and
@@ -1498,7 +1554,7 @@ docker compose exec -T nginx nginx -s reload
 
 Expected: `syntax is ok` / `test is successful`, then `signal process started`.
 
-- [ ] **Step 5: Prove each location is bound to the zone you think it is**
+- [ ] **Step 6: Prove each location is bound to the zone you think it is**
 
 `nginx -t` only proves the file parses. It does not prove the new locations
 match ahead of the `^/api/passkeys(/|$)` catch-all — get that wrong and the
@@ -1534,16 +1590,41 @@ done
 Expected, and these numbers are the actual assertion:
 - `/api/passkeys/desktop/begin/` → ~**64** (burst 60 + replenish) = `passkey_desktop_rl` ✓
 - `/api/passkeys/` → ~**22** (burst 20 + replenish) = `passkey_manage_rl`, the
-  control proving the two locations really are on different zones
-- `/desktop` **slash-less** → ~**32** (burst 30 + replenish) = `passkey_rl`,
+  control proving the API locations really are on different zones
+- `/desktop` **slash-less** → ~**22** (burst 20 + replenish) = `passkey_manage_rl`,
   proving the `(/|$)` alternation works. Before that fix this ran all 130
   without a 429, because it fell through to the unmetered `location /`.
 
-The 429 body must be nginx's `{"error":"rate_limited",...}`. If you instead see
-DRF's `{"detail":"Request was throttled..."}`, nginx is not limiting that path
-at all and something above is wrong.
+Check the 429 bodies, not just the counts — the body is what proves you landed
+on the handler you meant:
+- the two API paths must return nginx's `{"error":"rate_limited",...}`, with
+  `Retry-After: 5` on the desktop one and `1` on `/api/passkeys/`. If you
+  instead see DRF's `{"detail":"Request was throttled..."}`, nginx is not
+  limiting that path at all.
+- `/desktop` must return `Content-Type: text/html` and an HTML body. JSON here
+  means it is still wired to a fetch()-oriented handler.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Prove the zone split actually isolates**
+
+The point of putting `/desktop(/|$)` on `passkey_manage_rl` is that a flood of
+anonymous ceremonies must not cost a signed-in user their Approve button.
+Assert it directly: drain `passkey_rl` to a 429, then confirm `/desktop` still
+serves.
+
+```bash
+for i in $(seq 1 80); do
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+      http://localhost:1338/login/passkey/ \
+      -H 'Content-Type: application/json' -d '{}')
+  [ "$R" = "429" ] && { echo "passkey_rl drained at #$i"; break; }
+done
+curl -s -o /dev/null -w '/desktop -> %{http_code}\n' http://localhost:1338/desktop
+```
+
+Expected: `passkey_rl drained at #~32`, then `/desktop -> 301`. A `429` on that
+second line means the two are still sharing a bucket.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add nginx/nginx.conf
