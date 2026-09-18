@@ -65,6 +65,17 @@ English-only stack and are intentionally same-stack:
   carry localized error messages — the harness sends no `Accept-Language`, so
   they come out in the site's default language, currently Thai; a locale
   change (e.g. changing `LANGUAGE_CODE`) will flip these two snapshots.
+- The desktop-pairing snapshots (`desktop_begin`, `desktop_poll_bad_code`) are
+  same-stack for the same reason. Both halves of a pairing (`device_code`,
+  `user_code`) are random per request and masked as `<CHALLENGE>`;
+  `verification_url` keeps its origin and path and masks only the code
+  (`?code=<USER_CODE>`), because that origin comes from
+  `passkey_config.web_origin()` and a regression there would send desktop
+  users to the wrong host. `interval` and `expires_in` are deliberately
+  unmasked — the desktop client depends on both. Like the other passkey cases
+  these are recorded without a `PASSKEY_WEB_ORIGIN` override, so the origin is
+  the production default. `desktop_poll_bad_code` (400) carries a localized
+  message and will flip with a locale change.
 
 All other golden snapshots (JSON data, tokens, file downloads, status codes)
 are not localized and remain valid cross-stack regression checks.
