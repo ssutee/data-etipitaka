@@ -5,6 +5,7 @@ import pytest
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from rest_framework.authtoken.models import Token
 
 from user_data import desktop_pairing
 from user_data.models import DesktopPairing
@@ -216,3 +217,71 @@ def test_deciding_a_vanished_pairing_reports_false():
     DesktopPairing.objects.filter(pk=row.pk).delete()
     assert desktop_pairing.approve(row, user) is False
     assert desktop_pairing.deny(row) is False
+
+
+@pytest.mark.django_db
+def test_redeem_pending_returns_pending_and_keeps_the_row():
+    device_code, _row = desktop_pairing.begin()
+    assert desktop_pairing.redeem(device_code) == {'status': 'pending'}
+    assert DesktopPairing.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_redeem_approved_returns_the_token_and_username():
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    result = desktop_pairing.redeem(device_code)
+
+    assert result['status'] == 'approved'
+    assert result['username'] == 'alice'
+    assert result['key'] == Token.objects.get(user=user).key
+
+
+@pytest.mark.django_db
+def test_redeem_approved_is_single_use():
+    device_code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+
+    desktop_pairing.redeem(device_code)
+
+    assert DesktopPairing.objects.count() == 0
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+
+
+@pytest.mark.django_db
+def test_redeem_approved_reuses_the_existing_token():
+    user = User.objects.create_user('alice', password='x')
+    existing, _ = Token.objects.get_or_create(user=user)
+    device_code, row = desktop_pairing.begin()
+    desktop_pairing.approve(row, user)
+    assert desktop_pairing.redeem(device_code)['key'] == existing.key
+
+
+@pytest.mark.django_db
+def test_redeem_denied_reports_denied_and_consumes_the_row():
+    device_code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    assert desktop_pairing.redeem(device_code) == {'status': 'denied'}
+    assert DesktopPairing.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_redeem_rejects_unknown_and_expired():
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem('nope')
+
+    device_code, row = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=row.pk).update(
+        expires_at=timezone.now() - timedelta(seconds=1))
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(device_code)
+
+
+@pytest.mark.django_db
+def test_redeem_rejects_a_non_string_device_code():
+    with pytest.raises(desktop_pairing.PairingError):
+        desktop_pairing.redeem(None)

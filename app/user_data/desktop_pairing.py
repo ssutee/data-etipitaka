@@ -19,6 +19,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from rest_framework.authtoken.models import Token
 
 from .models import DesktopPairing
 
@@ -131,3 +132,37 @@ def deny(row):
     return DesktopPairing.objects.filter(
         pk=row.pk, status=DesktopPairing.PENDING,
     ).update(status=DesktopPairing.DENIED) == 1
+
+
+def redeem(device_code):
+    """Poll a pairing.
+
+    Returns {'status': 'pending'} while the user has not decided,
+    {'status': 'denied'} once (the row is consumed), or
+    {'status': 'approved', 'key': ..., 'username': ...} once (ditto).
+
+    Raises PairingError for an unknown, expired or already-redeemed code, so
+    the caller cannot distinguish "never existed" from "already used" -- both
+    are a 400.
+
+    The row is selected FOR UPDATE and deleted inside the same transaction as
+    the token lookup, so two concurrent polls cannot both be served.
+    """
+    if not isinstance(device_code, str):
+        raise PairingError()
+    with transaction.atomic(durable=True):
+        row = (DesktopPairing.objects.select_for_update()
+               .filter(device_code_hash=_hash(device_code),
+                       expires_at__gt=timezone.now())
+               .first())
+        if row is None:
+            raise PairingError()
+        if row.status == DesktopPairing.PENDING:
+            return {'status': 'pending'}
+        if row.status == DesktopPairing.DENIED:
+            row.delete()
+            return {'status': 'denied'}
+        user = row.user
+        row.delete()
+    token, _created = Token.objects.get_or_create(user=user)
+    return {'status': 'approved', 'key': token.key, 'username': user.username}
