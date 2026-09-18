@@ -90,8 +90,12 @@ def test_begin_returns_a_device_code_and_stores_only_its_hash():
     assert len(device_code) >= 40
     assert row.device_code_hash == desktop_pairing._hash(device_code)
     assert DesktopPairing.objects.filter(device_code_hash=row.device_code_hash).exists()
-    # The plaintext code must appear nowhere in the table.
-    assert not DesktopPairing.objects.filter(user_code=device_code).exists()
+    # The plaintext code must appear nowhere in the table. Checked against every
+    # stored value, not just user_code: a filter(user_code=device_code) lookup
+    # can never match (user_code is max_length=8, device_code is 43 chars), so
+    # it would pass however the row was written.
+    stored = DesktopPairing.objects.filter(pk=row.pk).values().first()
+    assert device_code not in str(stored)
 
 
 @pytest.mark.django_db

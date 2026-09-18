@@ -1,15 +1,24 @@
 """Browser-session passkey endpoints.
 
-Plain Django views, not DRF: api_view exempts CSRF unless SessionAuthentication
-authenticates the request, and these endpoints are anonymous. Keeping Django's
-CSRF middleware in force stops login CSRF (an attacker signing a victim's
-browser into the attacker's account).
+Plain Django views, not DRF. Two kinds live here:
 
-Being a plain Django view also means none of DRF's machinery applies here --
-in particular PasskeyRateThrottle (user_data/passkey_views.py) never runs for
-this path, unlike every other passkey endpoint. nginx's own rate limiting is
-the only throttle in front of this view; see Task 23 for the
-`/login/passkey/`-specific zone.
+- login_passkey, anonymous. api_view would exempt CSRF unless
+  SessionAuthentication authenticated the request, which it cannot for an
+  anonymous caller, so keeping Django's CSRF middleware in force is what stops
+  login CSRF (an attacker signing a victim's browser into the attacker's
+  account).
+- account_security, desktop_confirm and desktop_approve, all @login_required.
+  These are pages a signed-in human looks at, not endpoints a script calls.
+
+Being a plain Django view means none of DRF's machinery applies to any of them
+-- in particular the throttles in user_data/passkey_views.py never run for
+these paths, unlike every other passkey endpoint. nginx's own rate limiting is
+the only limiter in front of this module, which matters most for
+desktop_approve: it is the one view here that writes a decision to the
+database. The zones are `passkey_rl` for /login/passkey/ and
+`passkey_manage_rl` for /desktop/ and /desktop/approve/; see nginx/nginx.conf,
+which explains why the desktop pages are deliberately not on the anonymous
+ceremony zone.
 """
 import json
 import logging

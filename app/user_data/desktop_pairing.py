@@ -146,8 +146,16 @@ def redeem(device_code):
     are a 400.
 
     The row is selected FOR UPDATE and deleted in the same transaction that
-    mints the token, so two concurrent polls cannot both be served, and a
-    crash mid-request leaves the pairing intact for the client to retry.
+    mints the token, so two concurrent polls cannot both be served.
+
+    An approved token is therefore delivered AT MOST once, not at least once.
+    A crash inside the transaction rolls back and leaves the pairing intact to
+    retry -- but once it commits the row is gone, so a process death, dropped
+    connection or proxy timeout between COMMIT and the client reading the body
+    loses the token: the next poll gets the same undifferentiated 400 and the
+    human has to walk the browser leg again. Making this at-least-once would
+    mean keeping the row until the client acknowledged, which reintroduces the
+    replay this single-use design exists to prevent.
     """
     if not isinstance(device_code, str):
         raise PairingError()

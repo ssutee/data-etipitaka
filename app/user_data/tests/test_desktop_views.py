@@ -68,7 +68,7 @@ def test_poll_returns_the_token_once_approved(api):
 
 
 @pytest.mark.django_db
-def test_poll_rejects_unknown_and_reused_codes(api):
+def test_poll_rejects_unknown_and_malformed_codes(api):
     assert api.post(POLL, {'device_code': 'nope'}, format='json').status_code == 400
     assert api.post(POLL, {}, format='json').status_code == 400
     assert api.post(POLL, [1], format='json').status_code == 400
