@@ -577,7 +577,7 @@ msgstr "ไม่มีข้อมูลใดถูกส่งไปยัง
 
 #: templates/desktop_confirm.html:18
 msgid "Did you just choose 'Sign in with a passkey' on your computer?"
-msgstr "คุณเพิ่งกด \"เข้าสู่ระบบด้วย Passkey\" บนคอมพิวเตอร์ใช่ไหม?"
+msgstr "คุณเพิ่งกด \"เข้าสู่ระบบด้วยพาสคีย์\" บนคอมพิวเตอร์ใช่ไหม?"
 
 #: templates/desktop_confirm.html:19
 #, python-format

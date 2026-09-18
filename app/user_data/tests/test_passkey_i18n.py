@@ -84,6 +84,22 @@ NEW_MSGIDS = [
     'If this was not you, recover your account now:',
     'Your password was removed from your E-Tipitaka account. You now sign in '
     'with a passkey only.',
+    # Desktop pairing: the /desktop/ confirmation page and the one poll error
+    # a desktop client can surface to a human.
+    'Sign in on your computer',
+    "Did you just choose 'Sign in with a passkey' on your computer?",
+    'Signed in as %(user)s',
+    'Your computer should be showing this code:',
+    'If you did not start this, choose No.',
+    'Yes, allow',
+    'No',
+    'Signed in on your computer',
+    'You can go back to the E-Tipitaka app now.',
+    'Request refused',
+    'Nothing was shared with that computer.',
+    'This sign-in request has expired',
+    'This sign-in request has expired. Please try again.',
+    'Start again from the E-Tipitaka app on your computer.',
 ]
 
 

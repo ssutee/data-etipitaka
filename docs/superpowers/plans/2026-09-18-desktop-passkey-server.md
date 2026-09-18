@@ -1700,20 +1700,54 @@ In `tests/golden/endpoints.py`, directly after the `passkey_login_begin` line
 
 ```python
     GoldenCase("desktop_begin", "POST", "/api/passkeys/desktop/begin/", json_body={}),
+    GoldenCase("desktop_poll_bad_code", "POST", "/api/passkeys/desktop/poll/",
+               json_body={"device_code": "nope"}),
 ```
+
+The poll case is the more valuable of the two: the 400-means-expired-or-used
+shape is what a desktop client branches on, and unlike `begin` its body is
+fully deterministic, so nothing needs masking for it.
 
 - [ ] **Step 2: Mask the volatile fields**
 
 In `tests/golden/normalize.py`, extend the key check at line 24 so it also
-covers the pairing fields:
+covers the two random pairing codes:
 
 ```python
             elif key in ("challenge", "challenge_id",
-                         "device_code", "user_code", "verification_url"):
-                # WebAuthn challenges are random per request; so are the
-                # desktop pairing codes, and verification_url embeds the
-                # user_code.
+                         "device_code", "user_code"):
+                # WebAuthn challenges are random per request, and so are both
+                # halves of a desktop pairing.
+                out[key] = "<CHALLENGE>"
 ```
+
+**Do NOT add `verification_url` to that list.** It embeds the random
+`user_code`, so it does have to be normalized — but masking the whole value
+would throw away the part worth snapshotting. The URL is
+`{web_origin()}/desktop/?code={user_code}`, and its *origin* is exactly what
+broke in Task 6: the first implementation built it from `OAUTH_ISSUER_URL`
+instead of `passkey_config.web_origin()`, which would have sent desktop users
+to the wrong host whenever `PASSKEY_WEB_ORIGIN` is overridden. A fully masked
+value makes that regression invisible to this snapshot. Mask only the code:
+
+```python
+            elif key == "verification_url":
+                # Keep the origin and path visible -- a regression there sends
+                # desktop users to the wrong host (see Task 6) and is precisely
+                # what this snapshot is for. Only the random code is masked.
+                out[key] = USER_CODE_RE.sub("code=<USER_CODE>", val)
+```
+
+with, beside `CSRF_RE` at the top of the file:
+
+```python
+USER_CODE_RE = re.compile(r"code=[0-9A-Z]{4}-[0-9A-Z]{4}")
+```
+
+The snapshot should then read
+`"verification_url": "http://localhost:1338/desktop/?code=<USER_CODE>"` — check
+that when you inspect it, and check the origin is the one `web_origin()`
+returns for this environment rather than a hardcoded production host.
 
 `interval` and `expires_in` are deliberately left unmasked — they are part of
 the contract the desktop client depends on and should break the snapshot if
@@ -1776,6 +1810,29 @@ git commit -m "test(e2e): desktop pairing begin, approve and poll"
 - [ ] **Step 1: Add a desktop section**
 
 Add a "Desktop (browser-delegated)" section covering: why a desktop client cannot post credential JSON directly (the single allowed origin), the two endpoints with their exact request and response bodies, the `interval` / `expires_in` contract, that an approved pairing is single-use, that a 400 from poll means expired-or-already-used, and the three browser URLs a desktop client should open for sign-up, passkey management and recovery.
+
+Three things a client author will otherwise get wrong, all verified against the
+running stack — state each explicitly:
+
+**`detail` comes back in Thai, always.** `settings.LANGUAGE_CODE = 'th'` and
+there is no `LocaleMiddleware`, so `Accept-Language` is ignored and every
+message is Thai for every caller. Verified: `Accept-Language: en` on
+`/api/passkeys/desktop/poll/` returns `คำขอเข้าสู่ระบบนี้หมดอายุแล้ว
+กรุณาลองใหม่`, and the pre-existing `/api/passkeys/login/finish/` behaves the
+same way, so this is site-wide and deliberate, not specific to these endpoints.
+A desktop client with its own translation catalogue should therefore branch on
+**status code plus `status` field**, not display `detail` verbatim, unless it is
+happy to show Thai to every user regardless of the app's UI language.
+
+**Honour `retry_after` on a 429, and do not poll faster than `interval`.**
+`/api/passkeys/desktop/` sits behind a dedicated nginx zone whose 429 carries
+`Retry-After: 5`, matching the `interval` the begin response already gave. A
+burst (not a steady poll) is what trips it — measured, a hot loop takes its
+first 429 at about the 64th request.
+
+**A 429 is not a pairing failure.** It has no effect on the pairing, which is
+still pending and still valid until `expires_in`. The client should back off
+and resume polling, not tear down the handshake and make the user start over.
 
 - [ ] **Step 2: Commit**
 
