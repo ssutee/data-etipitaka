@@ -72,3 +72,33 @@ def test_poll_reports_denied(api):
     desktop_pairing.deny(desktop_pairing.find_pending(body['user_code']))
     response = api.post(POLL, {'device_code': body['device_code']}, format='json')
     assert response.json() == {'status': 'denied'}
+
+
+@pytest.mark.django_db
+def test_verification_url_follows_the_passkey_web_origin(api, settings):
+    # conftest's autouse _passkey_settings fixture pins PASSKEY_WEB_ORIGIN
+    # equal to OAUTH_ISSUER_URL, which is exactly why the two being confused
+    # is invisible by default. Pull them apart.
+    settings.PASSKEY_WEB_ORIGIN = 'https://tunnel.example.org'
+    settings.OAUTH_ISSUER_URL = 'https://data.etipitaka.com'
+
+    url = api.post(BEGIN, {}, format='json').json()['verification_url']
+
+    assert url.startswith('https://tunnel.example.org/desktop/?code=')
+    assert 'data.etipitaka.com' not in url
+
+
+@pytest.mark.django_db
+def test_poll_rejects_a_code_that_was_already_redeemed(api):
+    # The test above named "...unknown_and_reused_codes" never actually reuses
+    # one; single-use is only proven a layer down in the service tests.
+    body = api.post(BEGIN, {}, format='json').json()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(desktop_pairing.find_pending(body['user_code']), user)
+
+    first = api.post(POLL, {'device_code': body['device_code']}, format='json')
+    second = api.post(POLL, {'device_code': body['device_code']}, format='json')
+
+    assert first.status_code == 200
+    assert first.json()['status'] == 'approved'
+    assert second.status_code == 400

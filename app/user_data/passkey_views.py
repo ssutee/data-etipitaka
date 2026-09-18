@@ -28,6 +28,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from . import desktop_pairing
+from . import passkey_config
 from . import passkey_manage as manage
 from . import passkey_service as service
 from .auth_views import _send_verification_email
@@ -65,6 +66,21 @@ class PasskeyPasswordThrottle(UserRateThrottle):
     `rate` is declared explicitly for the same reason as PasskeyRateThrottle.rate.
     """
     scope = 'passkey_password'
+    rate = None
+
+
+class PasskeyDesktopThrottle(UserRateThrottle):
+    """Per client IP for the desktop pairing endpoints (rate: settings
+    'passkey_desktop').
+
+    Separate from PasskeyRateThrottle because the traffic shape is different:
+    a desktop client polls every few seconds for the life of a pairing, where
+    the login/signup ceremonies are two requests and done. Sharing one bucket
+    means a second machine behind the same NAT starves the first.
+
+    `rate` is declared explicitly for the same reason as PasskeyRateThrottle.rate.
+    """
+    scope = 'passkey_desktop'
     rate = None
 
 
@@ -282,7 +298,7 @@ DESKTOP_POLL_INTERVAL = 5  # seconds; the client polls no faster than this
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyDesktopThrottle])
 def desktop_begin(request):
     """Start a desktop sign-in handshake.
 
@@ -298,7 +314,7 @@ def desktop_begin(request):
         'device_code': device_code,
         'user_code': user_code,
         'verification_url': '%s/desktop/?code=%s' % (
-            settings.OAUTH_ISSUER_URL, user_code),
+            passkey_config.web_origin(), user_code),
         'interval': DESKTOP_POLL_INTERVAL,
         'expires_in': settings.PASSKEY_DESKTOP_TTL,
     })
@@ -307,7 +323,7 @@ def desktop_begin(request):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
-@throttle_classes([PasskeyRateThrottle])
+@throttle_classes([PasskeyDesktopThrottle])
 def desktop_poll(request):
     data = _body(request)
     if data is None:
