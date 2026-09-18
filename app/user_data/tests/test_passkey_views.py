@@ -1,4 +1,8 @@
 import logging
+import os
+import re
+from importlib import import_module
+from pathlib import Path
 
 import pytest
 from django.conf import settings
@@ -15,7 +19,8 @@ from rest_framework.test import APIClient
 from user_data import passkey_views
 from user_data.models import Passkey
 from user_data.passkey_service import PASSKEY_MAX_PER_USER
-from user_data.passkey_views import PasskeyPasswordThrottle, PasskeyRateThrottle
+from user_data.passkey_views import (PasskeyDesktopThrottle,
+                                     PasskeyPasswordThrottle, PasskeyRateThrottle)
 
 from .conftest import add_passkey, make_oauth_token
 from .soft_authenticator import SoftAuthenticator
@@ -594,7 +599,8 @@ def test_password_bearing_endpoints_have_both_throttles(name):
 
 
 @pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_finish',
-                                  'login_begin', 'login_finish', 'signup_begin', 'signup_finish'])
+                                  'login_begin', 'login_finish', 'signup_begin', 'signup_finish',
+                                  'desktop_begin', 'desktop_poll'])
 def test_only_password_bearing_endpoints_have_the_password_throttle(name):
     view = getattr(passkey_views, name)
     assert PasskeyPasswordThrottle not in view.cls.throttle_classes
@@ -636,6 +642,69 @@ def test_password_remove_is_throttled_by_the_password_scope(auth_alice, monkeypa
     # request until the bucket trips -- not throttled either way, so this
     # still isolates the throttle's own behaviour.
     assert codes == [409, 409, 429]
+
+
+# --- desktop pairing endpoints carry their own scope ------------------------
+
+@pytest.mark.parametrize('name', ['desktop_begin', 'desktop_poll'])
+def test_desktop_endpoints_are_throttled(name):
+    """Both legs are anonymous and unauthenticated -- begin creates a row on
+    demand and poll hands out a DRF token -- so this decorator is the only
+    application-layer limiter they have. Without this assertion, deleting it
+    from either view leaves the whole suite green.
+    """
+    view = getattr(passkey_views, name)
+    assert view.cls.throttle_classes == [PasskeyDesktopThrottle]
+
+
+def test_passkey_desktop_throttle_scope_resolves_from_settings():
+    assert PasskeyDesktopThrottle.scope == 'passkey_desktop'
+    assert 'passkey_desktop' in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
+
+
+def test_passkey_desktop_rate_is_declared_not_just_created_by_the_test_override():
+    """The membership check above is weaker than it looks: settings.py's
+    pytest branch *assigns* DEFAULT_THROTTLE_RATES['passkey_desktop'] = None,
+    which creates the key whether or not the shipped settings declare a rate
+    at all -- so `in` would still hold after the real rate was deleted, and
+    every request in production would then go unlimited. Assert the shipped
+    declaration itself; the override's `[...] = None` form cannot match this
+    pattern, so only the real entry can satisfy it.
+    """
+    # os.environ, not settings.SETTINGS_MODULE: conftest's autouse
+    # _passkey_settings fixture puts a UserSettingsHolder in front of the
+    # real settings for every test here, and that holder reports
+    # SETTINGS_MODULE as None.
+    source = Path(import_module(os.environ['DJANGO_SETTINGS_MODULE']).__file__).read_text()
+    assert re.search(r"'passkey_desktop':\s*'\d+/(sec|min|hour|day)'", source)
+
+
+def test_desktop_begin_is_throttled_by_the_desktop_scope(api, monkeypatch):
+    """settings.py nulls this scope's rate under pytest, which makes
+    allow_request() unconditionally true -- so a monkeypatched rate is the
+    only way to watch the throttle actually run. Same pattern as
+    test_register_begin_is_throttled_by_the_password_scope above.
+    """
+    cache.clear()
+    monkeypatch.setattr(PasskeyDesktopThrottle, 'rate', '2/min')
+    try:
+        codes = [_post(api, '/api/passkeys/desktop/begin/').status_code for _i in range(3)]
+    finally:
+        cache.clear()
+    assert codes == [200, 200, 429]
+
+
+def test_desktop_poll_is_throttled_by_the_desktop_scope(api, monkeypatch):
+    cache.clear()
+    monkeypatch.setattr(PasskeyDesktopThrottle, 'rate', '2/min')
+    try:
+        codes = [_post(api, '/api/passkeys/desktop/poll/',
+                       {'device_code': 'nope'}).status_code for _i in range(3)]
+    finally:
+        cache.clear()
+    # An unknown device code is a plain 400 -- not throttled either way, so
+    # the 429 is unambiguously the throttle's doing.
+    assert codes == [400, 400, 429]
 
 
 @pytest.mark.parametrize('name', ['passkey_list', 'passkey_detail', 'register_begin',
