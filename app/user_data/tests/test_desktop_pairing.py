@@ -94,11 +94,13 @@ def test_begin_returns_a_device_code_and_stores_only_its_hash():
 
 @pytest.mark.django_db
 def test_begin_sets_expiry_from_settings(settings):
-    settings.PASSKEY_DESKTOP_TTL = 600
+    # A non-default TTL on purpose: with the production value (600) this test
+    # would pass even if begin() ignored the setting and hardcoded it.
+    settings.PASSKEY_DESKTOP_TTL = 123
     before = timezone.now()
     _code, row = desktop_pairing.begin()
-    assert row.expires_at >= before + timedelta(seconds=599)
-    assert row.expires_at <= timezone.now() + timedelta(seconds=601)
+    assert row.expires_at >= before + timedelta(seconds=122)
+    assert row.expires_at <= timezone.now() + timedelta(seconds=124)
 
 
 @pytest.mark.django_db
@@ -120,3 +122,14 @@ def test_begin_retries_on_user_code_collision():
                       side_effect=[taken, 'ZZZZ2222']):
         _code, row = desktop_pairing.begin()
     assert row.user_code == 'ZZZZ2222'
+
+
+@pytest.mark.django_db
+def test_begin_raises_when_every_code_collides():
+    taken = 'K7QP4M2X'
+    DesktopPairing.objects.create(
+        device_code_hash='a' * 64, user_code=taken,
+        expires_at=timezone.now() + timedelta(seconds=600))
+    with patch.object(desktop_pairing, 'new_user_code', return_value=taken):
+        with pytest.raises(desktop_pairing.PairingError):
+            desktop_pairing.begin()

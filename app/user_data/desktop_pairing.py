@@ -12,6 +12,7 @@ The device code is the app's secret and is never displayed or stored in the
 clear; only its SHA-256 goes in the database.
 """
 import hashlib
+import logging
 import secrets
 from datetime import timedelta
 
@@ -20,6 +21,8 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import DesktopPairing
+
+log = logging.getLogger(__name__)
 
 # Crockford-style: no 0/1/I/L/O/U, so a code read off a screen and typed (or
 # read aloud) cannot be ambiguous.
@@ -86,4 +89,9 @@ def begin():
         except IntegrityError:
             continue  # user_code collided with a live row; draw another
         return device_code, row
-    raise PairingError()
+    # Five straight collisions in a ~39-bit space is not bad luck. Either the
+    # live-row count has grown far beyond anything this table should hold, or
+    # the device code itself collided on the primary key -- which would mean a
+    # broken entropy source. Both need a human, so say so loudly.
+    log.error('desktop pairing: exhausted %d user code attempts', _MAX_CODE_ATTEMPTS)
+    raise PairingError('exhausted %d user code attempts' % _MAX_CODE_ATTEMPTS)
