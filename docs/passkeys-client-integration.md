@@ -538,6 +538,26 @@ value); see `docs/remote-mcp-oauth-deploy.md` for the full contract.
 
 Left open deliberately by design review, so the next reader isn't surprised:
 
+- **Desktop pairing is phishable, and the prefilled code is why.** The
+  confirmation code is the whole defence: an attacker who starts their own
+  pairing sees a different code from the one on the victim's screen. But the
+  `verification_url` prefills the code (RFC 8628's `verification_uri_complete`),
+  so a phishing link prefills the *attacker's* code too and the user cannot
+  catch it by comparison alone. Accepted in the design review in exchange for
+  not making every user type eight characters, and mitigated by the explicit
+  "did *you* start this?" framing and by naming the signed-in account on the
+  page. Forcing manual entry is the stricter alternative and remains a one-line
+  change if abuse appears. A desktop client must therefore open the URL itself
+  and never instruct users to follow a pairing link from anywhere else.
+- **The confirmation page cannot say which computer is asking.** A pairing
+  carries no device name or app identifier, so the human's only evidence is the
+  code and the fact that they just pressed something. Client screen copy should
+  show the code prominently and next to the app's own name, since the page
+  cannot corroborate either.
+- **There is no cancel endpoint.** An app that abandons a pairing simply stops
+  polling and the row dies at `expires_in` (600s). Expired rows are purged
+  opportunistically inside `begin()`; there is no sweeper, so an idle period
+  leaves expired rows in the table until the next pairing starts.
 - **Signup can squat email/username variants**, and a never-activated
   account is never purged automatically; there is no resend-verification
   endpoint (same as the existing password signup).

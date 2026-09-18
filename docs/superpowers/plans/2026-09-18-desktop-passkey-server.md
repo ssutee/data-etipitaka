@@ -1891,15 +1891,27 @@ Add a "Desktop (browser-delegated)" section covering: why a desktop client canno
 Three things a client author will otherwise get wrong, all verified against the
 running stack — state each explicitly:
 
-**`detail` comes back in Thai, always.** `settings.LANGUAGE_CODE = 'th'` and
-there is no `LocaleMiddleware`, so `Accept-Language` is ignored and every
-message is Thai for every caller. Verified: `Accept-Language: en` on
-`/api/passkeys/desktop/poll/` returns `คำขอเข้าสู่ระบบนี้หมดอายุแล้ว
-กรุณาลองใหม่`, and the pre-existing `/api/passkeys/login/finish/` behaves the
-same way, so this is site-wide and deliberate, not specific to these endpoints.
-A desktop client with its own translation catalogue should therefore branch on
-**status code plus `status` field**, not display `detail` verbatim, unless it is
-happy to show Thai to every user regardless of the app's UI language.
+**`detail` is Thai by default, and the lever is a cookie, not a header.**
+`settings.LANGUAGE_CODE = 'th'`, and the project's own
+`etipitaka_auth.i18n.LanguageMiddleware` selects the language from the
+`django_language` cookie while doing no `Accept-Language` negotiation at all —
+its docstring says so outright. Verified live on
+`/api/passkeys/desktop/poll/`:
+
+- no cookie → `คำขอเข้าสู่ระบบนี้หมดอายุแล้ว กรุณาลองใหม่`
+- `Accept-Language: en` → the same Thai string (the header is ignored)
+- `Cookie: django_language=en` → `This sign-in request has expired. Please try again.`
+
+So a desktop client has two workable options, and should pick one deliberately:
+send `django_language` matching its own UI language and display `detail`, or
+branch on **status code plus the `status` field** and use its own strings.
+What it must not do is send `Accept-Language` and expect that to work.
+
+(An earlier draft of this plan claimed there was no language middleware and
+that messages were "always Thai for every caller". That was wrong, and wrong in
+the direction that would have made a client author build a redundant
+translation catalogue for strings the server will hand over in English on
+request. English here is the untranslated msgid — there is no `en` catalogue.)
 
 **Honour `retry_after` on a 429, and do not poll faster than `interval`.**
 `/api/passkeys/desktop/` sits behind a dedicated nginx zone whose 429 carries
