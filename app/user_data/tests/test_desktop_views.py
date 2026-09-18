@@ -176,12 +176,31 @@ def test_approve_requires_a_signed_in_user(web, api):
 
 
 @pytest.mark.django_db
-def test_approve_ignores_an_unknown_code(web):
+def test_approve_ignores_an_unknown_code(web, api):
+    """Assert the redirect target, not the rendered context.
+
+    desktop_confirm's ?result= branch hardcodes 'pairing': None for every
+    result value, so `response.context['pairing'] is None` after follow=True
+    is unconditionally true -- it held just as well when desktop_approve
+    reported this unknown code as 'approved'. Where the POST redirects is
+    the only thing that tells the outcomes apart.
+
+    A real pending pairing exists alongside, so this also pins down that an
+    unknown code decides nothing that does exist.
+    """
+    body = api.post(BEGIN, {}, format='json').json()
     User.objects.create_user('alice', password='secret')
     web.login(username='alice', password='secret')
+
     response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'}, follow=True)
+
     assert response.status_code == 200
-    assert response.context['pairing'] is None
+    assert response.redirect_chain[0][0] == '/desktop/?result=stale'
+    assert DesktopPairing.objects.count() == 1  # nothing created
+    row = DesktopPairing.objects.get()
+    assert row.user_code == body['user_code'].replace('-', '')
+    assert row.status == DesktopPairing.PENDING  # nothing altered
+    assert row.user is None
 
 
 @pytest.mark.django_db
