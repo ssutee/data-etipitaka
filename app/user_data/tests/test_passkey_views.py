@@ -341,6 +341,27 @@ def test_passkey_throttle_scope_resolves_from_settings():
     assert 'passkey' in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
 
 
+@pytest.mark.parametrize('scope', ['login', 'passkey', 'passkey_password', 'passkey_desktop'])
+def test_throttle_rate_is_declared_not_just_created_by_the_test_override(scope):
+    """The *_scope_resolves_from_settings membership checks are weaker than
+    they look: settings.py's pytest branch *assigns* DEFAULT_THROTTLE_RATES[
+    scope] = None for every one of these scopes, which creates the key
+    whether or not the shipped settings declare a rate at all -- so `in`
+    would still hold after the real rate was deleted, and every request in
+    production would then go unlimited. Assert the shipped declaration
+    itself. The pattern is anchored to the start of a line, so neither the
+    override's `REST_FRAMEWORK[...][...] = None` form nor a commented-out
+    entry can satisfy it -- only the live dict entry can.
+    """
+    # os.environ, not settings.SETTINGS_MODULE: conftest's autouse
+    # _passkey_settings fixture puts a UserSettingsHolder in front of the
+    # real settings for every test here, and that holder reports
+    # SETTINGS_MODULE as None.
+    source = Path(import_module(os.environ['DJANGO_SETTINGS_MODULE']).__file__).read_text()
+    pattern = rf"^[ \t]*'{re.escape(scope)}':\s*'\d+/(sec|min|hour|day)'"
+    assert re.search(pattern, source, re.MULTILINE)
+
+
 def test_passkey_endpoints_are_throttled(api, monkeypatch):
     cache.clear()
     monkeypatch.setattr(PasskeyRateThrottle, 'rate', '2/min')
@@ -660,23 +681,6 @@ def test_desktop_endpoints_are_throttled(name):
 def test_passkey_desktop_throttle_scope_resolves_from_settings():
     assert PasskeyDesktopThrottle.scope == 'passkey_desktop'
     assert 'passkey_desktop' in settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
-
-
-def test_passkey_desktop_rate_is_declared_not_just_created_by_the_test_override():
-    """The membership check above is weaker than it looks: settings.py's
-    pytest branch *assigns* DEFAULT_THROTTLE_RATES['passkey_desktop'] = None,
-    which creates the key whether or not the shipped settings declare a rate
-    at all -- so `in` would still hold after the real rate was deleted, and
-    every request in production would then go unlimited. Assert the shipped
-    declaration itself; the override's `[...] = None` form cannot match this
-    pattern, so only the real entry can satisfy it.
-    """
-    # os.environ, not settings.SETTINGS_MODULE: conftest's autouse
-    # _passkey_settings fixture puts a UserSettingsHolder in front of the
-    # real settings for every test here, and that holder reports
-    # SETTINGS_MODULE as None.
-    source = Path(import_module(os.environ['DJANGO_SETTINGS_MODULE']).__file__).read_text()
-    assert re.search(r"'passkey_desktop':\s*'\d+/(sec|min|hour|day)'", source)
 
 
 def test_desktop_begin_is_throttled_by_the_desktop_scope(api, monkeypatch):
