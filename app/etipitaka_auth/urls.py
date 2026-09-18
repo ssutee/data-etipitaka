@@ -77,6 +77,8 @@ urlpatterns = [
     path('api/passkeys/register/begin/', passkey_views.register_begin),
     path('api/passkeys/register/finish/', passkey_views.register_finish),
     path('api/passkeys/password/remove/', passkey_views.password_remove),
+    path('api/passkeys/desktop/begin/', passkey_views.desktop_begin),
+    path('api/passkeys/desktop/poll/', passkey_views.desktop_poll),
     path('o/', include((oauth2_base_urlpatterns + oauth2_urls.dcr_urlpatterns,
                         'oauth2_provider'), namespace='oauth2_provider')),
     path('.well-known/oauth-authorization-server', OAuthServerMetadataView.as_view()),

@@ -15,6 +15,7 @@ never a 500.
 """
 import logging
 
+from django.conf import settings
 from django.contrib.auth import update_session_auth_hash
 from django.utils.translation import gettext as _
 from rest_framework import status
@@ -26,6 +27,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
+from . import desktop_pairing
 from . import passkey_manage as manage
 from . import passkey_service as service
 from .auth_views import _send_verification_email
@@ -272,3 +274,46 @@ def password_remove(request):
         # still has) is what tells the two apart.
         update_session_auth_hash(request, user)
     return Response({'has_password': False})
+
+
+DESKTOP_POLL_INTERVAL = 5  # seconds; the client polls no faster than this
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([])
+@throttle_classes([PasskeyRateThrottle])
+def desktop_begin(request):
+    """Start a desktop sign-in handshake.
+
+    Anonymous: the caller is a desktop app that has nobody signed in yet. The
+    handshake is worthless without the browser leg, where a signed-in human
+    has to confirm the user code.
+    """
+    if _body(request) is None:
+        return _bad_request()
+    device_code, row = desktop_pairing.begin()
+    user_code = desktop_pairing.format_user_code(row.user_code)
+    return Response({
+        'device_code': device_code,
+        'user_code': user_code,
+        'verification_url': '%s/desktop/?code=%s' % (
+            settings.OAUTH_ISSUER_URL, user_code),
+        'interval': DESKTOP_POLL_INTERVAL,
+        'expires_in': settings.PASSKEY_DESKTOP_TTL,
+    })
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([])
+@throttle_classes([PasskeyRateThrottle])
+def desktop_poll(request):
+    data = _body(request)
+    if data is None:
+        return _bad_request()
+    try:
+        return Response(desktop_pairing.redeem(data.get('device_code')))
+    except desktop_pairing.PairingError:
+        return Response({'detail': _('This sign-in request has expired. Please try again.')},
+                        status=status.HTTP_400_BAD_REQUEST)
