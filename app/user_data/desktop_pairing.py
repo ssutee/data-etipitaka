@@ -95,3 +95,26 @@ def begin():
     # broken entropy source. Both need a human, so say so loudly.
     log.error('desktop pairing: exhausted %d user code attempts', _MAX_CODE_ATTEMPTS)
     raise PairingError('exhausted %d user code attempts' % _MAX_CODE_ATTEMPTS)
+
+
+def find_pending(raw_user_code):
+    """The live, still-undecided pairing for this user code, or None."""
+    code = normalise_user_code(raw_user_code)
+    if code is None:
+        return None
+    return (DesktopPairing.objects
+            .filter(user_code=code, status=DesktopPairing.PENDING,
+                    expires_at__gt=timezone.now())
+            .first())
+
+
+def approve(row, user):
+    """Bind the pairing to the signed-in user. The token is minted on redeem."""
+    row.status = DesktopPairing.APPROVED
+    row.user = user
+    row.save(update_fields=['status', 'user'])
+
+
+def deny(row):
+    row.status = DesktopPairing.DENIED
+    row.save(update_fields=['status'])

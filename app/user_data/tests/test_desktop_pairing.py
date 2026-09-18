@@ -133,3 +133,45 @@ def test_begin_raises_when_every_code_collides():
     with patch.object(desktop_pairing, 'new_user_code', return_value=taken):
         with pytest.raises(desktop_pairing.PairingError):
             desktop_pairing.begin()
+
+
+@pytest.mark.django_db
+def test_find_pending_by_user_code():
+    _code, row = desktop_pairing.begin()
+    found = desktop_pairing.find_pending(desktop_pairing.format_user_code(row.user_code))
+    assert found.device_code_hash == row.device_code_hash
+
+
+@pytest.mark.django_db
+def test_find_pending_rejects_unknown_expired_and_decided():
+    assert desktop_pairing.find_pending('K7QP-4M2X') is None
+    assert desktop_pairing.find_pending('not a code') is None
+
+    _code, expired = desktop_pairing.begin()
+    DesktopPairing.objects.filter(pk=expired.pk).update(
+        expires_at=timezone.now() - timedelta(seconds=1))
+    assert desktop_pairing.find_pending(expired.user_code) is None
+
+    _code, decided = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(decided, user)
+    assert desktop_pairing.find_pending(decided.user_code) is None
+
+
+@pytest.mark.django_db
+def test_approve_binds_the_user():
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    desktop_pairing.approve(row, user)
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.APPROVED
+    assert row.user == user
+
+
+@pytest.mark.django_db
+def test_deny_marks_denied_without_a_user():
+    _code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.DENIED
+    assert row.user is None
