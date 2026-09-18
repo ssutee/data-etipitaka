@@ -322,8 +322,16 @@ consumed exactly like an approval — so the very next poll with that device
 code is a 400. A client that keeps polling past a resolution must not read
 that 400 as "still deciding", nor as a fresh failure worth retrying. The row
 is selected `FOR UPDATE` and deleted in the transaction that mints the token,
-so two concurrent polls can never both be served, and a crash mid-request
-leaves the pairing intact to retry.
+so two concurrent polls can never both be served.
+
+**The approved token is delivered at most once, not at least once.** A crash
+*inside* that transaction rolls back and leaves the pairing intact to retry.
+But once it commits, the row is gone — so if the process dies, the connection
+drops, or a proxy times out after COMMIT and before the client has read the
+body, the token is lost to the app: the next poll gets the undifferentiated
+400 and the human has to walk the browser leg again. A client should treat a
+400 immediately following a poll that never returned a body as "start over",
+not as a transient error to retry.
 
 Approval hands over the account's **existing** DRF token
 (`Token.objects.get_or_create`) — the same `key` `/rest-auth/login/` or
@@ -474,15 +482,28 @@ request.
 
 The desktop pairing endpoints use a separate DRF scope, `passkey_desktop`, at
 **90/min**, keyed on client IP (their callers are anonymous) — its own bucket,
-so a second machine behind the same NAT cannot starve the first. Between the
-two layers the ordering is deliberate for *sustained* traffic: nginx's 2 r/s
-sits above DRF's 1.5 r/s, so under a steady poll DRF is the limit that binds
-and nginx stays the coarse edge backstop. It does **not** hold for a burst,
-because the two limiters have different shapes — nginx is a leaky bucket,
-while DRF's `UserRateThrottle` is a sliding window that would pass all 90 in
-the first second. So a flood trips nginx first (measured: first 429 at about
-request 64) and DRF never fires. That is the zone doing its job, not a
-misconfiguration.
+so a second machine behind the same NAT cannot starve the first.
+
+**In practice nginx is the limit that binds on this surface, not DRF.** The
+zone was sized on the opposite intent — 2 r/s above DRF's 1.5 r/s, so that a
+steady poll would be shaped by DRF with nginx as the coarse backstop — but the
+per-worker caveat in the paragraph above defeats that: with three gunicorn
+workers and no shared cache, the 90/min is really ~90/min *per worker*, up to
+~270/min in aggregate, above nginx's 120. Shapes compound it: nginx is a leaky
+bucket while `UserRateThrottle` is a sliding window that passes all 90 in the
+first second, so a burst trips nginx first regardless (measured: first 429 at
+about request 64, DRF never firing). Treat the DRF scope as defence in depth.
+A client should size its behaviour against **120/min sustained, burst 60**.
+
+If DRF *does* fire — it can, on a single worker within one window — the body
+is **not** the nginx shape documented above. It is DRF's own
+`{"detail": "Request was throttled. Expected available in N seconds."}`: no
+`error` key, no `retry_after` key, and a `Retry-After` header computed from the
+remaining sliding window, up to ~60. A client that branches on the JSON
+`retry_after` field will `KeyError` on this path, so read the `Retry-After`
+header and treat a missing `retry_after` body key as "back off by the header".
+The divergence is in the safe direction (it backs off harder), but the two
+shapes are genuinely different and both are reachable.
 
 ## Testing native clients
 
@@ -538,6 +559,17 @@ value); see `docs/remote-mcp-oauth-deploy.md` for the full contract.
 
 Left open deliberately by design review, so the next reader isn't surprised:
 
+- **No shared cache, so every DRF throttle is per gunicorn worker.**
+  `settings.py` configures no `CACHES`, so Django uses per-process
+  `LocMemCache` and `docker-compose.yml` runs `--workers 3`. Every
+  `DEFAULT_THROTTLE_RATES` figure in this document is therefore a
+  *per-worker* figure: the real aggregate ceiling is roughly three times the
+  number quoted. `LocMemCache` also culls at `MAX_ENTRIES = 300`, so beyond a
+  few hundred distinct client IPs throttle history is discarded at random
+  mid-window. nginx's zones are unaffected (its state is shared) and are the
+  limits that actually bind. Configuring a shared cache backend would make the
+  DRF layer behave as its numbers claim; until then, do not rely on a DRF rate
+  as a security control.
 - **Desktop pairing is phishable, and the prefilled code is why.** The
   confirmation code is the whole defence: an attacker who starts their own
   pairing sees a different code from the one on the victim's screen. But the
