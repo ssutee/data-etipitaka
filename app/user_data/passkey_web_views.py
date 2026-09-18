@@ -17,10 +17,10 @@ import logging
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, RawPostDataException, UnreadablePostError
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.utils.translation import gettext as _
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 
 from . import desktop_pairing
 from . import passkey_service as service
@@ -108,6 +108,15 @@ def account_security(request):
     return render(request, 'account_security.html', {})
 
 
+def _no_store(response):
+    """These pages show a username and a live pairing code; a shared browser
+    must not replay them to the next visitor. Same reasoning as login_passkey.
+    """
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
 @login_required
 @ensure_csrf_cookie
 # login_required wraps ensure_csrf_cookie for the same reason as
@@ -115,12 +124,23 @@ def account_security(request):
 # a CSRF cookie is ever minted for them. /login/ offers passkey sign-in, so
 # that bounce is where the passkey ceremony actually happens.
 def desktop_confirm(request):
+    # After a decision we redirect back here with ?result=..., so a refresh
+    # re-runs a harmless GET instead of re-POSTing a decision that has already
+    # been made (and would then read as "expired").
+    result = request.GET.get('result')
+    if result in ('approved', 'denied', 'stale'):
+        return _no_store(render(request, 'desktop_confirm.html', {
+            'pairing': None,
+            'user_code': '',
+            'decided': result != 'stale',
+            'approved': result == 'approved',
+        }))
     pairing = desktop_pairing.find_pending(request.GET.get('code', ''))
-    return render(request, 'desktop_confirm.html', {
+    return _no_store(render(request, 'desktop_confirm.html', {
         'pairing': pairing,
         'user_code': (desktop_pairing.format_user_code(pairing.user_code)
                       if pairing else ''),
-    })
+    }))
 
 
 @require_POST
@@ -131,20 +151,19 @@ def desktop_approve(request):
 
     Anything other than action=approve denies: a user who did not start a
     sign-in on a computer should end up denying, and so should a mangled form.
+
+    Redirects rather than rendering, so a refresh cannot re-submit the
+    decision. 'stale' means the pairing was decided by another tab or consumed
+    by a concurrent poll between lookup and write.
     """
     pairing = desktop_pairing.find_pending(request.POST.get('code', ''))
     approving = request.POST.get('action') == 'approve'
-    # approve()/deny() return False when the pairing was decided by another tab
-    # or deleted by a concurrent redeem() since find_pending() saw it. Report
-    # the outcome of the write, not the outcome of the lookup -- otherwise the
-    # page cheerfully says "signed in" for a decision that never landed.
     applied = False
     if pairing is not None:
         applied = (desktop_pairing.approve(pairing, request.user) if approving
                    else desktop_pairing.deny(pairing))
-    return render(request, 'desktop_confirm.html', {
-        'pairing': None,
-        'user_code': '',
-        'decided': applied,
-        'approved': applied and approving,
-    })
+    if not applied:
+        result = 'stale'
+    else:
+        result = 'approved' if approving else 'denied'
+    return _no_store(redirect('/desktop/?result=' + result))

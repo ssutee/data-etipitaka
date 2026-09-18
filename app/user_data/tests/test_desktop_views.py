@@ -148,7 +148,7 @@ def test_approve_binds_the_pairing_to_the_signed_in_user(web, api):
     user = User.objects.create_user('alice', password='secret')
     web.login(username='alice', password='secret')
 
-    response = web.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+    response = web.post(APPROVE, {'code': body['user_code'], 'action': 'approve'}, follow=True)
 
     assert response.status_code == 200
     row = DesktopPairing.objects.get()
@@ -179,6 +179,40 @@ def test_approve_requires_a_signed_in_user(web, api):
 def test_approve_ignores_an_unknown_code(web):
     User.objects.create_user('alice', password='secret')
     web.login(username='alice', password='secret')
-    response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'})
+    response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'}, follow=True)
     assert response.status_code == 200
     assert response.context['pairing'] is None
+
+
+@pytest.mark.django_db
+def test_approve_requires_a_csrf_token(api):
+    # The `web` fixture's plain Client() disables CSRF checks entirely, so
+    # without this test @csrf_protect could be deleted and the suite stay
+    # green. A forged cross-site POST here would bind a token-granting
+    # pairing to the victim's account, so it is worth pinning down.
+    strict = Client(enforce_csrf_checks=True)
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    strict.login(username='alice', password='secret')
+
+    response = strict.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+
+    assert response.status_code == 403
+    assert DesktopPairing.objects.get().status == DesktopPairing.PENDING
+
+
+@pytest.mark.django_db
+def test_approve_accepts_a_valid_csrf_token(api):
+    strict = Client(enforce_csrf_checks=True)
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    strict.login(username='alice', password='secret')
+    strict.get(CONFIRM + '?code=' + body['user_code'])  # mints the CSRF cookie
+    token = strict.cookies['csrftoken'].value
+
+    response = strict.post(
+        APPROVE, {'code': body['user_code'], 'action': 'approve'},
+        HTTP_X_CSRFTOKEN=token, follow=True)
+
+    assert response.status_code == 200
+    assert DesktopPairing.objects.get().status == DesktopPairing.APPROVED
