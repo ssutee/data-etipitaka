@@ -175,3 +175,44 @@ def test_deny_marks_denied_without_a_user():
     row.refresh_from_db()
     assert row.status == DesktopPairing.DENIED
     assert row.user is None
+
+
+@pytest.mark.django_db
+def test_find_pending_excludes_a_denied_pairing():
+    # The approved case is covered above; this is the other half of the
+    # status=PENDING filter, and "user pressed No, is the code live again?"
+    # is exactly the question worth pinning down.
+    _code, row = desktop_pairing.begin()
+    desktop_pairing.deny(row)
+    assert desktop_pairing.find_pending(row.user_code) is None
+
+
+@pytest.mark.django_db
+def test_find_pending_accepts_the_code_as_a_url_would_carry_it():
+    _code, row = desktop_pairing.begin()
+    lowered = desktop_pairing.format_user_code(row.user_code).lower()
+    found = desktop_pairing.find_pending(lowered)
+    assert found is not None
+    assert found.device_code_hash == row.device_code_hash
+
+
+@pytest.mark.django_db
+def test_deciding_twice_does_not_flip_the_status():
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    assert desktop_pairing.deny(row) is True
+    assert desktop_pairing.approve(row, user) is False
+    row.refresh_from_db()
+    assert row.status == DesktopPairing.DENIED
+    assert row.user is None
+
+
+@pytest.mark.django_db
+def test_deciding_a_vanished_pairing_reports_false():
+    # What a concurrent redeem() deleting the row looks like from here: no
+    # DatabaseError, just False.
+    _code, row = desktop_pairing.begin()
+    user = User.objects.create_user('alice', password='x')
+    DesktopPairing.objects.filter(pk=row.pk).delete()
+    assert desktop_pairing.approve(row, user) is False
+    assert desktop_pairing.deny(row) is False

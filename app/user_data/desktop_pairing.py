@@ -109,12 +109,25 @@ def find_pending(raw_user_code):
 
 
 def approve(row, user):
-    """Bind the pairing to the signed-in user. The token is minted on redeem."""
-    row.status = DesktopPairing.APPROVED
-    row.user = user
-    row.save(update_fields=['status', 'user'])
+    """Bind the pairing to the signed-in user, if it is still pending.
+
+    A conditional update rather than save(update_fields=...): between
+    find_pending() and here the row can be decided by another tab or deleted
+    outright by a concurrent redeem(). save() would raise DatabaseError on a
+    vanished row (a 500 on the confirmation page) and would happily flip an
+    already-decided row's status back. Mirrors passkey_manage.rename_passkey().
+
+    Returns True if this call is the one that decided the pairing.
+    """
+    return DesktopPairing.objects.filter(
+        pk=row.pk, status=DesktopPairing.PENDING,
+    ).update(status=DesktopPairing.APPROVED, user=user) == 1
 
 
 def deny(row):
-    row.status = DesktopPairing.DENIED
-    row.save(update_fields=['status'])
+    """Refuse the pairing, if it is still pending. See approve() on why this is
+    a conditional update. Returns True if this call is the one that decided it.
+    """
+    return DesktopPairing.objects.filter(
+        pk=row.pk, status=DesktopPairing.PENDING,
+    ).update(status=DesktopPairing.DENIED) == 1
