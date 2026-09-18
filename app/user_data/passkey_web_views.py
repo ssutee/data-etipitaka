@@ -22,6 +22,7 @@ from django.utils.translation import gettext as _
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
+from . import desktop_pairing
 from . import passkey_service as service
 from .views import _safe_redirect_target
 
@@ -105,3 +106,45 @@ def login_passkey(request):
 # own cookie for that visitor instead.
 def account_security(request):
     return render(request, 'account_security.html', {})
+
+
+@login_required
+@ensure_csrf_cookie
+# login_required wraps ensure_csrf_cookie for the same reason as
+# account_security above: an anonymous visitor is bounced to LOGIN_URL before
+# a CSRF cookie is ever minted for them. /login/ offers passkey sign-in, so
+# that bounce is where the passkey ceremony actually happens.
+def desktop_confirm(request):
+    pairing = desktop_pairing.find_pending(request.GET.get('code', ''))
+    return render(request, 'desktop_confirm.html', {
+        'pairing': pairing,
+        'user_code': (desktop_pairing.format_user_code(pairing.user_code)
+                      if pairing else ''),
+    })
+
+
+@require_POST
+@csrf_protect
+@login_required
+def desktop_approve(request):
+    """Bind a pairing to this session's user, or refuse it.
+
+    Anything other than action=approve denies: a user who did not start a
+    sign-in on a computer should end up denying, and so should a mangled form.
+    """
+    pairing = desktop_pairing.find_pending(request.POST.get('code', ''))
+    approving = request.POST.get('action') == 'approve'
+    # approve()/deny() return False when the pairing was decided by another tab
+    # or deleted by a concurrent redeem() since find_pending() saw it. Report
+    # the outcome of the write, not the outcome of the lookup -- otherwise the
+    # page cheerfully says "signed in" for a decision that never landed.
+    applied = False
+    if pairing is not None:
+        applied = (desktop_pairing.approve(pairing, request.user) if approving
+                   else desktop_pairing.deny(pairing))
+    return render(request, 'desktop_confirm.html', {
+        'pairing': None,
+        'user_code': '',
+        'decided': applied,
+        'approved': applied and approving,
+    })

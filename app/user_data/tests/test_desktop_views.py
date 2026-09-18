@@ -1,5 +1,6 @@
 import pytest
 from django.contrib.auth.models import User
+from django.test import Client
 from rest_framework.test import APIClient
 
 from user_data import desktop_pairing
@@ -7,11 +8,18 @@ from user_data.models import DesktopPairing
 
 BEGIN = '/api/passkeys/desktop/begin/'
 POLL = '/api/passkeys/desktop/poll/'
+CONFIRM = '/desktop/'
+APPROVE = '/desktop/approve/'
 
 
 @pytest.fixture
 def api():
     return APIClient()
+
+
+@pytest.fixture
+def web():
+    return Client()
 
 
 @pytest.mark.django_db
@@ -102,3 +110,75 @@ def test_poll_rejects_a_code_that_was_already_redeemed(api):
     assert first.status_code == 200
     assert first.json()['status'] == 'approved'
     assert second.status_code == 400
+
+
+@pytest.mark.django_db
+def test_confirm_redirects_an_anonymous_visitor_to_login(web):
+    response = web.get(CONFIRM + '?code=K7QP-4M2X')
+    assert response.status_code == 302
+    assert '/login/' in response['Location']
+
+
+@pytest.mark.django_db
+def test_confirm_shows_the_code_and_the_account(web, api):
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+
+    response = web.get(CONFIRM + '?code=' + body['user_code'])
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert body['user_code'] in content
+    assert 'alice' in content
+
+
+@pytest.mark.django_db
+def test_confirm_reports_an_unknown_code(web):
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+    response = web.get(CONFIRM + '?code=ZZZZ-9999')
+    assert response.status_code == 200
+    assert response.context['pairing'] is None
+
+
+@pytest.mark.django_db
+def test_approve_binds_the_pairing_to_the_signed_in_user(web, api):
+    body = api.post(BEGIN, {}, format='json').json()
+    user = User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+
+    response = web.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+
+    assert response.status_code == 200
+    row = DesktopPairing.objects.get()
+    assert row.status == DesktopPairing.APPROVED
+    assert row.user == user
+
+
+@pytest.mark.django_db
+def test_approve_with_deny_marks_denied(web, api):
+    body = api.post(BEGIN, {}, format='json').json()
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+
+    web.post(APPROVE, {'code': body['user_code'], 'action': 'deny'})
+
+    assert DesktopPairing.objects.get().status == DesktopPairing.DENIED
+
+
+@pytest.mark.django_db
+def test_approve_requires_a_signed_in_user(web, api):
+    body = api.post(BEGIN, {}, format='json').json()
+    response = web.post(APPROVE, {'code': body['user_code'], 'action': 'approve'})
+    assert response.status_code == 302
+    assert DesktopPairing.objects.get().status == DesktopPairing.PENDING
+
+
+@pytest.mark.django_db
+def test_approve_ignores_an_unknown_code(web):
+    User.objects.create_user('alice', password='secret')
+    web.login(username='alice', password='secret')
+    response = web.post(APPROVE, {'code': 'ZZZZ-9999', 'action': 'approve'})
+    assert response.status_code == 200
+    assert response.context['pairing'] is None

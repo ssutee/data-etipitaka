@@ -51,6 +51,8 @@ urlpatterns = [
     path('login/', views.login_view),
     path('login/passkey/', passkey_web_views.login_passkey),
     path('account/security/', passkey_web_views.account_security),
+    path('desktop/', passkey_web_views.desktop_confirm),
+    path('desktop/approve/', passkey_web_views.desktop_approve),
     path('signup/', TemplateView.as_view(template_name="signup.html")),
     path('signup/validate/', TemplateView.as_view(template_name="validate.html")),
     re_path(r'^account/confirm-email/(?P<key>[^/]+)/$',
